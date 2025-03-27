@@ -400,15 +400,15 @@ if (SLINT_BUILD_RUNTIME)
 
     export(TARGETS Slint librepcbslint
         NAMESPACE Slint:: FILE "${CMAKE_BINARY_DIR}/lib/cmake/Slint/SlintTargets.cmake")
-    install(EXPORT SlintTargets NAMESPACE Slint:: DESTINATION lib/cmake/Slint)
-    install(TARGETS Slint librepcbslint
-        EXPORT SlintTargets LIBRARY DESTINATION lib PUBLIC_HEADER DESTINATION include/slint)
+    #install(EXPORT SlintTargets NAMESPACE Slint:: DESTINATION lib/cmake/Slint)
+    #install(TARGETS Slint librepcbslint
+    #    EXPORT SlintTargets LIBRARY DESTINATION lib PUBLIC_HEADER DESTINATION include/slint)
 
     install(FILES $<TARGET_FILE:${librepcbslint_impl}> TYPE LIB)
 
-    if(WIN32)
-        install(FILES $<TARGET_LINKER_FILE:${librepcbslint_impl}> TYPE LIB)
-    endif()
+    #if(WIN32)
+    #    install(FILES $<TARGET_LINKER_FILE:${librepcbslint_impl}> TYPE LIB)
+    #endif()
 
 endif(SLINT_BUILD_RUNTIME)
 
@@ -416,9 +416,9 @@ include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
 
-if(SLINT_FEATURE_COMPILER AND NOT SLINT_COMPILER)
-    install(PROGRAMS $<TARGET_FILE:slint-compiler> TYPE BIN)
-endif()
+#if(SLINT_FEATURE_COMPILER AND NOT SLINT_COMPILER)
+#    install(PROGRAMS $<TARGET_FILE:slint-compiler> TYPE BIN)
+#endif()
 
 if(SLINT_BUILD_RUNTIME)
 
@@ -467,12 +467,12 @@ if(SLINT_BUILD_RUNTIME)
         COMPATIBILITY SameMajorVersion
     )
 
-    install(FILES
-        "${CMAKE_CURRENT_BINARY_DIR}/lib/cmake/Slint/SlintConfig.cmake"
-        "${CMAKE_CURRENT_BINARY_DIR}/lib/cmake/Slint/SlintConfigVersion.cmake"
-        "${CMAKE_CURRENT_LIST_DIR}/cmake/SlintMacro.cmake"
-        DESTINATION lib/cmake/Slint
-    )
+    #install(FILES
+    #    "${CMAKE_CURRENT_BINARY_DIR}/lib/cmake/Slint/SlintConfig.cmake"
+    #    "${CMAKE_CURRENT_BINARY_DIR}/lib/cmake/Slint/SlintConfigVersion.cmake"
+    #    "${CMAKE_CURRENT_LIST_DIR}/cmake/SlintMacro.cmake"
+    #    DESTINATION lib/cmake/Slint
+    #)
 
 endif(SLINT_BUILD_RUNTIME)
 
