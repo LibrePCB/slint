@@ -189,9 +189,16 @@ component MenuItem {
     //-disallow_global_types_as_child_elements
     //-is_non_item_type
 }
+
+component MenuSeparator {
+    //-disallow_global_types_as_child_elements
+    //-is_non_item_type
+}
+
 component Menu {
     in property <string> title;
     MenuItem {}
+    MenuSeparator {}
     Menu {}
     //-disallow_global_types_as_child_elements
     //-is_non_item_type
@@ -210,12 +217,12 @@ component ContextMenu inherits Empty {
     callback sub-menu(entry: MenuEntry) -> [MenuEntry];
     callback show(position: Point);
     function close() {}
+    function is-open() -> bool {}
 }
 
 // Lowered in lower_menus pass.
 export component ContextMenuInternal inherits ContextMenu {
     in property <[MenuEntry]> entries;
-    function close() {}
     //-default_size_binding:expands_to_parent_geometry
     //-is_internal
 }

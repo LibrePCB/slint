@@ -511,6 +511,14 @@ struct MapModelInner : private_api::ModelChangeListener
 /// example a MapModel can be used to adapt a model that provides numbers to be a model
 /// that exposes all numbers converted to strings, by calling `std::to_string` on each
 /// value given in the mapping lambda expression.
+///
+/// \code
+/// auto source_model = std::make_shared<slint::VectorModel<Person>>(...);
+/// auto mapped_model = std::make_shared<slint::MapModel<Person, SharedString>>(
+///     source_model, [](const Person &person) {
+//          return fmt::format("{} {}", person.first, person.last);
+//      });
+/// \endcode
 template<typename SourceModelData, typename MappedModelData = SourceModelData>
 class MapModel : public Model<MappedModelData>
 {
@@ -686,6 +694,14 @@ struct SortModelInner : private_api::ModelChangeListener
 /// The SortModel acts as an adapter model for a given source model by sorting all rows
 /// with by order provided by the given sorting function. The sorting function is called for
 /// pairs of elements of the source model.
+///
+/// \code
+/// auto source_model = std::make_shared<slint::VectorModel<SharedString>>(
+//      std::vector<SharedString> { "lorem", "ipsum", "dolor" });
+/// auto sorted_model = std::make_shared<slint::SortModel<SharedString>>(
+///     source_model, [](auto lhs, auto rhs) { return lhs < rhs; }));
+/// \endcode
+
 template<typename ModelData>
 class SortModel : public Model<ModelData>
 {
@@ -776,6 +792,12 @@ struct ReverseModelInner : private_api::ModelChangeListener
 /// The ReverseModel acts as an adapter model for a given source model by reserving all rows.
 /// This means that the first row in the source model is the last row of this model, the second
 /// row is the second last, and so on.
+///
+/// \code
+/// auto source_model = std::make_shared<slint::VectorModel<int>>(
+//      std::vector<int> { 1, 2, 3, 4, 5 });
+/// auto reversed_model = std::make_shared<slint::ReverseModel<int>>(source_model);
+/// \endcode
 template<typename ModelData>
 class ReverseModel : public Model<ModelData>
 {
@@ -830,6 +852,10 @@ class Repeater
 
         void row_added(size_t index, size_t count) override
         {
+            if (index > data.size()) {
+                // Can happen before ensure_updated was called
+                return;
+            }
             is_dirty.set(true);
             data.resize(data.size() + count);
             std::rotate(data.begin() + index, data.end() - count, data.end());
@@ -840,6 +866,9 @@ class Repeater
         }
         void row_changed(size_t index) override
         {
+            if (index >= data.size()) {
+                return;
+            }
             auto &c = data[index];
             if (model && c.ptr) {
                 (*c.ptr)->update_data(index, *model->row_data(index));
@@ -850,6 +879,10 @@ class Repeater
         }
         void row_removed(size_t index, size_t count) override
         {
+            if (index + count > data.size()) {
+                // Can happen before ensure_updated was called
+                return;
+            }
             is_dirty.set(true);
             data.erase(data.begin() + index, data.begin() + index + count);
             for (std::size_t i = index; i < data.size(); ++i) {

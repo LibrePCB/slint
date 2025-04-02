@@ -8,6 +8,7 @@ export component MenuBarItem {
     in property <MenuEntry> entry <=> base.entry;
 
     callback clicked <=> base.clicked;
+    callback hovered <=> base.hovered;
 
     min-width: base.min-width;
     min-height: base.min-height;
@@ -62,6 +63,7 @@ export component MenuItem {
             default-foreground: MaterialPalette.foreground;
             current-foreground: MaterialPalette.foreground;
             current-background: MaterialPalette.surface-container-highest;
+            separator-color: MaterialPalette.border;
             font-size: MaterialFontSettings.body-large.font-size;
             font-weight: MaterialFontSettings.body-large.font-weight;
             padding-left: 12px;

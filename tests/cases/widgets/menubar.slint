@@ -13,9 +13,10 @@ export component TestCase inherits Window {
     MenuBar {
         Menu {
             title: "File";
+            MenuSeparator {} // should be hidden
             MenuItem {
                 title: "New";
-                activated => { debug("New"); }
+                activated => { result += "New"; debug("New"); }
             }
             MenuItem {
                 title: "Open";
@@ -40,6 +41,8 @@ export component TestCase inherits Window {
                     activated => { open-recent("Recent 3"); }
                 }
             }
+            MenuSeparator {}
+            MenuSeparator {}
             MenuItem {
                 title: "Save";
                 activated => { debug("Save"); }
@@ -83,6 +86,14 @@ slint_testing::send_keyboard_string_sequence(&instance, &SharedString::from(Key:
 assert_eq!(instance.get_result(), "");
 slint_testing::send_keyboard_string_sequence(&instance, &SharedString::from("\n"));
 assert_eq!(instance.get_result(), "Recent 3");
+
+instance.set_result("".into());
+//click on the file menu
+slint_testing::send_mouse_click(&instance, 10., 16.);
+assert_eq!(instance.get_result(), "");
+// click on the first entry (new)  (this value seems to work with all styles)
+slint_testing::send_mouse_click(&instance, 30., 49.);
+assert_eq!(instance.get_result(), "New");
 ```
 
 ```cpp
@@ -100,5 +111,13 @@ slint_testing::send_keyboard_string_sequence(&instance, slint::platform::key_cod
 assert_eq(instance.get_result(), "");
 slint_testing::send_keyboard_string_sequence(&instance, "\n");
 assert_eq(instance.get_result(), "Recent 3");
+
+instance.set_result("");
+//click on the file menu
+slint_testing::send_mouse_click(&instance, 10., 16.);
+assert_eq(instance.get_result(), "");
+// click on the first entry (new)  (this value seems to work with all styles)
+slint_testing::send_mouse_click(&instance, 30., 49.);
+assert_eq(instance.get_result(), "New");
 ```
 */
