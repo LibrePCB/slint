@@ -142,11 +142,17 @@ pub struct CompilerConfiguration {
     #[cfg(feature = "bundle-translations")]
     pub translation_path_bundle: Option<std::path::PathBuf>,
 
+    /// Do not generate the hook to create native menus
+    pub no_native_menu: bool,
+
     /// C++ namespace
     pub cpp_namespace: Option<String>,
 
     /// Generate debug information for elements (ids, type names)
     pub debug_info: bool,
+
+    /// Generate debug hooks to inspect/override properties.
+    pub debug_hooks: Option<std::hash::RandomState>,
 
     pub components_to_generate: ComponentSelection,
 
@@ -224,8 +230,10 @@ impl CompilerConfiguration {
             accessibility: true,
             enable_experimental,
             translation_domain: None,
+            no_native_menu: false,
             cpp_namespace,
             debug_info,
+            debug_hooks: None,
             components_to_generate: ComponentSelection::ExportedWindows,
             #[cfg(feature = "software-renderer")]
             font_cache: Default::default(),

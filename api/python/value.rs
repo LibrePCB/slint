@@ -3,6 +3,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use pyo3::IntoPyObjectExt;
 use pyo3_stub_gen::{derive::gen_stub_pyclass, derive::gen_stub_pymethods};
 
 use std::collections::HashMap;
@@ -11,56 +12,53 @@ use std::collections::HashMap;
 pub struct PyValue(pub slint_interpreter::Value);
 struct PyValueRef<'a>(&'a slint_interpreter::Value);
 
-impl IntoPy<PyObject> for PyValue {
-    fn into_py(self, py: Python<'_>) -> PyObject {
+impl<'py> IntoPyObject<'py> for PyValue {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         // Share the conversion code below that operates on the reference
-        self.to_object(py).into_py(py)
+        PyValueRef(&self.0).into_pyobject(py)
     }
 }
 
-impl ToPyObject for PyValue {
-    fn to_object(&self, py: Python<'_>) -> PyObject {
-        PyValueRef(&self.0).to_object(py)
-    }
-}
+impl<'a, 'py> IntoPyObject<'py> for PyValueRef<'a> {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
 
-impl IntoPy<PyObject> for PyValueRef<'_> {
-    fn into_py(self, py: Python<'_>) -> PyObject {
-        // Share the conversion code below that operates on the reference
-        self.to_object(py).into_py(py)
-    }
-}
-
-impl ToPyObject for PyValueRef<'_> {
-    fn to_object(&self, py: Python<'_>) -> PyObject {
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         match &self.0 {
-            slint_interpreter::Value::Void => ().into_py(py),
-            slint_interpreter::Value::Number(num) => num.into_py(py),
-            slint_interpreter::Value::String(str) => str.into_py(py),
-            slint_interpreter::Value::Bool(b) => b.into_py(py),
+            slint_interpreter::Value::Void => ().into_bound_py_any(py),
+            slint_interpreter::Value::Number(num) => num.into_bound_py_any(py),
+            slint_interpreter::Value::String(str) => str.into_bound_py_any(py),
+            slint_interpreter::Value::Bool(b) => b.into_bound_py_any(py),
             slint_interpreter::Value::Image(image) => {
-                crate::image::PyImage::from(image).into_py(py)
+                crate::image::PyImage::from(image).into_bound_py_any(py)
             }
             slint_interpreter::Value::Model(model) => {
-                crate::models::PyModelShared::rust_into_js_model(model)
-                    .unwrap_or_else(|| crate::models::ReadOnlyRustModel::from(model).into_py(py))
+                crate::models::PyModelShared::rust_into_js_model(model, py).map_or_else(
+                    || crate::models::ReadOnlyRustModel::from(model).into_bound_py_any(py),
+                    |m| Ok(m),
+                )
             }
             slint_interpreter::Value::Struct(structval) => {
-                PyStruct { data: structval.clone() }.into_py(py)
+                PyStruct { data: structval.clone() }.into_bound_py_any(py)
             }
             slint_interpreter::Value::Brush(brush) => {
-                crate::brush::PyBrush::from(brush.clone()).into_py(py)
+                crate::brush::PyBrush::from(brush.clone()).into_bound_py_any(py)
             }
             v @ _ => {
                 eprintln!("Python: conversion from slint to python needed for {v:#?} and not implemented yet");
-                ().into_py(py)
+                ().into_bound_py_any(py)
             }
         }
     }
 }
 
-impl FromPyObject<'_> for PyValue {
-    fn extract(ob: &PyAny) -> PyResult<Self> {
+impl<'py> FromPyObject<'py> for PyValue {
+    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
         if ob.is_none() {
             return Ok(slint_interpreter::Value::Void.into());
         }
@@ -98,19 +96,18 @@ impl FromPyObject<'_> for PyValue {
                 })
             })
             .or_else(|_| {
-                ob.extract::<&PyDict>().and_then(|dict| {
-                    let dict_items: Result<Vec<(String, slint_interpreter::Value)>, PyErr> = dict
-                        .iter()
-                        .map(|(name, pyval)| {
-                            let name = name.extract::<&str>()?.to_string();
-                            let slintval = PyValue::extract(pyval)?;
-                            Ok((name, slintval.0))
-                        })
-                        .collect::<Result<Vec<(_, _)>, PyErr>>();
-                    Ok(slint_interpreter::Value::Struct(slint_interpreter::Struct::from_iter(
-                        dict_items?.into_iter(),
-                    )))
-                })
+                let dict = ob.downcast::<PyDict>()?;
+                let dict_items: Result<Vec<(String, slint_interpreter::Value)>, PyErr> = dict
+                    .iter()
+                    .map(|(name, pyval)| {
+                        let name = name.extract::<&str>()?.to_string();
+                        let slintval = PyValue::extract_bound(&pyval)?;
+                        Ok((name, slintval.0))
+                    })
+                    .collect::<Result<Vec<(_, _)>, PyErr>>();
+                Ok::<_, PyErr>(slint_interpreter::Value::Struct(
+                    slint_interpreter::Struct::from_iter(dict_items?.into_iter()),
+                ))
             })?;
 
         Ok(PyValue(interpreter_val))

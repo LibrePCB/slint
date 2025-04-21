@@ -983,22 +983,6 @@ impl ComponentDefinition {
         })
     }
 
-    /// Instantiate the component for wasm using the given canvas id
-    #[cfg(target_arch = "wasm32")]
-    pub fn create_with_canvas_id(
-        &self,
-        canvas_id: &str,
-    ) -> Result<ComponentInstance, PlatformError> {
-        generativity::make_guard!(guard);
-        Ok(ComponentInstance {
-            inner: self
-                .inner
-                .unerase(guard)
-                .clone()
-                .create(WindowOptions::CreateWithCanvasId(canvas_id.into()))?,
-        })
-    }
-
     /// Instantiate the component using an existing window.
     #[doc(hidden)]
     #[cfg(feature = "internal")]
@@ -1658,15 +1642,6 @@ pub fn run_event_loop() -> Result<(), PlatformError> {
 pub fn spawn_local<F: Future + 'static>(fut: F) -> Result<JoinHandle<F::Output>, EventLoopError> {
     i_slint_backend_selector::with_global_context(|ctx| ctx.spawn_local(fut))
         .map_err(|_| EventLoopError::NoEventLoopProvider)?
-}
-
-#[cfg(all(feature = "internal", target_arch = "wasm32"))]
-/// Spawn the event loop.
-///
-/// Like [`run_event_loop()`], but returns immediately as the loop is running within
-/// the browser's runtime
-pub fn spawn_event_loop() -> Result<(), PlatformError> {
-    i_slint_backend_selector::with_platform(|_| i_slint_backend_winit::spawn_event_loop())
 }
 
 /// This module contains a few functions used by the tests

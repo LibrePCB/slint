@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::{collections::HashMap, iter::once, rc::Rc};
 
-use i_slint_compiler::parser::{syntax_nodes, SyntaxKind, TextRange};
+use i_slint_compiler::parser::TextRange;
 use i_slint_compiler::{expression_tree, langtype, literals};
+
 use itertools::Itertools;
-use lsp_types::Url;
 use slint::{Model, ModelRc, SharedString, ToSharedString, VecModel};
 use slint_interpreter::{DiagnosticLevel, PlatformError};
 use smol_str::SmolStr;
@@ -18,6 +18,9 @@ use crate::preview::{self, preview_data, properties, SelectionNotification};
 
 #[cfg(target_arch = "wasm32")]
 use crate::wasm_prelude::*;
+
+mod gradient;
+mod property_view;
 
 slint::include_modules!();
 
@@ -114,7 +117,7 @@ pub fn create_ui(style: String, experimental: bool) -> Result<PreviewUi, Platfor
         r: c.red() as i32,
         g: c.green() as i32,
         b: c.blue() as i32,
-        text: color_to_string(c).into(),
+        text: color_to_string(c),
         short_text: color_to_short_string(c).into(),
     });
     api.on_rgba_to_color(|r, g, b, a| {
@@ -132,20 +135,12 @@ pub fn create_ui(style: String, experimental: bool) -> Result<PreviewUi, Platfor
     api.on_as_json_brush(as_json_brush);
     api.on_as_slint_brush(as_slint_brush);
     api.on_create_brush(create_brush);
-    api.on_add_gradient_stop(|model, value| {
-        let m = model.as_any().downcast_ref::<VecModel<_>>().unwrap();
-        m.push(value);
-        (m.row_count() - 1) as i32
-    });
-    api.on_remove_gradient_stop(|model, row| {
-        if row <= 0 {
-            return;
-        }
-        let row = row as usize;
-        if row < model.row_count() {
-            model.as_any().downcast_ref::<VecModel<GradientStop>>().unwrap().remove(row as usize);
-        }
-    });
+    api.on_add_gradient_stop(gradient::add_gradient_stop);
+    api.on_remove_gradient_stop(gradient::remove_gradient_stop);
+    api.on_move_gradient_stop(gradient::move_gradient_stop);
+    api.on_suggest_gradient_stop_at_row(gradient::suggest_gradient_stop_at_row);
+    api.on_suggest_gradient_stop_at_position(gradient::suggest_gradient_stop_at_position);
+    api.on_clone_gradient_stops(gradient::clone_gradient_stops);
 
     #[cfg(target_vendor = "apple")]
     api.set_control_key_name("command".into());
@@ -283,10 +278,10 @@ pub fn ui_set_known_components(
     let mut all_components = Vec::with_capacity(
         builtin_components.len() + library_components.len() + file_components.len(),
     );
-    all_components.extend_from_slice(&builtin_components);
-    all_components.extend_from_slice(&std_widgets_components);
-    all_components.extend_from_slice(&library_components);
-    all_components.extend_from_slice(&file_components);
+    all_components.extend_from_slice(&builtin_components[..]);
+    all_components.extend_from_slice(&std_widgets_components[..]);
+    all_components.extend_from_slice(&library_components[..]);
+    all_components.extend_from_slice(&file_components[..]);
 
     let result = Rc::new(VecModel::from(all_components));
     let api = ui.global::<Api>();
@@ -298,110 +293,6 @@ fn to_ui_range(r: TextRange) -> Option<Range> {
         start: i32::try_from(u32::from(r.start())).ok()?,
         end: i32::try_from(u32::from(r.end())).ok()?,
     })
-}
-
-fn map_property_declaration(
-    document_cache: &common::DocumentCache,
-    declared_at: &Option<properties::DeclarationInformation>,
-    defined_at: PropertyDefinition,
-) -> Option<PropertyDeclaration> {
-    let da = declared_at.as_ref()?;
-    let source_version = document_cache.document_version_by_path(&da.path).unwrap_or(-1);
-    let pos = TextRange::new(da.start_position, da.start_position);
-
-    Some(PropertyDeclaration {
-        defined_at,
-        source_path: da.path.to_string_lossy().to_string().into(),
-        source_version,
-        range: to_ui_range(pos)?,
-    })
-}
-
-fn extract_tr_data(tr_node: &syntax_nodes::AtTr, value: &mut PropertyValue) {
-    let Some(text) = tr_node
-        .child_text(SyntaxKind::StringLiteral)
-        .and_then(|s| i_slint_compiler::literals::unescape_string(&s))
-    else {
-        return;
-    };
-
-    let context = tr_node
-        .TrContext()
-        .and_then(|n| n.child_text(SyntaxKind::StringLiteral))
-        .and_then(|s| i_slint_compiler::literals::unescape_string(&s))
-        .unwrap_or_default();
-    let plural = tr_node
-        .TrPlural()
-        .and_then(|n| n.child_text(SyntaxKind::StringLiteral))
-        .and_then(|s| i_slint_compiler::literals::unescape_string(&s))
-        .unwrap_or_default();
-    let plural_expression = tr_node
-        .TrPlural()
-        .and_then(|n| n.child_node(SyntaxKind::Expression))
-        .and_then(|e| e.child_node(SyntaxKind::QualifiedName))
-        .map(|n| i_slint_compiler::object_tree::QualifiedTypeName::from_node(n.into()))
-        .map(|qtn| qtn.to_string());
-
-    // We have expressions -> Edit as code
-    if tr_node.Expression().next().is_none() && (plural.is_empty() || plural_expression.is_some()) {
-        value.kind = PropertyValueKind::String;
-        value.is_translatable = true;
-        value.tr_context = context.as_str().into();
-        value.tr_plural = plural.as_str().into();
-        value.tr_plural_expression = plural_expression.unwrap_or_default().into();
-        value.value_string = text.as_str().into();
-    }
-}
-
-fn convert_number_literal(
-    node: &syntax_nodes::Expression,
-) -> Option<(f64, i_slint_compiler::expression_tree::Unit)> {
-    if let Some(unary) = &node.UnaryOpExpression() {
-        let factor = match unary.first_token().unwrap().text() {
-            "-" => -1.0,
-            "+" => 1.0,
-            _ => return None,
-        };
-        convert_number_literal(&unary.Expression()).map(|(v, u)| (factor * v, u))
-    } else {
-        let literal = node.child_text(SyntaxKind::NumberLiteral)?;
-        let expr = literals::parse_number_literal(literal).ok()?;
-
-        match expr {
-            i_slint_compiler::expression_tree::Expression::NumberLiteral(value, unit) => {
-                Some((value, unit))
-            }
-            _ => None,
-        }
-    }
-}
-
-fn extract_value_with_unit_impl(
-    expression: &Option<syntax_nodes::Expression>,
-    def_val: Option<&expression_tree::Expression>,
-    code: &str,
-    units: &[i_slint_compiler::expression_tree::Unit],
-) -> Option<(PropertyValueKind, f32, i32, String)> {
-    if let Some(expression) = expression {
-        if let Some((value, unit)) = convert_number_literal(expression) {
-            let index = units.iter().position(|u| u == &unit).or_else(|| {
-                (units.is_empty() && unit == i_slint_compiler::expression_tree::Unit::None)
-                    .then_some(0_usize)
-            })?;
-
-            return Some((PropertyValueKind::Float, value as f32, index as i32, unit.to_string()));
-        }
-    } else if code.is_empty() {
-        if let Some(expression_tree::Expression::NumberLiteral(value, unit)) = def_val {
-            let index = units.iter().position(|u| u == unit).unwrap_or(0);
-            return Some((PropertyValueKind::Float, *value as f32, index as i32, String::new()));
-        } else {
-            // FIXME: if def_vale is Some but not a NumberLiteral, we should not show "0"
-            return Some((PropertyValueKind::Float, 0.0, 0, String::new()));
-        }
-    }
-
-    None
 }
 
 fn convert_simple_string(input: SharedString) -> SharedString {
@@ -459,328 +350,6 @@ fn unit_model(units: &[expression_tree::Unit]) -> ModelRc<SharedString> {
         units.iter().map(|u| u.to_string().into()).collect::<Vec<SharedString>>(),
     ))
     .into()
-}
-
-fn extract_value_with_unit(
-    expression: &Option<syntax_nodes::Expression>,
-    def_val: Option<&expression_tree::Expression>,
-    units: &[expression_tree::Unit],
-    value: &mut PropertyValue,
-) {
-    let Some((kind, v, index, unit)) =
-        extract_value_with_unit_impl(expression, def_val, &value.code, units)
-    else {
-        return;
-    };
-
-    value.display_string = slint::format!("{v}{unit}");
-    value.kind = kind;
-    value.value_float = v;
-    value.visual_items = unit_model(units);
-    value.value_int = index
-}
-
-fn extract_color(
-    expression: &syntax_nodes::Expression,
-    kind: PropertyValueKind,
-    value: &mut PropertyValue,
-) -> bool {
-    if let Some(text) = expression.child_text(SyntaxKind::ColorLiteral) {
-        if let Some(color) = string_to_color(&text) {
-            value.display_string = text.as_str().into();
-            value.kind = kind;
-            value.value_brush = slint::Brush::SolidColor(color);
-            value.gradient_stops =
-                Rc::new(VecModel::from(vec![GradientStop { color, position: 0.5 }])).into();
-            return true;
-        }
-    }
-    false
-}
-
-fn set_default_brush(
-    kind: PropertyValueKind,
-    def_val: Option<&expression_tree::Expression>,
-    value: &mut PropertyValue,
-) {
-    use expression_tree::Expression;
-    value.kind = kind;
-    if let Some(mut def_val) = def_val {
-        if let Expression::Cast { from, .. } = def_val {
-            def_val = from;
-        }
-        if let Expression::NumberLiteral(v, _) = def_val {
-            value.value_brush = slint::Brush::SolidColor(slint::Color::from_argb_encoded(*v as _));
-            return;
-        }
-    }
-    value.brush_kind = BrushKind::Solid;
-    let text = "#00000000";
-    let color = string_to_color(&text).unwrap();
-    value.gradient_stops =
-        Rc::new(VecModel::from(vec![GradientStop { color, position: 0.5 }])).into();
-    value.display_string = text.into();
-    value.value_brush = slint::Brush::SolidColor(color);
-}
-
-fn simplify_value(prop_info: &super::properties::PropertyInformation) -> PropertyValue {
-    use i_slint_compiler::expression_tree::Unit;
-    use langtype::Type;
-
-    let code_block_or_expression =
-        prop_info.defined_at.as_ref().map(|da| da.code_block_or_expression.clone());
-    let expression = code_block_or_expression.as_ref().and_then(|cbe| cbe.expression());
-
-    let mut value = PropertyValue {
-        code: code_block_or_expression
-            .as_ref()
-            .map(|cbe| cbe.text().to_string())
-            .unwrap_or_default()
-            .into(),
-        kind: PropertyValueKind::Code,
-        ..Default::default()
-    };
-
-    let def_val = prop_info.default_value.as_ref();
-
-    match &prop_info.ty {
-        Type::Float32 => extract_value_with_unit(&expression, def_val, &[], &mut value),
-        Type::Duration => {
-            extract_value_with_unit(&expression, def_val, &[Unit::S, Unit::Ms], &mut value)
-        }
-        Type::PhysicalLength | Type::LogicalLength | Type::Rem => extract_value_with_unit(
-            &expression,
-            def_val,
-            &[Unit::Px, Unit::Cm, Unit::Mm, Unit::In, Unit::Pt, Unit::Phx, Unit::Rem],
-            &mut value,
-        ),
-        Type::Angle => extract_value_with_unit(
-            &expression,
-            def_val,
-            &[Unit::Deg, Unit::Grad, Unit::Turn, Unit::Rad],
-            &mut value,
-        ),
-        Type::Percent => {
-            extract_value_with_unit(&expression, def_val, &[Unit::Percent], &mut value)
-        }
-        Type::Int32 => {
-            if let Some(expression) = expression {
-                if let Some((v, unit)) = convert_number_literal(&expression) {
-                    if unit == i_slint_compiler::expression_tree::Unit::None {
-                        value.display_string = slint::format!("{v}");
-                        value.kind = PropertyValueKind::Integer;
-                        value.value_int = v as i32;
-                    }
-                }
-            } else if value.code.is_empty() {
-                value.kind = PropertyValueKind::Integer;
-            }
-        }
-        Type::Color => {
-            if let Some(expression) = expression {
-                extract_color(&expression, PropertyValueKind::Color, &mut value);
-                // TODO: Extract `Foo.bar` as Palette `Foo`, entry `bar`.
-                // This makes no sense right now, as we have no way to get any
-                // information on the palettes.
-            } else if value.code.is_empty() {
-                set_default_brush(PropertyValueKind::Color, def_val, &mut value);
-            }
-        }
-        Type::Brush => {
-            if let Some(expression) = expression {
-                extract_color(&expression, PropertyValueKind::Brush, &mut value);
-                // TODO: Handle gradients...
-            } else if value.code.is_empty() {
-                set_default_brush(PropertyValueKind::Brush, def_val, &mut value);
-            }
-        }
-        Type::Bool => {
-            if let Some(expression) = expression {
-                let qualified_name =
-                    expression.QualifiedName().map(|qn| qn.text().to_string()).unwrap_or_default();
-                if ["true", "false"].contains(&qualified_name.as_str()) {
-                    value.kind = PropertyValueKind::Boolean;
-                    value.value_bool = &qualified_name == "true";
-                }
-            } else if value.code.is_empty() {
-                if let Some(expression_tree::Expression::BoolLiteral(v)) = def_val {
-                    value.value_bool = *v;
-                }
-                value.kind = PropertyValueKind::Boolean;
-            }
-        }
-        Type::String => {
-            if let Some(expression) = &expression {
-                if let Some(text) = expression
-                    .child_text(SyntaxKind::StringLiteral)
-                    .and_then(|s| i_slint_compiler::literals::unescape_string(&s))
-                {
-                    value.kind = PropertyValueKind::String;
-                    value.value_string = text.as_str().into();
-                } else if let Some(tr_node) = &expression.AtTr() {
-                    extract_tr_data(tr_node, &mut value)
-                }
-            } else if value.code.is_empty() {
-                if let Some(expression_tree::Expression::StringLiteral(v)) = def_val {
-                    value.value_string = v.as_str().into();
-                }
-                value.kind = PropertyValueKind::String;
-            }
-        }
-        Type::Enumeration(enumeration) => {
-            value.kind = PropertyValueKind::Enum;
-            value.value_string = enumeration.name.as_str().into();
-            value.default_selection = i32::try_from(enumeration.default_value).unwrap_or_default();
-            value.visual_items = Rc::new(VecModel::from(
-                enumeration
-                    .values
-                    .iter()
-                    .map(|s| SharedString::from(s.as_str()))
-                    .collect::<Vec<_>>(),
-            ))
-            .into();
-
-            if let Some(expression) = expression {
-                if let Some(text) = expression
-                    .child_node(SyntaxKind::QualifiedName)
-                    .map(|n| i_slint_compiler::object_tree::QualifiedTypeName::from_node(n.into()))
-                    .map(|n| {
-                        let n_str = n.to_string();
-                        n_str
-                            .strip_prefix(&format!("{}.", enumeration.name))
-                            .map(|s| s.to_string())
-                            .unwrap_or(n_str)
-                    })
-                    .map(|s| s.to_string())
-                {
-                    value.value_int = enumeration
-                        .values
-                        .iter()
-                        .position(|v| v == &text)
-                        .and_then(|v| i32::try_from(v).ok())
-                        .unwrap_or_default();
-                }
-            } else if let Some(expression_tree::Expression::EnumerationValue(v)) = def_val {
-                value.value_int = v.value as i32
-            }
-        }
-        _ => {}
-    }
-
-    value
-}
-
-fn map_property_definition(
-    defined_at: &Option<properties::DefinitionInformation>,
-) -> Option<PropertyDefinition> {
-    let da = defined_at.as_ref()?;
-
-    Some(PropertyDefinition {
-        definition_range: to_ui_range(da.property_definition_range)?,
-        selection_range: to_ui_range(da.selection_range)?,
-        expression_range: to_ui_range(da.code_block_or_expression.text_range())?,
-        expression_value: da.code_block_or_expression.text().to_string().into(),
-    })
-}
-
-fn map_properties_to_ui(
-    document_cache: &common::DocumentCache,
-    properties: Option<properties::QueryPropertyResponse>,
-) -> Option<(ElementInformation, HashMap<SmolStr, PropertyDeclaration>, PropertyGroupModel)> {
-    use std::cmp::Ordering;
-
-    let properties = &properties?;
-    let element = properties.element.as_ref()?;
-
-    let raw_source_uri = Url::parse(&properties.source_uri).ok()?;
-    let source_uri: SharedString = raw_source_uri.to_string().into();
-    let source_version = properties.source_version;
-
-    let mut property_groups: HashMap<(SmolStr, u32), Vec<PropertyInformation>> = HashMap::new();
-
-    let mut declarations = HashMap::new();
-
-    fn property_group_from(
-        groups: &mut HashMap<(SmolStr, u32), Vec<PropertyInformation>>,
-        name: SmolStr,
-        group_priority: u32,
-        property: PropertyInformation,
-    ) {
-        let entry = groups.entry((name.clone(), group_priority));
-        entry.and_modify(|e| e.push(property.clone())).or_insert(vec![property]);
-    }
-
-    for pi in &properties.properties {
-        let defined_at = map_property_definition(&pi.defined_at).unwrap_or(PropertyDefinition {
-            definition_range: Range { start: 0, end: 0 },
-            selection_range: Range { start: 0, end: 0 },
-            expression_range: Range { start: 0, end: 0 },
-            expression_value: String::new().into(),
-        });
-        let declared_at =
-            map_property_declaration(document_cache, &pi.declared_at, defined_at.clone())
-                .unwrap_or(PropertyDeclaration {
-                    defined_at,
-                    source_path: String::new().into(),
-                    source_version: -1,
-                    range: Range { start: 0, end: 0 },
-                });
-
-        declarations.insert(pi.name.clone(), declared_at);
-
-        let value = simplify_value(pi);
-
-        property_group_from(
-            &mut property_groups,
-            pi.group.clone(),
-            pi.group_priority,
-            PropertyInformation {
-                name: pi.name.as_str().into(),
-                type_name: pi.ty.to_string().into(),
-                value,
-                display_priority: i32::try_from(pi.priority).unwrap(),
-            },
-        );
-    }
-
-    let keys = property_groups
-        .keys()
-        .sorted_by(|a, b| match a.1.cmp(&b.1) {
-            Ordering::Less => Ordering::Less,
-            Ordering::Equal => a.0.cmp(&b.0),
-            Ordering::Greater => Ordering::Greater,
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Some((
-        ElementInformation {
-            id: element.id.as_str().into(),
-            type_name: element.type_name.as_str().into(),
-            source_uri,
-            source_version,
-            range: to_ui_range(element.range)?,
-        },
-        declarations,
-        Rc::new(VecModel::from(
-            keys.iter()
-                .map(|k| PropertyGroup {
-                    group_name: k.0.as_str().into(),
-                    properties: Rc::new(VecModel::from({
-                        let mut v = property_groups.remove(k).unwrap();
-                        v.sort_by(|a, b| match a.display_priority.cmp(&b.display_priority) {
-                            Ordering::Less => Ordering::Less,
-                            Ordering::Equal => a.name.cmp(&b.name),
-                            Ordering::Greater => Ordering::Greater,
-                        });
-                        v
-                    }))
-                    .into(),
-                })
-                .collect::<Vec<_>>(),
-        ))
-        .into(),
-    ))
 }
 
 fn is_equal_value(c: &PropertyValue, n: &PropertyValue) -> bool {
@@ -926,7 +495,7 @@ fn map_value_and_type(
             gradient_stops: Rc::new(VecModel::from(vec![GradientStop { color, position: 0.5 }]))
                 .into(),
             code,
-            accessor_path: mapping.name_prefix.clone().into(),
+            accessor_path: mapping.name_prefix.clone(),
             ..Default::default()
         });
     }
@@ -941,7 +510,7 @@ fn map_value_and_type(
                 kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
                 code: get_code(value),
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
         }
@@ -953,7 +522,7 @@ fn map_value_and_type(
                 kind: PropertyValueKind::Integer,
                 value_int: get_value::<i32>(value),
                 code: get_code(value),
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
         }
@@ -967,7 +536,7 @@ fn map_value_and_type(
                 value_int: 0,
                 code: get_code(value),
                 default_selection: 1,
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
         }
@@ -981,7 +550,7 @@ fn map_value_and_type(
                 value_int: 0,
                 code: get_code(value),
                 default_selection: 0,
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
         }
@@ -995,7 +564,7 @@ fn map_value_and_type(
                 value_int: 0,
                 code: get_code(value),
                 default_selection: 0,
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
         }
@@ -1009,7 +578,7 @@ fn map_value_and_type(
                 value_int: 0,
                 code: get_code(value),
                 default_selection: 0,
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
         }
@@ -1023,7 +592,7 @@ fn map_value_and_type(
                 value_int: 0,
                 code: get_code(value),
                 default_selection: 0,
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
         }
@@ -1037,7 +606,7 @@ fn map_value_and_type(
                 value_int: 0,
                 code: get_code(value),
                 default_selection: 0,
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
         }
@@ -1048,7 +617,7 @@ fn map_value_and_type(
                 kind: PropertyValueKind::String,
                 value_string: get_value::<SharedString>(value),
                 code: get_code(value),
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
         }
@@ -1080,7 +649,7 @@ fn map_value_and_type(
                                 .collect::<Vec<_>>(),
                         ))
                         .into(),
-                        accessor_path: mapping.name_prefix.clone().into(),
+                        accessor_path: mapping.name_prefix.clone(),
                         code: get_code(value),
                         ..Default::default()
                     });
@@ -1098,7 +667,7 @@ fn map_value_and_type(
                                 .collect::<Vec<_>>(),
                         ))
                         .into(),
-                        accessor_path: mapping.name_prefix.clone().into(),
+                        accessor_path: mapping.name_prefix.clone(),
                         code: get_code(value),
                         ..Default::default()
                     });
@@ -1109,7 +678,7 @@ fn map_value_and_type(
                         display_string: SharedString::from("Unknown Brush"),
                         kind: PropertyValueKind::Code,
                         value_string: SharedString::from("???"),
-                        accessor_path: mapping.name_prefix.clone().into(),
+                        accessor_path: mapping.name_prefix.clone(),
                         code: get_code(value),
                         ..Default::default()
                     });
@@ -1122,7 +691,7 @@ fn map_value_and_type(
                 display_string: get_value::<bool>(value).to_shared_string(),
                 kind: PropertyValueKind::Boolean,
                 value_bool: get_value::<bool>(value),
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 code: get_code(value),
                 ..Default::default()
             });
@@ -1143,8 +712,7 @@ fn map_value_and_type(
                     "{}.{}",
                     enumeration.name,
                     enumeration.values[selected_value]
-                )
-                .into(),
+                ),
                 kind: PropertyValueKind::Enum,
                 value_string: enumeration.name.as_str().into(),
                 default_selection: i32::try_from(enumeration.default_value).unwrap_or_default(),
@@ -1157,7 +725,7 @@ fn map_value_and_type(
                         .collect::<Vec<_>>(),
                 ))
                 .into(),
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 code: get_code(value),
                 ..Default::default()
             });
@@ -1167,9 +735,9 @@ fn map_value_and_type(
             let model = get_value::<ModelRc<slint_interpreter::Value>>(value);
 
             for (idx, sub_value) in model.iter().enumerate() {
-                let mut sub_mapping = ValueMapping::default();
-                sub_mapping.name_prefix = mapping.name_prefix.clone();
-                map_value_and_type(&array_ty, &Some(sub_value), &mut sub_mapping);
+                let mut sub_mapping =
+                    ValueMapping { name_prefix: mapping.name_prefix.clone(), ..Default::default() };
+                map_value_and_type(array_ty, &Some(sub_value), &mut sub_mapping);
 
                 let sub_mapping_too_complex = sub_mapping.is_array || sub_mapping.is_too_complex;
                 mapping.is_too_complex = mapping.is_too_complex || sub_mapping_too_complex;
@@ -1203,7 +771,7 @@ fn map_value_and_type(
                 sub_mapping.name_prefix = header_name.clone();
 
                 map_value_and_type(
-                    &field_ty,
+                    field_ty,
                     &struct_data.get_field(&field).cloned(),
                     &mut sub_mapping,
                 );
@@ -1231,7 +799,7 @@ fn map_value_and_type(
                 display_string: "Unsupported type".into(),
                 kind: PropertyValueKind::Code,
                 value_string: "???".into(),
-                accessor_path: mapping.name_prefix.clone().into(),
+                accessor_path: mapping.name_prefix.clone(),
                 code: get_code(value),
                 ..Default::default()
             });
@@ -1265,22 +833,25 @@ fn map_preview_data_to_property_value(
     }
 }
 
-fn map_preview_data_property(preview_data: &preview_data::PreviewData) -> Option<PreviewData> {
-    if !preview_data.is_property() {
+fn map_preview_data_property(
+    key: &preview_data::PreviewDataKey,
+    value: &preview_data::PreviewData,
+) -> Option<PreviewData> {
+    if !value.is_property() {
         return None;
     };
 
-    let has_getter = preview_data.has_getter();
-    let has_setter = preview_data.has_setter();
+    let has_getter = value.has_getter();
+    let has_setter = value.has_setter();
 
     let mut mapping = ValueMapping::default();
-    map_value_and_type(&preview_data.ty, &preview_data.value, &mut mapping);
+    map_value_and_type(&value.ty, &value.value, &mut mapping);
 
     let is_array = mapping.array_values.len() != 1 || mapping.array_values[0].len() != 1;
     let is_too_complex = mapping.is_too_complex;
 
     Some(PreviewData {
-        name: preview_data.name.clone().into(),
+        name: SharedString::from(&key.property_name),
         has_getter,
         has_setter,
         kind: match (is_array, is_too_complex) {
@@ -1293,41 +864,45 @@ fn map_preview_data_property(preview_data: &preview_data::PreviewData) -> Option
 
 pub fn ui_set_preview_data(
     ui: &PreviewUi,
-    preview_data: HashMap<preview_data::PropertyContainer, Vec<preview_data::PreviewData>>,
+    preview_data: preview_data::PreviewDataMap,
     previewed_component: Option<String>,
 ) {
-    fn fill_container(
+    fn create_container(
         container_name: String,
-        container_id: String,
-        properties: &[preview_data::PreviewData],
-    ) -> PropertyContainer {
-        let properties =
-            properties.iter().filter_map(map_preview_data_property).collect::<Vec<_>>();
-
-        PropertyContainer {
+        it: &mut dyn Iterator<Item = (&preview_data::PreviewDataKey, &preview_data::PreviewData)>,
+    ) -> Option<PropertyContainer> {
+        let (id, props) = it.filter_map(|(k, v)| Some((k, map_preview_data_property(k, v)?))).fold(
+            (None, vec![]),
+            move |mut acc, (key, value)| {
+                acc.0 = Some(acc.0.unwrap_or_else(|| key.container.clone()));
+                acc.1.push(value);
+                acc
+            },
+        );
+        Some(PropertyContainer {
             container_name: container_name.into(),
-            container_id: container_id.into(),
-            properties: Rc::new(VecModel::from(properties)).into(),
-        }
+            container_id: id?.to_string().into(),
+            properties: Rc::new(VecModel::from(props)).into(),
+        })
     }
 
     let mut result: Vec<PropertyContainer> = vec![];
 
-    if let Some(main) = preview_data.get(&preview_data::PropertyContainer::Main) {
-        let c = fill_container(
-            previewed_component.unwrap_or_else(|| "<MAIN>".to_string()),
-            String::new(),
-            main,
-        );
+    if let Some(c) = create_container(
+        previewed_component.unwrap_or_else(|| "<MAIN>".to_string()),
+        &mut preview_data
+            .iter()
+            .filter(|(k, _)| k.container == preview_data::PropertyContainer::Main),
+    ) {
         result.push(c);
     }
 
-    for component_key in
-        preview_data.keys().filter(|k| **k != preview_data::PropertyContainer::Main)
+    for (k, mut chunk) in &preview_data
+        .iter()
+        .filter(|(k, _)| k.container != preview_data::PropertyContainer::Main)
+        .chunk_by(|(k, _)| k.container.clone())
     {
-        if let Some(component) = preview_data.get(component_key) {
-            let component_key = component_key.to_string();
-            let c = fill_container(component_key.clone(), component_key, component);
+        if let Some(c) = create_container(k.to_string(), &mut chunk) {
             result.push(c);
         }
     }
@@ -1338,7 +913,7 @@ pub fn ui_set_preview_data(
 }
 
 fn to_property_container(container: SharedString) -> preview_data::PropertyContainer {
-    if container.is_empty() {
+    if container.is_empty() || container == "<MAIN>" {
         preview_data::PropertyContainer::Main
     } else {
         preview_data::PropertyContainer::Global(container.to_string())
@@ -1350,12 +925,12 @@ fn get_property_value(container: SharedString, property_name: SharedString) -> P
         .and_then(|component_instance| {
             preview_data::get_preview_data(
                 &component_instance,
-                to_property_container(container),
-                property_name.to_string(),
+                &to_property_container(container),
+                property_name.as_str(),
             )
         })
         .and_then(|pd| map_preview_data_to_property_value(&pd))
-        .unwrap_or_else(Default::default)
+        .unwrap_or_default()
 }
 
 fn map_preview_data_to_property_value_table(
@@ -1375,19 +950,18 @@ fn get_property_value_table(
     container: SharedString,
     property_name: SharedString,
 ) -> PropertyValueTable {
-    let (is_array, mut headers, mut values) = preview::component_instance()
+    let (is_array, headers, mut values) = preview::component_instance()
         .and_then(|component_instance| {
             preview_data::get_preview_data(
                 &component_instance,
-                to_property_container(container),
-                property_name.to_string(),
+                &to_property_container(container),
+                property_name.as_str(),
             )
         })
         .map(|pd| map_preview_data_to_property_value_table(&pd))
         .unwrap_or_else(|| (false, Default::default(), Default::default()));
 
-    let headers =
-        Rc::new(VecModel::from(headers.drain(..).map(|s| s.into()).collect::<Vec<_>>())).into();
+    let headers = Rc::new(VecModel::from(headers)).into();
     let values = Rc::new(VecModel::from(
         values.drain(..).map(|cv| Rc::new(VecModel::from(cv)).into()).collect::<Vec<_>>(),
     ))
@@ -1439,12 +1013,12 @@ fn table_row_to_struct(row: ModelRc<PropertyValue>, indent_level: usize) -> Opti
                 0 => None,
                 1 => {
                     let prev = map
-                        .insert(accessor_path.get(0).unwrap().to_string(), NodeKind::Leaf(value));
+                        .insert(accessor_path.first().unwrap().to_string(), NodeKind::Leaf(value));
                     prev.is_none().then_some(())
                 }
                 _ => {
                     let n = map
-                        .entry(accessor_path.get(0).unwrap().to_string())
+                        .entry(accessor_path.first().unwrap().to_string())
                         .or_insert_with(|| NodeKind::Inner(BTreeMap::default()));
 
                     match n {
@@ -1624,7 +1198,7 @@ fn remove_row_from_value_table(table: PropertyValueTable, to_remove: i32) {
     };
 
     if to_remove < vec_model.row_count() {
-        vec_model.remove(to_remove as usize);
+        vec_model.remove(to_remove);
     }
 }
 
@@ -1653,7 +1227,7 @@ fn set_json_preview_data(
             property_name,
             json,
         ) {
-            Ok(()) => SharedString::new(),
+            Ok(_) => SharedString::new(),
             Err(v) => v.first().cloned().unwrap_or_default().into(),
         }
     } else {
@@ -1686,8 +1260,8 @@ pub fn ui_set_properties(
     document_cache: &common::DocumentCache,
     properties: Option<properties::QueryPropertyResponse>,
 ) -> PropertyDeclarations {
-    let (next_element, declarations, next_model) = map_properties_to_ui(document_cache, properties)
-        .unwrap_or((
+    let (next_element, declarations, next_model) =
+        property_view::map_properties_to_ui(document_cache, properties).unwrap_or((
             ElementInformation {
                 id: "".into(),
                 type_name: "".into(),
@@ -1754,7 +1328,7 @@ fn as_slint_brush(
     }
 
     match kind {
-        BrushKind::Solid => color_to_string(color).into(),
+        BrushKind::Solid => color_to_string(color),
         BrushKind::Linear => {
             format!("@linear-gradient({angle}deg{})", stops_as_string(stops)).into()
         }
@@ -1783,541 +1357,11 @@ fn create_brush(
 
 #[cfg(test)]
 mod tests {
-    use crate::{language::test::loaded_document_cache, preview::preview_data};
-
-    use crate::common;
-    use crate::preview::properties;
+    use crate::preview::preview_data;
 
     use slint::{Model, SharedString, ToSharedString, VecModel};
 
     use super::{PropertyInformation, PropertyValue, PropertyValueKind};
-
-    fn properties_at_position(
-        source: &str,
-        line: u32,
-        character: u32,
-    ) -> Option<(
-        common::ElementRcNode,
-        Vec<properties::PropertyInformation>,
-        common::DocumentCache,
-        lsp_types::Url,
-    )> {
-        let (dc, url, _) = loaded_document_cache(source.to_string());
-        if let Some((e, p)) =
-            properties::tests::properties_at_position_in_cache(line, character, &dc, &url)
-        {
-            Some((e, p, dc, url))
-        } else {
-            None
-        }
-    }
-
-    fn property_conversion_test(contents: &str, property_line: u32) -> PropertyValue {
-        let (_, pi, _, _) = properties_at_position(contents, property_line, 30).unwrap();
-        let test1 = pi.iter().find(|pi| pi.name == "test1").unwrap();
-        super::simplify_value(test1)
-    }
-
-    #[test]
-    fn test_property_bool() {
-        let result =
-            property_conversion_test(r#"export component Test { in property <bool> test1; }"#, 0);
-        assert_eq!(result.kind, PropertyValueKind::Boolean);
-        assert!(!result.value_bool);
-        assert!(result.code.is_empty());
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <bool> test1: true; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Boolean);
-        assert!(result.value_bool);
-        assert!(!result.code.is_empty());
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <bool> test1: false; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Boolean);
-        assert!(!result.value_bool);
-        assert!(!result.code.is_empty());
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <bool> test1: 1.1.round() == 1.1.floor(); }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-        assert!(!result.value_bool);
-        assert!(!result.code.is_empty());
-    }
-
-    #[test]
-    fn test_property_string() {
-        let result =
-            property_conversion_test(r#"export component Test { in property <string> test1; }"#, 0);
-        assert_eq!(result.kind, PropertyValueKind::String);
-        assert!(!result.is_translatable);
-        assert_eq!(result.tr_context, "");
-        assert_eq!(result.tr_plural, "");
-        assert!(!result.value_bool);
-        assert!(result.code.is_empty());
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <string> test1: ""; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::String);
-        assert!(!result.is_translatable);
-        assert_eq!(result.tr_context, "");
-        assert_eq!(result.tr_plural, "");
-        assert!(!result.value_bool);
-        assert!(!result.code.is_empty());
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <string> test1: "string"; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::String);
-        assert!(!result.is_translatable);
-        assert_eq!(result.tr_context, "");
-        assert_eq!(result.tr_plural, "");
-        assert!(!result.value_bool);
-        assert!(!result.code.is_empty());
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <string> test1: "" + "test"); }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-        assert!(!result.is_translatable);
-        assert_eq!(result.tr_context, "");
-        assert_eq!(result.tr_plural, "");
-        assert!(!result.value_bool);
-        assert!(!result.code.is_empty());
-    }
-
-    #[test]
-    fn test_property_tr_string() {
-        let result = property_conversion_test(
-            r#"export component Test { in property <string> test1: @tr("Context" => "test"); }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::String);
-        assert_eq!(result.value_string, "test");
-        assert!(result.is_translatable);
-        assert_eq!(result.tr_context, "Context");
-        assert_eq!(result.tr_plural, "");
-        assert!(!result.code.is_empty());
-
-        let result = property_conversion_test(
-            r#"export component Test {
-    property <int> test: 42;
-    in property <string> test1: @tr("{n} string" | "{n} strings" % test);
-}"#,
-            2,
-        );
-        assert_eq!(result.kind, PropertyValueKind::String);
-        assert!(result.is_translatable);
-        assert_eq!(result.tr_context, "");
-        assert_eq!(result.tr_plural, "{n} strings");
-        assert_eq!(result.tr_plural_expression, "test");
-        assert_eq!(result.value_string, "{n} string");
-        assert!(!result.code.is_empty());
-
-        let result = property_conversion_test(
-            r#"export component Test {
-    property <int> test: 42;
-    in property <string> test1: @tr("{n} string" | "{n} strings" % self.test);
-}"#,
-            2,
-        );
-        assert_eq!(result.kind, PropertyValueKind::String);
-        assert!(result.is_translatable);
-        assert_eq!(result.tr_context, "");
-        assert_eq!(result.tr_plural, "{n} strings");
-        assert_eq!(result.tr_plural_expression, "self.test");
-        assert_eq!(result.value_string, "{n} string");
-        assert!(!result.code.is_empty());
-
-        // `15` is not a qualified name
-        let result = property_conversion_test(
-            r#"export component Test { in property <string> test1: @tr("{n} string" | "{n} strings" % 15); }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-        assert!(!result.is_translatable);
-        assert_eq!(result.tr_context, "");
-        assert_eq!(result.tr_plural, "");
-        assert_eq!(result.value_string, "");
-        assert!(!result.code.is_empty());
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <string> test1: @tr("" + "test"); }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-        assert!(!result.is_translatable);
-        assert_eq!(result.tr_context, "");
-        assert_eq!(result.tr_plural, "");
-        assert_eq!(result.value_string, "");
-        assert!(!result.code.is_empty());
-        let result = property_conversion_test(
-            r#"export component Test { in property <string> test1: @tr("width {}", self.width()); }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-        assert!(!result.is_translatable);
-        assert_eq!(result.tr_context, "");
-        assert_eq!(result.tr_plural, "");
-        assert_eq!(result.value_string, "");
-        assert!(!result.code.is_empty());
-    }
-
-    #[test]
-    fn test_property_enum() {
-        let result = property_conversion_test(
-            r#"export component Test { in property <ImageFit> test1: ImageFit.preserve; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Enum);
-        assert_eq!(result.value_string, "ImageFit");
-        assert_eq!(result.value_int, 3);
-        assert_eq!(result.default_selection, 0);
-        assert!(!result.is_translatable);
-
-        assert_eq!(result.visual_items.row_count(), 4);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <ImageFit> test1: ImageFit   .    /* abc */ preserve; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Enum);
-        assert_eq!(result.value_string, "ImageFit");
-        assert_eq!(result.value_int, 3);
-        assert_eq!(result.default_selection, 0);
-        assert!(!result.is_translatable);
-
-        assert_eq!(result.visual_items.row_count(), 4);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <ImageFit> test1: /* abc */ preserve; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Enum);
-        assert_eq!(result.value_string, "ImageFit");
-        assert_eq!(result.value_int, 3);
-        assert_eq!(result.default_selection, 0);
-        assert!(!result.is_translatable);
-
-        assert_eq!(result.visual_items.row_count(), 4);
-
-        let result = property_conversion_test(
-            r#"enum Foobar { foo, bar }
-export component Test { in property <Foobar> test1: Foobar.bar; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Enum);
-        assert_eq!(result.value_string, "Foobar");
-        assert_eq!(result.value_int, 1);
-        assert_eq!(result.default_selection, 0);
-        assert!(!result.is_translatable);
-
-        assert_eq!(result.visual_items.row_count(), 2);
-        assert_eq!(result.visual_items.row_data(0), Some(SharedString::from("foo")));
-        assert_eq!(result.visual_items.row_data(1), Some(SharedString::from("bar")));
-
-        let result = property_conversion_test(
-            r#"enum Foobar { foo, bar }
-export component Test { in property <Foobar> test1; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Enum);
-        assert_eq!(result.value_string, "Foobar");
-        assert_eq!(result.value_int, 0); // default
-        assert_eq!(result.default_selection, 0);
-        assert!(!result.is_translatable);
-
-        assert_eq!(result.visual_items.row_count(), 2);
-        assert_eq!(result.visual_items.row_data(0), Some(SharedString::from("foo")));
-        assert_eq!(result.visual_items.row_data(1), Some(SharedString::from("bar")));
-    }
-
-    #[test]
-    fn test_property_float() {
-        let result =
-            property_conversion_test(r#"export component Test { in property <float> test1; }"#, 0);
-        assert_eq!(result.kind, PropertyValueKind::Float);
-        assert_eq!(result.value_float, 0.0);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <float> test1: 42.0; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Float);
-        assert_eq!(result.value_float, 42.0);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <float> test1: +42.0; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Float);
-        assert_eq!(result.value_float, 42.0);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <float> test1: -42.0; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Float);
-        assert_eq!(result.value_float, -42.0);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <float> test1: 42.0 * 23.0; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-        assert_eq!(result.value_float, 0.0);
-    }
-
-    #[test]
-    fn test_property_integer() {
-        let result =
-            property_conversion_test(r#"export component Test { in property <int> test1; }"#, 0);
-        assert_eq!(result.kind, PropertyValueKind::Integer);
-        assert_eq!(result.value_int, 0);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <int> test1: 42; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Integer);
-        assert_eq!(result.value_int, 42);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <int> test1: +42; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Integer);
-        assert_eq!(result.value_int, 42);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <int> test1: -42; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Integer);
-        assert_eq!(result.value_int, -42);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <int> test1: 42 * 23; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-        assert_eq!(result.value_int, 0);
-    }
-
-    #[test]
-    fn test_property_color() {
-        let result =
-            property_conversion_test(r#"export component Test { in property <color> test1; }"#, 0);
-        assert_eq!(result.kind, PropertyValueKind::Color);
-        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
-        assert_eq!(result.value_brush.color().red(), 0);
-        assert_eq!(result.value_brush.color().green(), 0);
-        assert_eq!(result.value_brush.color().blue(), 0);
-        assert_eq!(result.value_brush.color().alpha(), 0);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <color> test1: #10203040; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Color);
-        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
-        assert_eq!(result.value_brush.color().red(), 0x10);
-        assert_eq!(result.value_brush.color().green(), 0x20);
-        assert_eq!(result.value_brush.color().blue(), 0x30);
-        assert_eq!(result.value_brush.color().alpha(), 0x40);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <color> test1: #10203040.darker(0.5); }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <color> test1: Colors.red; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-    }
-
-    #[test]
-    fn test_property_brush() {
-        let result =
-            property_conversion_test(r#"export component Test { in property <brush> test1; }"#, 0);
-        assert_eq!(result.kind, PropertyValueKind::Brush);
-        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
-        assert_eq!(result.value_brush.color().red(), 0);
-        assert_eq!(result.value_brush.color().green(), 0);
-        assert_eq!(result.value_brush.color().blue(), 0);
-        assert_eq!(result.value_brush.color().alpha(), 0);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <brush> test1: #10203040; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Brush);
-        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
-        assert_eq!(result.value_brush.color().red(), 0x10);
-        assert_eq!(result.value_brush.color().green(), 0x20);
-        assert_eq!(result.value_brush.color().blue(), 0x30);
-        assert_eq!(result.value_brush.color().alpha(), 0x40);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <brush> test1: #10203040.darker(0.5); }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <brush> test1: Colors.red; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <brush> test1: @linear-gradient(90deg, #3f87a6 0%, #ebf8e1 50%, #f69d3c 100%); }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <brush> test1: @radial-gradient(circle, #f00 0%, #0f0 50%, #00f 100%)
-            @linear-gradient(90deg, #3f87a6 0%, #ebf8e1 50%, #f69d3c 100%); }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-    }
-
-    #[test]
-    fn test_property_units() {
-        let result =
-            property_conversion_test(r#"export component Test { in property <length> test1; }"#, 0);
-        assert_eq!(result.kind, PropertyValueKind::Float);
-        assert_eq!(result.default_selection, 0);
-        assert_eq!(result.value_int, 0);
-        assert_eq!(result.visual_items.row_data(result.value_int as usize), Some("px".into()));
-        let length_row_count = result.visual_items.row_count();
-        assert!(length_row_count > 2);
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <duration> test1: 25s; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Float);
-        assert_eq!(result.value_float, 25.0);
-        assert_eq!(result.default_selection, 0);
-        assert_eq!(result.visual_items.row_data(result.value_int as usize), Some("s".into()));
-        assert_eq!(result.visual_items.row_count(), 2); // ms, s
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <physical-length> test1: 1.5phx; }"#,
-            1,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Float);
-        assert_eq!(result.value_float, 1.5);
-        assert_eq!(result.default_selection, 0);
-        assert_eq!(result.visual_items.row_data(result.value_int as usize), Some("phx".into()));
-        assert!(result.visual_items.row_count() > 1); // More than just physical length
-
-        let result = property_conversion_test(
-            r#"export component Test { in property <angle> test1: 1.5turns + 1.3deg; }"#,
-            0,
-        );
-        assert_eq!(result.kind, PropertyValueKind::Code);
-    }
-
-    #[test]
-    fn test_property_with_default_values() {
-        let source = r#"
-import { Button } from "std-widgets.slint";
-component MyButton inherits Button {
-    text: "Ok";
-    in property <color> color: red;
-    in property alias <=> self.xxx;
-    property <length> xxx: 45cm;
-}
-export component X {
-    MyButton {
-        /*CURSOR*/
-    }
-}
-        "#;
-
-        let (dc, url, _diag) = loaded_document_cache(source.to_string());
-        let element = dc
-            .element_at_offset(&url, (source.find("/*CURSOR*/").expect("cursor") as u32).into())
-            .unwrap();
-        let pi = super::properties::get_properties(&element, super::properties::LayoutKind::None);
-
-        let prop = pi.iter().find(|pi| pi.name == "visible").unwrap();
-        let result = super::simplify_value(prop);
-        assert_eq!(result.kind, PropertyValueKind::Boolean);
-        assert!(result.value_bool);
-
-        let prop = pi.iter().find(|pi| pi.name == "enabled").unwrap();
-        let result = super::simplify_value(prop);
-        assert_eq!(result.kind, PropertyValueKind::Boolean);
-        assert!(result.value_bool);
-
-        let prop = pi.iter().find(|pi| pi.name == "text").unwrap();
-        let result = super::simplify_value(prop);
-        assert_eq!(result.kind, PropertyValueKind::String);
-        assert_eq!(result.value_string, "Ok");
-
-        let prop = pi.iter().find(|pi| pi.name == "alias").unwrap();
-        let result = super::simplify_value(prop);
-        assert_eq!(result.kind, PropertyValueKind::Float);
-        assert_eq!(result.value_float, 45.);
-        assert_eq!(result.visual_items.row_data(result.value_int as usize).unwrap(), "cm");
-
-        let prop = pi.iter().find(|pi| pi.name == "color").unwrap();
-        let result = super::simplify_value(prop);
-        assert_eq!(result.kind, PropertyValueKind::Color);
-        assert_eq!(
-            result.value_brush,
-            slint::Brush::SolidColor(slint::Color::from_rgb_u8(255, 0, 0))
-        );
-    }
-
-    #[test]
-    fn test_property_with_default_values_loop() {
-        let source = r#"
-component Abc {
-        // This should be an error, not a infinite loop/hang
-        in property <length> some_loop <=> r.border-width;
-        r:= Rectangle {
-            property <length> some_loop <=> root.some_loop;
-            border-width <=> some_loop;
-        }
-}
-export component X {
-    Abc {
-        /*CURSOR*/
-    }
-}
-        "#;
-
-        let (dc, url, _diag) = loaded_document_cache(source.to_string());
-
-        let element = dc
-            .element_at_offset(&url, (source.find("/*CURSOR*/").expect("cursor") as u32).into())
-            .unwrap();
-        let pi = super::properties::get_properties(&element, super::properties::LayoutKind::None);
-
-        let prop = pi.iter().find(|pi| pi.name == "visible").unwrap();
-        let result = super::simplify_value(prop);
-        assert_eq!(result.kind, PropertyValueKind::Boolean);
-        assert!(result.value_bool);
-    }
 
     fn create_test_property(name: &str, value: &str) -> PropertyInformation {
         PropertyInformation {
@@ -2382,7 +1426,8 @@ export component X {
         type_def: &str,
         type_name: &str,
         code: &str,
-    ) -> crate::preview::preview_data::PreviewData {
+    ) -> (crate::preview::preview_data::PreviewDataKey, crate::preview::preview_data::PreviewData)
+    {
         let component_instance = crate::preview::test::interpret_test(
             "fluent",
             &format!(
@@ -2394,9 +1439,10 @@ export component Tester {{
             "#
             ),
         );
-        let preview_data =
+        let mut data =
             preview_data::query_preview_data_properties_and_callbacks(&component_instance);
-        return preview_data.get(&preview_data::PropertyContainer::Main).unwrap()[0].clone();
+        assert_eq!(data.len(), 1);
+        data.pop_first().unwrap()
     }
 
     fn compare_pv(r: &super::PropertyValue, e: &PropertyValue) {
@@ -2427,10 +1473,9 @@ export component Tester {{
         type_name: &str,
         code: &str,
         expected_data: super::PreviewData,
-    ) -> preview_data::PreviewData {
-        let raw_data = generate_preview_data(visibility, type_def, type_name, code);
-
-        let rp = super::map_preview_data_property(&raw_data).unwrap();
+    ) -> (preview_data::PreviewDataKey, preview_data::PreviewData) {
+        let (key, value) = generate_preview_data(visibility, type_def, type_name, code);
+        let rp = super::map_preview_data_property(&key, &value).unwrap();
 
         eprintln!("*** Validating PreviewData: Received: {rp:?}");
         eprintln!("*** Validating PreviewData: Expected: {expected_data:?}");
@@ -2442,7 +1487,7 @@ export component Tester {{
 
         eprintln!("*** PreviewData is as expected...");
 
-        raw_data
+        (key, value)
     }
 
     fn validate_rp(
@@ -2453,15 +1498,15 @@ export component Tester {{
         expected_data: super::PreviewData,
         expected_value: super::PropertyValue,
     ) {
-        let rp = validate_rp_impl(visibility, type_def, type_name, code, expected_data);
+        let (_, value) = validate_rp_impl(visibility, type_def, type_name, code, expected_data);
 
-        let pv = super::map_preview_data_to_property_value(&rp).unwrap();
+        let pv = super::map_preview_data_to_property_value(&value).unwrap();
         compare_pv(&pv, &expected_value);
 
-        let (is_array, headers, values) = super::map_preview_data_to_property_value_table(&rp);
+        let (is_array, headers, values) = super::map_preview_data_to_property_value_table(&value);
         assert!(!is_array);
         assert!(headers.len() == 1);
-        assert!(headers[0] == "");
+        assert!(headers[0].is_empty());
         assert_eq!(values.len(), 1);
         assert_eq!(values.first().unwrap().len(), 1);
     }
@@ -2477,9 +1522,9 @@ export component Tester {{
         expected_headers: Vec<String>,
         expected_table: Vec<Vec<super::PropertyValue>>,
     ) {
-        let rp = validate_rp_impl(visibility, type_def, type_name, code, expected_data);
+        let (_, value) = validate_rp_impl(visibility, type_def, type_name, code, expected_data);
 
-        let pv = super::map_preview_data_to_property_value(&rp).unwrap();
+        let pv = super::map_preview_data_to_property_value(&value).unwrap();
         compare_pv(
             &pv,
             &super::PropertyValue {
@@ -2489,7 +1534,7 @@ export component Tester {{
             },
         );
 
-        let (is_array, headers, values) = super::map_preview_data_to_property_value_table(&rp);
+        let (is_array, headers, values) = super::map_preview_data_to_property_value_table(&value);
 
         assert_eq!(is_array, expected_is_array);
 
@@ -2734,7 +1779,6 @@ export component Tester {{
                 has_getter: true,
                 has_setter: true,
                 kind: super::PreviewDataKind::Value,
-                ..Default::default()
             },
             super::PropertyValue {
                 display_string: "false".into(),
@@ -2760,7 +1804,6 @@ export component Tester {{
                 has_getter: true,
                 has_setter: true,
                 kind: super::PreviewDataKind::Json,
-                ..Default::default()
             },
             super::PropertyValue {
                 kind: super::PropertyValueKind::Code,
@@ -2784,7 +1827,6 @@ export component Tester {{
                 has_getter: true,
                 has_setter: true,
                 kind: super::PreviewDataKind::Table,
-                ..Default::default()
             },
             "{\n  \"bar\": true,\n  \"count\": 23\n}",
             false,
@@ -2824,7 +1866,6 @@ export component Tester {{
                 has_getter: true,
                 has_setter: true,
                 kind: super::PreviewDataKind::Table,
-                ..Default::default()
                 },
             "{\n  \"first\": {\n    \"c1-1\": \"first of a kind\",\n    \"c1-2\": 23\n  },\n  \"second\": {\n    \"c2-1\": \"second of a kind\",\n    \"c2-2\": 42\n  }\n}",
             false,
@@ -2884,7 +1925,6 @@ export component Tester {{
                 has_getter: true,
                 has_setter: true,
                 kind: super::PreviewDataKind::Table,
-                ..Default::default()
             },
             "[\n  {\n    \"first\": {\n      \"c1-1\": \"first of a kind\",\n      \"c1-2\": 23\n    },\n    \"second\": {\n      \"c2-1\": \"second of a kind\",\n      \"c2-2\": 42\n    }\n  },\n  {\n    \"first\": {\n      \"c1-1\": \"row 2, 1\",\n      \"c1-2\": 3\n    },\n    \"second\": {\n      \"c2-1\": \"row 2, 2\",\n      \"c2-2\": 2\n    }\n  }\n]",
             true,
@@ -2969,7 +2009,6 @@ export component Tester {{
                 has_getter: true,
                 has_setter: true,
                 kind: super::PreviewDataKind::Table,
-                ..Default::default()
             },
             "[\n  true,\n  false\n]",
             true,

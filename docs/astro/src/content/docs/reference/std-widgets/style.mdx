@@ -58,6 +58,22 @@ main.greeting = "Hello friends";
 </TabItem>
 </Tabs>
 
+## Using Style Properties In Your Own Components
+
+The global `Palette` and `StyleMetrics` properties can be accessed and will be set to the appropriate values of the current style.
+
+```slint playground
+import { Palette, StyleMetrics } from "std-widgets.slint";
+
+export component Example inherits Window {
+    Rectangle {
+        border-radius: StyleMetrics.layout-padding;
+        border-width: 2px;
+        border-color: Palette.border;
+        background: Palette.background;
+    }
+}
+```
 
 ## Previewing Designs With `slint-viewer`
 

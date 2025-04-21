@@ -78,6 +78,7 @@ export component ComponentContainer inherits Empty {
 
     in-out property <length> width;
     in-out property <length> height;
+    //-accepts_focus
 }
 
 export component Rotate inherits Empty {
@@ -186,6 +187,7 @@ export component SwipeGestureHandler {
 component MenuItem {
     in property <string> title;
     callback activated();
+    in property <bool> enabled: true;
     //-disallow_global_types_as_child_elements
     //-is_non_item_type
 }
@@ -197,6 +199,7 @@ component MenuSeparator {
 
 component Menu {
     in property <string> title;
+    in property <bool> enabled: true;
     MenuItem {}
     MenuSeparator {}
     Menu {}
@@ -695,6 +698,8 @@ export global NativeStyleMetrics {
 
     // Tab Bar metrics:
     out property <LayoutAlignment> tab-bar-alignment;
+
+    out property <string> style-name: "qt";
 
     //-is_non_item_type
     //-is_internal

@@ -3069,11 +3069,10 @@ fn compile_builtin_function_call(
             let (h, s, v, a) =
                 (a.next().unwrap(), a.next().unwrap(), a.next().unwrap(), a.next().unwrap());
             quote!({
-                let h: f32 = (#h as f32).clamp(0., 360.) as f32;
                 let s: f32 = (#s as f32).max(0.).min(1.) as f32;
                 let v: f32 = (#v as f32).max(0.).min(1.) as f32;
                 let a: f32 = (1. * (#a as f32)).max(0.).min(1.) as f32;
-                sp::Color::from_hsva(h, s, v, a)
+                sp::Color::from_hsva(#h as f32, s, v, a)
             })
         }
         BuiltinFunction::ColorScheme => {
@@ -3086,7 +3085,7 @@ fn compile_builtin_function_call(
         }
         BuiltinFunction::SetupNativeMenuBar => {
             let window_adapter_tokens = access_window_adapter_field(ctx);
-            if let [Expression::PropertyReference(entries_r), Expression::PropertyReference(sub_menu_r), Expression::PropertyReference(activated_r), Expression::NumberLiteral(tree_index)] =
+            if let [Expression::PropertyReference(entries_r), Expression::PropertyReference(sub_menu_r), Expression::PropertyReference(activated_r), Expression::NumberLiteral(tree_index), Expression::BoolLiteral(no_native)] =
                 arguments
             {
                 // We have an MenuItem tree
@@ -3100,12 +3099,19 @@ fn compile_builtin_function_call(
                 let access_sub_menu = access_member(sub_menu_r, ctx).unwrap();
                 let access_activated = access_member(activated_r, ctx).unwrap();
 
+                let native_impl = if *no_native {
+                    quote!()
+                } else {
+                    quote!(if sp::WindowInner::from_pub(#window_adapter_tokens.window()).supports_native_menu_bar() {
+                        sp::WindowInner::from_pub(#window_adapter_tokens.window()).setup_menubar(sp::VBox::new(menu_item_tree));
+                    } else)
+                };
+
                 quote!({
                     let menu_item_tree_instance = #item_tree_id::new(_self.self_weak.get().unwrap().clone()).unwrap();
                     let menu_item_tree = sp::MenuFromItemTree::new(sp::VRc::into_dyn(menu_item_tree_instance));
-                    if sp::WindowInner::from_pub(#window_adapter_tokens.window()).supports_native_menu_bar() {
-                        sp::WindowInner::from_pub(#window_adapter_tokens.window()).setup_menubar(sp::VBox::new(menu_item_tree));
-                    } else {
+                    #native_impl
+                    /*else*/ {
                         let menu_item_tree = sp::Rc::new(menu_item_tree);
                         let menu_item_tree_ = menu_item_tree.clone();
                         #access_entries.set_binding(move || {

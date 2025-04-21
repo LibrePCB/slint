@@ -27,6 +27,10 @@ run = "cargo fmt --all"
 description = "Run taplo format"
 run = "taplo format"
 
+["fix:pnpm:lock"]
+description = "Update pnpm lock file"
+run = "pnpm i --lockfile-only"
+
 ["fix:ts:format"]
 description = "Run pnpm format:fix"
 run = "pnpm run format:fix"
@@ -49,11 +53,7 @@ depends = ["prepare:pnpm-install", "build:lsp:wasm", "build:interpreter:wasm"]
 ["build:lsp:wasm"]
 description = "Build the LSP (WASM)"
 dir = "editors/vscode"
-sources = [
-  "tools/lsp/Cargo.toml",
-  "tools/lsp/**/*.rs",
-  "tools/lsp/ui/**/*.slint",
-]
+sources = ["tools/lsp/Cargo.toml", "tools/lsp/**/*.rs", "tools/lsp/ui/**/*.slint"]
 outputs = ["tools/lsp/pkg/*"]
 run = "pnpm run build:wasm_lsp"
 tools = { "npm:wasm-pack" = "latest" }
@@ -62,10 +62,7 @@ depends = ["prepare:pnpm-install"]
 ["build:interpreter:wasm"]
 description = "Build the Slint interpreteer (WASM)"
 dir = "tools/slintpad"
-sources = [
-  "api/wasm-interpreter/Cargo.toml",
-  "api/wasm-interpreter/src/**/*.rs",
-]
+sources = ["api/wasm-interpreter/Cargo.toml", "api/wasm-interpreter/src/**/*.rs"]
 outputs = ["api/wasm-interpreter/pkg/*"]
 run = "pnpm run build:wasm_interpreter"
 tools = { "npm:wasm-pack" = "latest" }
@@ -74,6 +71,7 @@ depends = ["prepare:pnpm-install"]
 ["prepare:pnpm-install"]
 hide = true
 run = "pnpm install --frozen-lockfile"
+depends = ["fix:pnpm:lock"]
 
 ### CI
 
@@ -86,6 +84,7 @@ depends = [
   "fix:rust:format",
   "fix:text:trailing_spaces",
   "fix:toml:format",
+  "fix:pnpm:lock",
   "fix:ts:biome",
   "fix:ts:format",
 ]

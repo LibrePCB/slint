@@ -641,6 +641,11 @@ pub struct ElementDebugInfo {
     // The id qualified with the enclosing component name. Given `foo := Bar {}` this is `EnclosingComponent::foo`
     pub qualified_id: Option<SmolStr>,
     pub type_name: String,
+    // Hold an id for each element that is unique during this build, based on the source file and
+    // the offset of the `LBrace` token.
+    //
+    // This helps to cross-reference the element in the different build stages the LSP has to deal with.
+    pub element_hash: u64,
     pub node: syntax_nodes::Element,
     // Field to indicate whether this element was a layout that had
     // been lowered into a rectangle in the lower_layouts pass.
@@ -997,6 +1002,7 @@ impl Element {
             base_type,
             debug: vec![ElementDebugInfo {
                 qualified_id,
+                element_hash: 0,
                 type_name,
                 node: node.clone(),
                 layout: None,
@@ -2206,6 +2212,11 @@ pub fn recurse_elem_including_sub_components_no_borrow<State>(
         .borrow()
         .iter()
         .for_each(|p| recurse_elem_including_sub_components_no_borrow(&p.component, state, vis));
+    component
+        .menu_item_tree
+        .borrow()
+        .iter()
+        .for_each(|c| recurse_elem_including_sub_components_no_borrow(c, state, vis));
 }
 
 /// This visit the binding attached to this element, but does not recurse in children elements

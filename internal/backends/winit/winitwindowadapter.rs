@@ -26,7 +26,7 @@ use corelib::items::{ItemRc, ItemRef};
 
 #[cfg(any(enable_accesskit, muda))]
 use crate::SlintUserEvent;
-use crate::WinitWindowEventResult;
+use crate::{SharedBackendData, WinitWindowEventResult};
 use corelib::api::PhysicalSize;
 use corelib::layout::Orientation;
 use corelib::lengths::LogicalLength;
@@ -126,6 +126,8 @@ enum WinitWindowOrNone {
         window: Rc<winit::window::Window>,
         #[cfg(enable_accesskit)]
         accesskit_adapter: RefCell<crate::accesskit::AccessKitAdapter>,
+        #[cfg(muda)]
+        muda_adapter: RefCell<Option<crate::muda::MudaAdapter>>,
     },
     None(RefCell<WindowAttributes>),
 }
@@ -244,6 +246,7 @@ impl WinitWindowOrNone {
 /// GraphicsWindow is an implementation of the [WindowAdapter][`crate::eventloop::WindowAdapter`] trait. This is
 /// typically instantiated by entry factory functions of the different graphics back ends.
 pub struct WinitWindowAdapter {
+    pub shared_backend_data: Rc<SharedBackendData>,
     window: OnceCell<corelib::api::Window>,
     self_weak: Weak<Self>,
     pending_redraw: Cell<bool>,
@@ -293,7 +296,7 @@ pub struct WinitWindowAdapter {
     xdg_settings_watcher: RefCell<Option<i_slint_core::future::JoinHandle<()>>>,
 
     #[cfg(muda)]
-    pub(crate) muda_adapter: RefCell<Option<crate::muda::MudaAdapter>>,
+    menubar: RefCell<Option<vtable::VBox<i_slint_core::menus::MenuVTable>>>,
 
     #[cfg(all(muda, target_os = "macos"))]
     muda_enable_default_menu_bar: bool,
@@ -302,6 +305,7 @@ pub struct WinitWindowAdapter {
 impl WinitWindowAdapter {
     /// Creates a new reference-counted instance.
     pub(crate) fn new(
+        shared_backend_data: Rc<SharedBackendData>,
         renderer: Box<dyn WinitCompatibleRenderer>,
         window_attributes: winit::window::WindowAttributes,
         requested_graphics_api: Option<RequestedGraphicsAPI>,
@@ -309,6 +313,7 @@ impl WinitWindowAdapter {
         #[cfg(all(muda, target_os = "macos"))] muda_enable_default_menu_bar: bool,
     ) -> Result<Rc<Self>, PlatformError> {
         let self_rc = Rc::new_cyclic(|self_weak| Self {
+            shared_backend_data,
             window: OnceCell::from(corelib::api::Window::new(self_weak.clone() as _)),
             self_weak: self_weak.clone(),
             pending_redraw: Default::default(),
@@ -334,17 +339,19 @@ impl WinitWindowAdapter {
             #[cfg(not(use_winit_theme))]
             xdg_settings_watcher: Default::default(),
             #[cfg(muda)]
-            muda_adapter: Default::default(),
+            menubar: Default::default(),
             #[cfg(all(muda, target_os = "macos"))]
             muda_enable_default_menu_bar,
         });
 
-        let winit_window = self_rc.ensure_window()?;
+        let winit_window = self_rc
+            .shared_backend_data
+            .with_event_loop(|event_loop| Ok(self_rc.ensure_window(event_loop)?))?;
         debug_assert!(!self_rc.renderer.is_suspended());
         self_rc.size.set(physical_size_to_slint(&winit_window.inner_size()));
 
         let id = winit_window.id();
-        crate::event_loop::register_window(id, (self_rc.clone()) as _);
+        self_rc.shared_backend_data.register_window(id, (self_rc.clone()) as _);
 
         let scale_factor = std::env::var("SLINT_SCALE_FACTOR")
             .ok()
@@ -360,7 +367,10 @@ impl WinitWindowAdapter {
         self.renderer.as_ref()
     }
 
-    pub fn ensure_window(&self) -> Result<Rc<winit::window::Window>, PlatformError> {
+    pub fn ensure_window(
+        &self,
+        event_loop: &dyn crate::event_loop::EventLoopInterface,
+    ) -> Result<Rc<winit::window::Window>, PlatformError> {
         #[allow(unused_mut)]
         let mut window_attributes = match &*self.winit_window_or_none.borrow() {
             WinitWindowOrNone::HasWindow { window, .. } => return Ok(window.clone()),
@@ -385,8 +395,11 @@ impl WinitWindowAdapter {
 
         let mut winit_window_or_none = self.winit_window_or_none.borrow_mut();
 
-        let winit_window =
-            self.renderer.resume(window_attributes, self.requested_graphics_api.clone())?;
+        let winit_window = self.renderer.resume(
+            event_loop,
+            window_attributes,
+            self.requested_graphics_api.clone(),
+        )?;
 
         *winit_window_or_none = WinitWindowOrNone::HasWindow {
             window: winit_window.clone(),
@@ -397,12 +410,24 @@ impl WinitWindowAdapter {
                 self.event_loop_proxy.clone(),
             )
             .into(),
+            #[cfg(muda)]
+            muda_adapter: self
+                .menubar
+                .borrow()
+                .as_ref()
+                .map(|menubar| {
+                    crate::muda::MudaAdapter::setup(
+                        menubar,
+                        &self.winit_window().unwrap(),
+                        self.event_loop_proxy.clone(),
+                        self.self_weak.clone(),
+                    )
+                })
+                .into(),
         };
 
-        crate::event_loop::register_window(
-            winit_window.id(),
-            (self.self_weak.upgrade().unwrap()) as _,
-        );
+        self.shared_backend_data
+            .register_window(winit_window.id(), (self.self_weak.upgrade().unwrap()) as _);
 
         Ok(winit_window)
     }
@@ -415,17 +440,13 @@ impl WinitWindowAdapter {
 
                 let last_window_rc = window.clone();
 
-                let mut attributes = Self::window_attributes(
-                    #[cfg(target_arch = "wasm32")]
-                    "canvas",
-                )
-                .unwrap_or_default();
+                let mut attributes = Self::window_attributes().unwrap_or_default();
                 attributes.inner_size = Some(physical_size_to_winit(self.size.get()).into());
                 attributes.position = last_window_rc.outer_position().ok().map(|pos| pos.into());
                 *winit_window_or_none = WinitWindowOrNone::None(attributes.into());
 
                 if let Some(last_instance) = Rc::into_inner(last_window_rc) {
-                    crate::event_loop::unregister_window(last_instance.id());
+                    self.shared_backend_data.unregister_window(last_instance.id());
                     drop(last_instance);
                 } else {
                     i_slint_core::debug_log!(
@@ -441,9 +462,7 @@ impl WinitWindowAdapter {
         Ok(())
     }
 
-    pub(crate) fn window_attributes(
-        #[cfg(target_arch = "wasm32")] canvas_id: &str,
-    ) -> Result<WindowAttributes, PlatformError> {
+    pub(crate) fn window_attributes() -> Result<WindowAttributes, PlatformError> {
         let mut attrs = WindowAttributes::default().with_transparent(true).with_visible(false);
 
         attrs = attrs.with_title("Slint Window".to_string());
@@ -454,29 +473,19 @@ impl WinitWindowAdapter {
 
             use wasm_bindgen::JsCast;
 
-            let html_canvas = web_sys::window()
+            if let Some(html_canvas) = web_sys::window()
                 .ok_or_else(|| "winit backend: Could not retrieve DOM window".to_string())?
                 .document()
                 .ok_or_else(|| "winit backend: Could not retrieve DOM document".to_string())?
-                .get_element_by_id(canvas_id)
-                .ok_or_else(|| {
-                    format!(
-                        "winit backend: Could not retrieve existing HTML Canvas element '{}'",
-                        canvas_id
-                    )
-                })?
-                .dyn_into::<web_sys::HtmlCanvasElement>()
-                .map_err(|_| {
-                    format!(
-                        "winit backend: Specified DOM element '{}' is not a HTML Canvas",
-                        canvas_id
-                    )
-                })?;
-            attrs = attrs
-                .with_canvas(Some(html_canvas))
-                // Don't activate the window by default, as that will cause the page to scroll,
-                // ignoring any existing anchors.
-                .with_active(false)
+                .get_element_by_id("canvas")
+                .and_then(|canvas_elem| canvas_elem.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            {
+                attrs = attrs
+                    .with_canvas(Some(html_canvas))
+                    // Don't activate the window by default, as that will cause the page to scroll,
+                    // ignoring any existing anchors.
+                    .with_active(false);
+            }
         };
 
         Ok(attrs)
@@ -509,6 +518,39 @@ impl WinitWindowAdapter {
 
     pub fn winit_window(&self) -> Option<Rc<winit::window::Window>> {
         self.winit_window_or_none.borrow().as_window()
+    }
+
+    #[cfg(muda)]
+    pub fn rebuild_menubar(&self) {
+        let WinitWindowOrNone::HasWindow {
+            window: winit_window,
+            muda_adapter: maybe_muda_adapter,
+            ..
+        } = &*self.winit_window_or_none.borrow()
+        else {
+            return;
+        };
+        let mut maybe_muda_adapter = maybe_muda_adapter.borrow_mut();
+        let Some(muda_adapter) = maybe_muda_adapter.as_mut() else { return };
+        muda_adapter.rebuild_menu(&winit_window, self.menubar.borrow().as_ref());
+    }
+
+    #[cfg(muda)]
+    pub fn muda_event(&self, entry_id: usize) {
+        let Ok(maybe_muda_adapter) = std::cell::Ref::filter_map(
+            self.winit_window_or_none.borrow(),
+            |winit_window_or_none| match winit_window_or_none {
+                WinitWindowOrNone::HasWindow { muda_adapter, .. } => Some(muda_adapter),
+                WinitWindowOrNone::None(..) => None,
+            },
+        ) else {
+            return;
+        };
+        let maybe_muda_adapter = maybe_muda_adapter.borrow();
+        let Some(muda_adapter) = maybe_muda_adapter.as_ref() else { return };
+        let menubar = self.menubar.borrow();
+        let Some(menubar) = menubar.as_ref() else { return };
+        muda_adapter.invoke(menubar, entry_id);
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -680,13 +722,20 @@ impl WinitWindowAdapter {
 
         #[cfg(all(muda, target_os = "macos"))]
         {
-            if self.muda_adapter.borrow().is_none() && self.muda_enable_default_menu_bar {
-                *self.muda_adapter.borrow_mut() =
-                    Some(crate::muda::MudaAdapter::setup_default_menu_bar()?);
-            }
+            if let WinitWindowOrNone::HasWindow { muda_adapter, .. } =
+                &*self.winit_window_or_none.borrow()
+            {
+                if muda_adapter.borrow().is_none()
+                    && self.muda_enable_default_menu_bar
+                    && self.menubar.borrow().is_none()
+                {
+                    *muda_adapter.borrow_mut() =
+                        Some(crate::muda::MudaAdapter::setup_default_menu_bar()?);
+                }
 
-            if let Some(muda_adapter) = self.muda_adapter.borrow().as_ref() {
-                muda_adapter.window_activation_changed(is_active);
+                if let Some(muda_adapter) = muda_adapter.borrow().as_ref() {
+                    muda_adapter.window_activation_changed(is_active);
+                }
             }
         }
 
@@ -714,7 +763,9 @@ impl WindowAdapter for WinitWindowAdapter {
         if visible {
             let recreating_window = self.winit_window_or_none.borrow().as_window().is_none();
 
-            let winit_window = self.ensure_window()?;
+            let winit_window = self
+                .shared_backend_data
+                .with_event_loop(|event_loop| Ok(self.ensure_window(event_loop)?))?;
 
             let runtime_window = WindowInner::from_pub(self.window());
 
@@ -786,18 +837,17 @@ impl WindowAdapter for WinitWindowAdapter {
 
             Ok(())
         } else {
-            crate::event_loop::with_window_target(|event_loop| {
-                // Wayland doesn't support hiding a window, only destroying it entirely.
-                if event_loop.is_wayland()
-                    || std::env::var_os("SLINT_DESTROY_WINDOW_ON_HIDE").is_some()
-                {
-                    self.suspend()?;
-                } else {
-                    self.winit_window_or_none.borrow().set_visible(false);
-                }
-
-                Ok(())
-            })?;
+            // Wayland doesn't support hiding a window, only destroying it entirely.
+            if self.winit_window_or_none.borrow().as_window().is_some_and(|winit_window| {
+                use raw_window_handle::HasWindowHandle;
+                winit_window.window_handle().is_ok_and(|h| {
+                    matches!(h.as_raw(), raw_window_handle::RawWindowHandle::Wayland(..))
+                }) || std::env::var_os("SLINT_DESTROY_WINDOW_ON_HIDE").is_some()
+            }) {
+                self.suspend()?;
+            } else {
+                self.winit_window_or_none.borrow().set_visible(false);
+            }
 
             /* FIXME:
             if let Some(existing_blinker) = self.cursor_blinker.borrow().upgrade() {
@@ -1140,13 +1190,20 @@ impl WindowAdapterInternal for WinitWindowAdapter {
 
     #[cfg(muda)]
     fn setup_menubar(&self, menubar: vtable::VBox<i_slint_core::menus::MenuVTable>) {
-        drop(self.muda_adapter.borrow_mut().take());
-        self.muda_adapter.replace(Some(crate::muda::MudaAdapter::setup(
-            menubar,
-            &self.winit_window().unwrap(),
-            self.event_loop_proxy.clone(),
-            self.self_weak.clone(),
-        )));
+        self.menubar.replace(Some(menubar));
+
+        if let WinitWindowOrNone::HasWindow { muda_adapter, .. } =
+            &*self.winit_window_or_none.borrow()
+        {
+            // On Windows, we must destroy the muda menu before re-creating a new one
+            drop(muda_adapter.borrow_mut().take());
+            muda_adapter.replace(Some(crate::muda::MudaAdapter::setup(
+                self.menubar.borrow().as_ref().unwrap(),
+                &self.winit_window().unwrap(),
+                self.event_loop_proxy.clone(),
+                self.self_weak.clone(),
+            )));
+        }
     }
 
     #[cfg(enable_accesskit)]
@@ -1208,7 +1265,7 @@ impl WindowAdapterInternal for WinitWindowAdapter {
 impl Drop for WinitWindowAdapter {
     fn drop(&mut self) {
         if let Some(winit_window) = self.winit_window_or_none.borrow().as_window() {
-            crate::event_loop::unregister_window(winit_window.id());
+            self.shared_backend_data.unregister_window(winit_window.id());
         }
 
         #[cfg(not(use_winit_theme))]

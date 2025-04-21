@@ -22,19 +22,19 @@
   "devDependencies": {
     "@figma/plugin-typings": "1.109.0",
     "@types/node": "20.16.10",
-    "@types/react": "19.0.12",
-    "@types/react-dom": "19.0.4",
+    "@types/react": "19.1.1",
+    "@types/react-dom": "19.1.2",
     "@vitejs/plugin-react": "4.3.4",
     "cross-env": "7.0.3",
-    "shiki": "3.2.1",
-    "typescript": "5.8.2",
-    "vite": "6.2.4",
+    "shiki": "3.2.2",
+    "typescript": "5.8.3",
+    "vite": "6.2.6",
     "vite-figma-plugin": "0.0.24",
     "vite-plugin-singlefile": "2.2.0",
     "vitest": "3.1.1"
   },
   "dependencies": {
-    "html-react-parser": "5.2.2",
+    "html-react-parser": "5.2.3",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   }

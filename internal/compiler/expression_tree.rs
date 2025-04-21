@@ -79,9 +79,11 @@ pub enum BuiltinFunction {
     ColorScheme,
     SupportsNativeMenuBar,
     /// Setup the native menu bar, or the item-tree based menu bar
-    /// arguments ate: `(ref entries, ref sub-menu, ref activated, item_tree_root?)`
-    /// When there are 4 arguments, the last one is a reference to the MenuItem tree root (just like the entries in the [`Self::ShowPopupMenu`] call)
-    /// then the code will assign the callback handler and properties
+    /// arguments are: `(ref entries, ref sub-menu, ref activated, item_tree_root?, no_native_menu_bar?)`
+    /// The two last arguments are only set if the menu is an item tree, in which case, `item_tree_root` is a reference
+    /// to the MenuItem tree root (just like the entries in the [`Self::ShowPopupMenu`] call), and `native_menu_bar` is
+    /// is a boolean literal that is true when we shouldn't try to setup the native menu bar.
+    /// If we have an item_tree_root, the code will assign the callback handler and properties on the non-native menubar as well
     SetupNativeMenuBar,
     Use24HourFormat,
     MonthDayCount,
@@ -716,6 +718,11 @@ pub enum Expression {
         rhs: Box<Expression>,
     },
 
+    DebugHook {
+        expression: Box<Expression>,
+        id: SmolStr,
+    },
+
     EmptyComponentFactory,
 }
 
@@ -837,6 +844,7 @@ impl Expression {
             Expression::SolveLayout(..) => Type::LayoutCache,
             Expression::MinMax { ty, .. } => ty.clone(),
             Expression::EmptyComponentFactory => Type::ComponentFactory,
+            Expression::DebugHook { expression, .. } => expression.ty(),
         }
     }
 
@@ -931,6 +939,7 @@ impl Expression {
                 visitor(rhs);
             }
             Expression::EmptyComponentFactory => {}
+            Expression::DebugHook { expression, .. } => visitor(expression),
         }
     }
 
@@ -1027,6 +1036,7 @@ impl Expression {
                 visitor(rhs);
             }
             Expression::EmptyComponentFactory => {}
+            Expression::DebugHook { expression, .. } => visitor(expression),
         }
     }
 
@@ -1108,6 +1118,7 @@ impl Expression {
             Expression::SolveLayout(..) => false,
             Expression::MinMax { lhs, rhs, .. } => lhs.is_constant() && rhs.is_constant(),
             Expression::EmptyComponentFactory => true,
+            Expression::DebugHook { .. } => false,
         }
     }
 
@@ -1407,6 +1418,14 @@ impl Expression {
                 ctx.diag.push_error(format!("{what} needs to be done on a property"), node);
                 false
             }
+        }
+    }
+
+    /// Unwrap DebugHook expressions to their contained sub-expression
+    pub fn ignore_debug_hooks(&self) -> &Expression {
+        match self {
+            Expression::DebugHook { expression, .. } => expression.as_ref(),
+            _ => self,
         }
     }
 }
@@ -1738,5 +1757,10 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             write!(f, ")")
         }
         Expression::EmptyComponentFactory => write!(f, "<empty-component-factory>"),
+        Expression::DebugHook { expression, id } => {
+            write!(f, "debug-hook(")?;
+            pretty_print(f, expression)?;
+            write!(f, "\"{id}\")")
+        }
     }
 }
