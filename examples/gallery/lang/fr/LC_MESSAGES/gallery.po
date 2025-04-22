@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2024-11-18 03:16+0000\n"
+"POT-Creation-Date: 2025-04-22 03:29+0000\n"
 "PO-Revision-Date: 2023-06-06 13:52+0000\n"
 "Last-Translator: Olivier Goffart <olivier.goffart@slint-ui.com>, 2023\n"
 "Language-Team: French (https://app.transifex.com/slint/teams/170022/fr/)\n"
@@ -21,109 +21,141 @@ msgstr ""
 "1000000 == 0 ? 1 : 2;\n"
 "X-Generator: Lokalize 22.12.3\n"
 
-#: gallery.slint:14 gallery.slint:19
+#: gallery.slint:14 gallery.slint:41
 msgctxt "App"
 msgid "Slint Widgets Gallery"
 msgstr "Gallerie de widgets "
 
+#: gallery.slint:19
+msgctxt "MenuBar"
+msgid "File"
+msgstr ""
+
 #: gallery.slint:20
+msgctxt "MenuBar"
+msgid "Open"
+msgstr ""
+
+#: gallery.slint:22
+msgctxt "MenuBar"
+msgid "Open Recent"
+msgstr ""
+
+#: gallery.slint:23
+msgctxt "MenuBar"
+msgid "Recent {}"
+msgstr ""
+
+#: gallery.slint:26
+msgctxt "MenuBar"
+msgid "Save"
+msgstr ""
+
+#: gallery.slint:28
+msgctxt "MenuBar"
+msgid "Save As"
+msgstr ""
+
+#: gallery.slint:29
+msgctxt "MenuBar"
+msgid "Name {}"
+msgstr ""
+
+#: gallery.slint:33
+#, fuzzy
+msgctxt "MenuBar"
+msgid "Edit"
+msgstr "TextEdit"
+
+#: gallery.slint:34
+msgctxt "MenuBar"
+msgid "Copy"
+msgstr ""
+
+#: gallery.slint:35
+msgctxt "MenuBar"
+msgid "Paste"
+msgstr ""
+
+#: gallery.slint:42
 msgctxt "Menu"
 msgid "Controls"
 msgstr "Contrôles"
 
-#: gallery.slint:20
+#: gallery.slint:42
 msgctxt "Menu"
 msgid "ListView"
 msgstr "ListView"
 
-#: gallery.slint:20
+#: gallery.slint:42
 msgctxt "Menu"
 msgid "TableView"
 msgstr "TableView"
 
-#: gallery.slint:20
+#: gallery.slint:42
 msgctxt "Menu"
 msgid "TextEdit"
 msgstr "TextEdit"
 
-#: gallery.slint:20
+#: gallery.slint:42
 msgctxt "Menu"
 msgid "Easings"
 msgstr ""
 
-#: gallery.slint:20
+#: gallery.slint:42
 msgctxt "Menu"
 msgid "About"
 msgstr "À Propos"
 
-#: ui/pages/table_view_page.slint:23
-msgctxt "TableViewPage"
-msgid "TableView"
-msgstr "TableView"
+#: ui/pages/text_edit_page.slint:9
+msgctxt "TextEditPage"
+msgid "TextEdit"
+msgstr "TextEdit"
 
-#: ui/pages/table_view_page.slint:25
-msgctxt "TableViewPage"
+#: ui/pages/text_edit_page.slint:10
+msgctxt "TextEditPage"
 msgid ""
-"StandardTableView can be used to display a list of text elements in columns "
-"and rows. It can be imported from \"std-widgets.slint\""
+"Similar to LineEdit, but can be used to enter several lines of text. The "
+"widget can be imported from \"std-widgets.slint\"."
+msgstr "Silimaire à LineEdit mais utilisé pour entrer plusieurs ligne de texte"
+
+#: ui/pages/text_edit_page.slint:14
+msgctxt "TextEditPage"
+msgid "Word-Wrap"
+msgstr "Retour à la ligne"
+
+#. min-width: 200px;
+#: ui/pages/text_edit_page.slint:18
+msgctxt "TextEditPage"
+msgid ""
+"This is our TextEdit widget, which allows for editing text that spans over "
+"multiple paragraphs.\n"
+"For example this line starts in a new paragraph.\n"
+"\n"
+"When the amount of lines - due to wrapping and number of paragraphs - "
+"exceeds the available vertical height, a vertical scrollbar is shown that "
+"allows scrolling.\n"
+"You may want to enter a bit of text here then in order to make them visible."
 msgstr ""
-"StandardTableView peut être utilisé pour afficher une liste d'éléments et "
-"colonnes"
+"Ceci est le widget TextEdit qui permet d'éditer du text qui va sur plusieurs "
+"paragaps\n"
+"Par example, cette ligne est un nouveau paragraph\n"
+"\n"
+"Quand le nombre de ligne dépasse la taille, il y a une bare de défilement "
+"qui apparaît\n"
+"\n"
+"Vous pouver entrer du texte ici et voir ce qui se passe"
 
-#: ui/pages/table_view_page.slint:31
-msgctxt "TableViewPage"
-msgid "StandardTableView"
-msgstr "StandardTableView"
+#: ui/pages/text_edit_page.slint:19
+#, fuzzy
+msgctxt "TextEditPage"
+msgid "Add some text"
+msgstr "Entrez du texte"
 
-#: ui/pages/table_view_page.slint:44
-msgctxt "TableViewPage"
-msgid "Header 1"
-msgstr "En-tête 1"
-
-#: ui/pages/table_view_page.slint:45
-msgctxt "TableViewPage"
-msgid "Header 2"
-msgstr "En-tête 2"
-
-#: ui/pages/table_view_page.slint:46
-msgctxt "TableViewPage"
-msgid "Header 3"
-msgstr "En-tête 3"
-
-#: ui/pages/table_view_page.slint:47
-msgctxt "TableViewPage"
-msgid "Header 4"
-msgstr "En-tête 4"
-
-#: ui/pages/easings_page.slint:55
-msgctxt "EasingsPage"
-msgid "Easings"
-msgstr ""
-
-#: ui/pages/easings_page.slint:56
-msgctxt "EasingsPage"
-msgid "Easing demos"
-msgstr ""
-
-#: ui/pages/easings_page.slint:66
-msgctxt "EasingsPage"
-msgid "Animate All"
-msgstr ""
-
-#: ui/pages/easings_page.slint:102
-msgctxt "EasingsPage"
-msgid "Duration:"
-msgstr ""
-
-#: ui/pages/page.slint:24
-msgctxt "Page"
-msgid "Widgets enabled"
-msgstr "Widgets activés"
-
-#: ui/pages/page.slint:31
-msgctxt "Page"
-msgid "Dark Mode"
-msgstr ""
+#: ui/pages/text_edit_page.slint:26
+msgctxt "TextEditPage"
+msgid "No-Wrap"
+msgstr "Pas de retour à la ligne"
 
 #: ui/pages/about_page.slint:9
 #, fuzzy
@@ -138,110 +170,15 @@ msgid ""
 "repository and the website https://slint.dev and try it yourself."
 msgstr ""
 
-#: ui/pages/list_view_page.slint:9 ui/pages/list_view_page.slint:55
-msgctxt "ListViewPage"
-msgid "ListView"
-msgstr "ListView"
+#: ui/pages/page.slint:27
+msgctxt "Page"
+msgid "Widgets enabled"
+msgstr "Widgets activés"
 
-#: ui/pages/list_view_page.slint:11
-msgctxt "ListViewPage"
-msgid ""
-"ListViews can be used to display a list of elements. The StandardListBox is "
-"like the default ListView just with a default text based definition of the "
-"visual items. Both can be imported from \"std-widgets.slint\""
+#: ui/pages/page.slint:34
+msgctxt "Page"
+msgid "Dark Mode"
 msgstr ""
-"Les ListView peuvent être utilisées pour montrer une liste d'élémment.  "
-"StandardListBx est comme une ListView par dafaut mes basé sur une définition "
-"des items visuels"
-
-#: ui/pages/list_view_page.slint:15
-msgctxt "ListViewPage"
-msgid "Scroll Bar Policy:"
-msgstr ""
-
-#: ui/pages/list_view_page.slint:31
-msgctxt "ListViewPage"
-msgid "Vertical:"
-msgstr ""
-
-#: ui/pages/list_view_page.slint:36 ui/pages/list_view_page.slint:46
-msgctxt "ListViewPage"
-msgid "As Needed"
-msgstr ""
-
-#: ui/pages/list_view_page.slint:36 ui/pages/list_view_page.slint:46
-msgctxt "ListViewPage"
-msgid "Always On"
-msgstr ""
-
-#: ui/pages/list_view_page.slint:36 ui/pages/list_view_page.slint:46
-msgctxt "ListViewPage"
-msgid "Always Off"
-msgstr ""
-
-#: ui/pages/list_view_page.slint:41
-msgctxt "ListViewPage"
-msgid "Horizontal:"
-msgstr ""
-
-#: ui/pages/list_view_page.slint:67
-msgctxt "ListViewPage"
-msgid "Item {}"
-msgstr "Élement {}"
-
-#: ui/pages/list_view_page.slint:74
-#, fuzzy
-msgctxt "ListViewPage"
-msgid "StandardListView"
-msgstr "StandardTableView"
-
-#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
-#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
-#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
-#: ui/pages/list_view_page.slint:87
-msgctxt "ListViewPage"
-msgid "Lorem"
-msgstr "Lorem"
-
-#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
-#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
-#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
-#: ui/pages/list_view_page.slint:87
-msgctxt "ListViewPage"
-msgid "ipsum"
-msgstr "ipsum"
-
-#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
-#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
-#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
-#: ui/pages/list_view_page.slint:87
-msgctxt "ListViewPage"
-msgid "dolor"
-msgstr "dolor"
-
-#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
-#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
-#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
-#: ui/pages/list_view_page.slint:87
-msgctxt "ListViewPage"
-msgid "sit"
-msgstr "sit"
-
-#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
-#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
-#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
-#: ui/pages/list_view_page.slint:87
-msgctxt "ListViewPage"
-msgid "amet"
-msgstr "amet"
-
-#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
-#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
-#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
-#: ui/pages/list_view_page.slint:87
-msgctxt "ListViewPage"
-msgid "consetetur"
-msgstr "consetetur"
 
 #: ui/pages/controls_page.slint:10
 msgctxt "ControlsPage"
@@ -409,52 +346,177 @@ msgctxt "ControlsPage"
 msgid "Content of tab 3"
 msgstr "Contenu du 3ᵉ conglet"
 
-#: ui/pages/text_edit_page.slint:9
-msgctxt "TextEditPage"
-msgid "TextEdit"
-msgstr "TextEdit"
+#: ui/pages/table_view_page.slint:25
+msgctxt "TableViewPage"
+msgid "TableView"
+msgstr "TableView"
 
-#: ui/pages/text_edit_page.slint:10
-msgctxt "TextEditPage"
+#: ui/pages/table_view_page.slint:27
+msgctxt "TableViewPage"
 msgid ""
-"Similar to LineEdit, but can be used to enter several lines of text. The "
-"widget can be imported from \"std-widgets.slint\"."
-msgstr "Silimaire à LineEdit mais utilisé pour entrer plusieurs ligne de texte"
-
-#: ui/pages/text_edit_page.slint:14
-msgctxt "TextEditPage"
-msgid "Word-Wrap"
-msgstr "Retour à la ligne"
-
-#. min-width: 200px;
-#: ui/pages/text_edit_page.slint:18
-msgctxt "TextEditPage"
-msgid ""
-"This is our TextEdit widget, which allows for editing text that spans over "
-"multiple paragraphs.\n"
-"For example this line starts in a new paragraph.\n"
-"\n"
-"When the amount of lines - due to wrapping and number of paragraphs - "
-"exceeds the available vertical height, a vertical scrollbar is shown that "
-"allows scrolling.\n"
-"You may want to enter a bit of text here then in order to make them visible."
+"StandardTableView can be used to display a list of text elements in columns "
+"and rows. It can be imported from \"std-widgets.slint\""
 msgstr ""
-"Ceci est le widget TextEdit qui permet d'éditer du text qui va sur plusieurs "
-"paragaps\n"
-"Par example, cette ligne est un nouveau paragraph\n"
-"\n"
-"Quand le nombre de ligne dépasse la taille, il y a une bare de défilement "
-"qui apparaît\n"
-"\n"
-"Vous pouver entrer du texte ici et voir ce qui se passe"
+"StandardTableView peut être utilisé pour afficher une liste d'éléments et "
+"colonnes"
 
-#: ui/pages/text_edit_page.slint:19
+#: ui/pages/table_view_page.slint:33
+msgctxt "TableViewPage"
+msgid "StandardTableView"
+msgstr "StandardTableView"
+
+#: ui/pages/table_view_page.slint:51
+msgctxt "TableViewPage"
+msgid "Header 1"
+msgstr "En-tête 1"
+
+#: ui/pages/table_view_page.slint:52
+msgctxt "TableViewPage"
+msgid "Header 2"
+msgstr "En-tête 2"
+
+#: ui/pages/table_view_page.slint:53
+msgctxt "TableViewPage"
+msgid "Header 3"
+msgstr "En-tête 3"
+
+#: ui/pages/table_view_page.slint:54
+msgctxt "TableViewPage"
+msgid "Header 4"
+msgstr "En-tête 4"
+
+#: ui/pages/table_view_page.slint:61
+msgctxt "TableViewPage"
+msgid "Filter by Header 1:"
+msgstr ""
+
+#: ui/pages/table_view_page.slint:65
 #, fuzzy
-msgctxt "TextEditPage"
-msgid "Add some text"
+msgctxt "TableViewPage"
+msgid "Enter filter text"
 msgstr "Entrez du texte"
 
-#: ui/pages/text_edit_page.slint:26
-msgctxt "TextEditPage"
-msgid "No-Wrap"
-msgstr "Pas de retour à la ligne"
+#: ui/pages/list_view_page.slint:9 ui/pages/list_view_page.slint:55
+msgctxt "ListViewPage"
+msgid "ListView"
+msgstr "ListView"
+
+#: ui/pages/list_view_page.slint:11
+msgctxt "ListViewPage"
+msgid ""
+"ListViews can be used to display a list of elements. The StandardListBox is "
+"like the default ListView just with a default text based definition of the "
+"visual items. Both can be imported from \"std-widgets.slint\""
+msgstr ""
+"Les ListView peuvent être utilisées pour montrer une liste d'élémment.  "
+"StandardListBx est comme une ListView par dafaut mes basé sur une définition "
+"des items visuels"
+
+#: ui/pages/list_view_page.slint:15
+msgctxt "ListViewPage"
+msgid "Scroll Bar Policy:"
+msgstr ""
+
+#: ui/pages/list_view_page.slint:31
+msgctxt "ListViewPage"
+msgid "Vertical:"
+msgstr ""
+
+#: ui/pages/list_view_page.slint:36 ui/pages/list_view_page.slint:46
+msgctxt "ListViewPage"
+msgid "As Needed"
+msgstr ""
+
+#: ui/pages/list_view_page.slint:36 ui/pages/list_view_page.slint:46
+msgctxt "ListViewPage"
+msgid "Always On"
+msgstr ""
+
+#: ui/pages/list_view_page.slint:36 ui/pages/list_view_page.slint:46
+msgctxt "ListViewPage"
+msgid "Always Off"
+msgstr ""
+
+#: ui/pages/list_view_page.slint:41
+msgctxt "ListViewPage"
+msgid "Horizontal:"
+msgstr ""
+
+#: ui/pages/list_view_page.slint:67
+msgctxt "ListViewPage"
+msgid "Item {}"
+msgstr "Élement {}"
+
+#: ui/pages/list_view_page.slint:74
+#, fuzzy
+msgctxt "ListViewPage"
+msgid "StandardListView"
+msgstr "StandardTableView"
+
+#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
+#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
+#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
+#: ui/pages/list_view_page.slint:87
+msgctxt "ListViewPage"
+msgid "Lorem"
+msgstr "Lorem"
+
+#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
+#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
+#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
+#: ui/pages/list_view_page.slint:87
+msgctxt "ListViewPage"
+msgid "ipsum"
+msgstr "ipsum"
+
+#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
+#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
+#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
+#: ui/pages/list_view_page.slint:87
+msgctxt "ListViewPage"
+msgid "dolor"
+msgstr "dolor"
+
+#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
+#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
+#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
+#: ui/pages/list_view_page.slint:87
+msgctxt "ListViewPage"
+msgid "sit"
+msgstr "sit"
+
+#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
+#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
+#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
+#: ui/pages/list_view_page.slint:87
+msgctxt "ListViewPage"
+msgid "amet"
+msgstr "amet"
+
+#: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82
+#: ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84
+#: ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86
+#: ui/pages/list_view_page.slint:87
+msgctxt "ListViewPage"
+msgid "consetetur"
+msgstr "consetetur"
+
+#: ui/pages/easings_page.slint:55
+msgctxt "EasingsPage"
+msgid "Easings"
+msgstr ""
+
+#: ui/pages/easings_page.slint:56
+msgctxt "EasingsPage"
+msgid "Easing demos"
+msgstr ""
+
+#: ui/pages/easings_page.slint:66
+msgctxt "EasingsPage"
+msgid "Animate All"
+msgstr ""
+
+#: ui/pages/easings_page.slint:102
+msgctxt "EasingsPage"
+msgid "Duration:"
+msgstr ""
