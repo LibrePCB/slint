@@ -14,12 +14,12 @@ export const dispatch = (msg: Message, global = false, origin = "*") => {
 };
 
 export const dispatchTS = <Key extends keyof EventTS>(
-    event: Key,
+    event: Key, // Parameter name is 'event'
     data: EventTS[Key],
     global = false,
     origin = "*",
 ) => {
-    dispatch({ event, ...data }, global, origin);
+    dispatch({ type: event, ...data }, global, origin);
 };
 
 export const listenTS = <Key extends keyof EventTS>(
@@ -28,10 +28,17 @@ export const listenTS = <Key extends keyof EventTS>(
     listenOnce = false,
 ) => {
     const func = (event: MessageEvent<any>) => {
-        if (event.data.pluginMessage.event === eventName) {
-            callback(event.data.pluginMessage.data);
-            if (listenOnce) {
-                window.removeEventListener("message", func); // Remove Listener so we only listen once
+        // --- Check for pluginMessage existence ---
+        if (event.data && event.data.pluginMessage) {
+            const pluginMessage = event.data.pluginMessage;
+
+            if (pluginMessage.type === eventName) {
+                // We've verified the type, so we can safely cast
+                const eventData = pluginMessage as EventTS[Key];
+                callback(eventData);
+                if (listenOnce) {
+                    window.removeEventListener("message", func);
+                }
             }
         }
     };
@@ -58,10 +65,8 @@ export const subscribeColorTheme = (
             .matchMedia("(prefers-color-scheme: dark)")
             .addEventListener("change", ({ matches }) => {
                 if (matches) {
-                    console.log("change to dark mode!");
                     callback("dark");
                 } else {
-                    console.log("change to light mode!");
                     callback("light");
                 }
             });

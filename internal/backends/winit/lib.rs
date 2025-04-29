@@ -43,7 +43,7 @@ pub enum WinitWindowEventResult {
 }
 
 mod renderer {
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use i_slint_core::{graphics::RequestedGraphicsAPI, platform::PlatformError};
 
@@ -62,12 +62,12 @@ mod renderer {
             event_loop: &dyn crate::event_loop::EventLoopInterface,
             window_attributes: winit::window::WindowAttributes,
             requested_graphics_api: Option<RequestedGraphicsAPI>,
-        ) -> Result<Rc<winit::window::Window>, PlatformError>;
+        ) -> Result<Arc<winit::window::Window>, PlatformError>;
 
         fn is_suspended(&self) -> bool;
     }
 
-    #[cfg(feature = "renderer-femtovg")]
+    #[cfg(any(feature = "renderer-femtovg", feature = "renderer-femtovg-wgpu"))]
     pub(crate) mod femtovg;
     #[cfg(enable_skia_renderer)]
     pub(crate) mod skia;
@@ -102,6 +102,8 @@ fn default_renderer_factory() -> Box<dyn WinitCompatibleRenderer> {
     cfg_if::cfg_if! {
         if #[cfg(enable_skia_renderer)] {
             renderer::skia::WinitSkiaRenderer::new_suspended()
+        } else if #[cfg(feature = "renderer-femtovg-wgpu")] {
+            renderer::femtovg::WGPUFemtoVGRenderer::new_suspended()
         } else if #[cfg(feature = "renderer-femtovg")] {
             renderer::femtovg::GlutinFemtoVGRenderer::new_suspended()
         } else if #[cfg(feature = "renderer-software")] {
@@ -273,13 +275,23 @@ impl BackendBuilder {
             self.renderer_name.as_deref(),
             self.requested_graphics_api.as_ref(),
         ) {
-            #[cfg(feature = "renderer-femtovg")]
+            #[cfg(any(feature = "renderer-femtovg", feature = "renderer-femtovg-wgpu"))]
             (Some("gl"), maybe_graphics_api) | (Some("femtovg"), maybe_graphics_api) => {
                 // If a graphics API was requested, double check that it's GL. FemtoVG doesn't support Metal, etc.
                 if let Some(api) = maybe_graphics_api {
                     i_slint_core::graphics::RequestedOpenGLVersion::try_from(api.clone())?;
                 }
                 renderer::femtovg::GlutinFemtoVGRenderer::new_suspended
+            }
+            #[cfg(feature = "renderer-femtovg-wgpu")]
+            (Some("femtovg-wgpu"), maybe_graphics_api) => {
+                if maybe_graphics_api.is_some() {
+                    return Err(
+                        "The FemtoVG WGPU renderer does not implement renderer selection by graphics API"
+                            .into(),
+                    );
+                }
+                renderer::femtovg::WGPUFemtoVGRenderer::new_suspended
             }
             #[cfg(enable_skia_renderer)]
             (Some("skia"), maybe_graphics_api) => {
@@ -624,7 +636,7 @@ mod private {
 
 #[i_slint_core_macros::slint_doc]
 /// This helper trait can be used to obtain access to the [`winit::window::Window`] for a given
-/// [`slint::Window`](slint:rust:slint/struct.window).")]
+/// [`slint::Window`](slint:rust:slint/struct.window).
 pub trait WinitWindowAccessor: private::WinitWindowAccessorSealed {
     /// Returns true if a [`winit::window::Window`] exists for this window. This is the case if the window is
     /// backed by this winit backend.

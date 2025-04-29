@@ -67,6 +67,13 @@ export global EditorSizeSettings {
     out property <length> property-border-radius: 5px;
 }
 
+export global PickerStyles {
+    out property <length> picker-width: 240px;
+    out property <color> focused-color: #0c8ce9;
+    out property <color> focused-stop-color: Palette.color-scheme == ColorScheme.dark ? #4a5878 : #b5ccdd;
+    out property <color> slider-color: Palette.color-scheme == ColorScheme.dark ? EditorPalette.section-color : #b5ccdd;
+}
+
 export global EditorPalette {
 
     property <bool> dark-color-scheme: Palette.color-scheme == ColorScheme.dark;
@@ -86,7 +93,7 @@ export global EditorPalette {
     out property <brush> state-hovered: root.dark-color-scheme ? #ffffff.with-alpha(0.1) : #000000.with-alpha(0.1);
     out property <brush> state-pressed: root.dark-color-scheme ? #ffffff.with-alpha(0.2) : #000000.with-alpha(0.2);
     out property <color> text-color: Palette.color-scheme == ColorScheme.dark ? white : #383838;
-    out property <color> section-color: Palette.color-scheme == ColorScheme.dark ? #3f3f3f : #f5f5f5;
+    out property <color> section-color: Palette.color-scheme == ColorScheme.dark ? #3f3f3f : #e6e6e6;
     out property <color> divider-color: Palette.color-scheme == ColorScheme.dark ? #444444 : #e6e6e6;
 }
 

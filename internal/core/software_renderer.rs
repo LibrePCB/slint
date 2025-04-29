@@ -1457,8 +1457,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                 let source_to_target_y = source_to_target_y / adjust_y;
                 let source_rect =
                     source_rect.cast::<f32>().scale(adjust_x, adjust_y).round().cast();
-                let dx = Fixed::from_f32(1. / source_to_target_x).unwrap();
-                let dy = Fixed::from_f32(1. / source_to_target_y).unwrap();
+                let Some(dx) = Fixed::from_f32(1. / source_to_target_x) else { return };
+                let Some(dy) = Fixed::from_f32(1. / source_to_target_y) else { return };
 
                 for t in textures.as_slice() {
                     // That's the source rect in the whole image coordinate
@@ -2104,7 +2104,7 @@ impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T
     fn draw_text(
         &mut self,
         text: Pin<&dyn crate::item_rendering::RenderText>,
-        _: &ItemRc,
+        self_rc: &ItemRc,
         size: LogicalSize,
         _cache: &CachedRenderingData,
     ) {
@@ -2117,7 +2117,7 @@ impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T
             return;
         }
 
-        let font_request = text.font_request(self.window);
+        let font_request = text.font_request(self_rc);
 
         let color = self.alpha_color(text.color().color());
         let max_size = (geom.size.cast() * self.scale_factor).cast();
@@ -2179,7 +2179,7 @@ impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T
     fn draw_text_input(
         &mut self,
         text_input: Pin<&crate::items::TextInput>,
-        _: &ItemRc,
+        self_rc: &ItemRc,
         size: LogicalSize,
     ) {
         let geom = LogicalRect::from(size);
@@ -2187,7 +2187,7 @@ impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T
             return;
         }
 
-        let font_request = text_input.font_request(&self.window.window_adapter());
+        let font_request = text_input.font_request(self_rc);
         let max_size = (geom.size.cast() * self.scale_factor).cast();
 
         // Clip glyphs not only against the global clip but also against the Text's geometry to avoid drawing outside

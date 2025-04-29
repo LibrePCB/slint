@@ -16,26 +16,25 @@ export const dispatchTS = <Key extends keyof EventTS>(
     data: EventTS[Key],
     origin = "*",
 ) => {
-    dispatch({ event, data }, origin);
+    dispatch({ type: event, ...data }, origin);
 };
 
 export const listenTS = <Key extends keyof EventTS>(
     eventName: Key,
-    callback: (data: EventTS[Key]) => any,
+    callback: (data: EventTS[Key] & { type: Key }) => any,
     listenOnce = false,
 ) => {
-    const func = (event: any) => {
-        if (event.event === eventName) {
-            callback(event);
+    const func = (pluginMessage: any) => {
+        if (pluginMessage && pluginMessage.type === eventName) {
+            callback(pluginMessage);
             if (listenOnce) {
-                figma.ui?.off("message", func); // Remove Listener so we only listen once
+                figma.ui.off("message", func);
             }
         }
     };
 
     figma.ui.on("message", func);
 };
-
 export const getStore = async (key: string) => {
     const value = await figma.clientStorage.getAsync(key);
     return value;
@@ -44,20 +43,3 @@ export const getStore = async (key: string) => {
 export const setStore = async (key: string, value: string) => {
     await figma.clientStorage.setAsync(key, value);
 };
-
-export function updateUI() {
-    const currentSelection = figma.currentPage.selection;
-
-    if (currentSelection.length === 0) {
-        const title = "Nothing selected";
-        const slintSnippet = "";
-        figma.ui.postMessage({ title, slintSnippet });
-        dispatchTS("updatePropertiesCallback", { title, slintSnippet });
-        return;
-    }
-
-    const node = currentSelection[0];
-    const title = "Slint Code: " + node.name;
-    const slintSnippet = generateSlintSnippet(node) ?? "";
-    dispatchTS("updatePropertiesCallback", { title, slintSnippet });
-}

@@ -789,10 +789,14 @@ pub fn generate(
         }),
     ));
 
+    let mut init_global = vec![];
+
     for (idx, glob) in llr.globals.iter_enumerated() {
+        let name = format_smolstr!("global_{}", concatenate_ident(&glob.name));
         let ty = if glob.is_builtin {
             format_smolstr!("slint::cbindgen_private::{}", glob.name)
         } else if glob.must_generate() {
+            init_global.push(format!("{name}->init();"));
             generate_global(&mut file, &conditional_includes, idx, glob, &llr);
             file.definitions.extend(glob.aliases.iter().map(|name| {
                 Declaration::TypeAlias(TypeAlias {
@@ -809,12 +813,24 @@ pub fn generate(
             Access::Public,
             Declaration::Var(Var {
                 ty: format_smolstr!("std::shared_ptr<{}>", ty),
-                name: format_smolstr!("global_{}", concatenate_ident(&glob.name)),
+                name,
                 init: Some(format!("std::make_shared<{ty}>(this)")),
                 ..Default::default()
             }),
         ));
     }
+
+    globals_struct.members.push((
+        Access::Public,
+        Declaration::Function(Function {
+            name: globals_struct.name.clone(),
+            is_constructor_or_destructor: true,
+            signature: "()".into(),
+            statements: Some(init_global),
+            ..Default::default()
+        }),
+    ));
+
     file.declarations.push(Declaration::Struct(globals_struct));
 
     if let Some(popup_menu) = &llr.popup_menu {
@@ -2625,8 +2641,17 @@ fn generate_global(
             name: ident(&global.name),
             signature: "(const class SharedGlobals *globals)".into(),
             is_constructor_or_destructor: true,
-            statements: Some(init),
+            statements: Some(vec![]),
             constructor_member_initializers: vec!["globals(globals)".into()],
+            ..Default::default()
+        }),
+    ));
+    global_struct.members.push((
+        Access::Private,
+        Declaration::Function(Function {
+            name: ident("init"),
+            signature: "() -> void".into(),
+            statements: Some(init),
             ..Default::default()
         }),
     ));
@@ -2638,6 +2663,7 @@ fn generate_global(
             ..Default::default()
         }),
     ));
+    global_struct.friends.push(SmolStr::new_static("SharedGlobals"));
 
     generate_public_api_for_properties(
         &mut global_struct.members,
@@ -3250,9 +3276,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             let base_e = compile_expression(array, ctx);
             let index_e = compile_expression(index, ctx);
             let value_e = compile_expression(value, ctx);
-            format!(
-                "{base_e}->set_row_data({index_e}, {value_e})"
-            )
+            format!("[&](auto index, const auto &base) {{ if (index >= 0. && std::size_t(index) < base->row_count()) base->set_row_data(index, {value_e}); }}({index_e}, {base_e})")
         }
         Expression::BinaryExpression { lhs, rhs, op } => {
             let lhs_str = compile_expression(lhs, ctx);
@@ -3516,9 +3540,17 @@ fn compile_builtin_function_call(
             ctx.generator_state.conditional_includes.cmath.set(true);
             format!("std::log({}) / std::log({})", a.next().unwrap(), a.next().unwrap())
         }
+        BuiltinFunction::Ln => {
+            ctx.generator_state.conditional_includes.cmath.set(true);
+            format!("std::log({})", a.next().unwrap())
+        }
         BuiltinFunction::Pow => {
             ctx.generator_state.conditional_includes.cmath.set(true);
             format!("std::pow(({}), ({}))", a.next().unwrap(), a.next().unwrap())
+        }
+        BuiltinFunction::Exp => {
+            ctx.generator_state.conditional_includes.cmath.set(true);
+            format!("std::exp({})", a.next().unwrap())
         }
         BuiltinFunction::Sin => {
             ctx.generator_state.conditional_includes.cmath.set(true);
@@ -3918,13 +3950,15 @@ fn compile_builtin_function_call(
         BuiltinFunction::ImplicitLayoutInfo(orient) => {
             if let [llr::Expression::PropertyReference(pr)] = arguments {
                 let native = native_prop_info(pr, ctx).0;
+                let item_rc = access_item_rc(pr, ctx);
                 format!(
-                    "{vt}->layout_info({{{vt}, const_cast<slint::cbindgen_private::{ty}*>(&{i})}}, {o}, &{window})",
+                    "slint::private_api::item_layout_info({vt}, const_cast<slint::cbindgen_private::{ty}*>(&{i}), {o}, &{window}, {item_rc})",
                     vt = native.cpp_vtable_getter,
                     ty = native.class_name,
                     o = to_cpp_orientation(orient),
                     i = access_member(pr, ctx),
-                    window = access_window_field(ctx)
+                    window = access_window_field(ctx),
+                    item_rc = item_rc
                 )
             } else {
                 panic!("internal error: invalid args to ImplicitLayoutInfo {arguments:?}")

@@ -14,7 +14,10 @@ use crate::input::{
     key_codes, ClickState, FocusEvent, InternalKeyboardModifierState, KeyEvent, KeyEventType,
     MouseEvent, MouseInputState, TextCursorBlinker,
 };
-use crate::item_tree::{ItemRc, ItemTreeRc, ItemTreeRef, ItemTreeVTable, ItemTreeWeak, ItemWeak};
+use crate::item_tree::{
+    ItemRc, ItemTreeRc, ItemTreeRef, ItemTreeVTable, ItemTreeWeak, ItemWeak,
+    ParentItemTraversalMode,
+};
 use crate::items::{ColorScheme, InputType, ItemRef, MouseCursor, PopupClosePolicy};
 use crate::lengths::{LogicalLength, LogicalPoint, LogicalRect, SizeLengths};
 use crate::menus::MenuVTable;
@@ -215,20 +218,24 @@ pub trait WindowAdapterInternal {
     fn setup_menubar(&self, _menubar: vtable::VBox<MenuVTable>) {}
 
     /// Re-implement this to support exposing raw window handles (version 0.6).
-    #[cfg(feature = "raw-window-handle-06")]
+    #[cfg(all(feature = "std", feature = "raw-window-handle-06"))]
     fn window_handle_06_rc(
         &self,
-    ) -> Result<Rc<dyn raw_window_handle_06::HasWindowHandle>, raw_window_handle_06::HandleError>
-    {
+    ) -> Result<
+        std::sync::Arc<dyn raw_window_handle_06::HasWindowHandle>,
+        raw_window_handle_06::HandleError,
+    > {
         Err(raw_window_handle_06::HandleError::NotSupported)
     }
 
     /// Re-implement this to support exposing raw display handles (version 0.6).
-    #[cfg(feature = "raw-window-handle-06")]
+    #[cfg(all(feature = "std", feature = "raw-window-handle-06"))]
     fn display_handle_06_rc(
         &self,
-    ) -> Result<Rc<dyn raw_window_handle_06::HasDisplayHandle>, raw_window_handle_06::HandleError>
-    {
+    ) -> Result<
+        std::sync::Arc<dyn raw_window_handle_06::HasDisplayHandle>,
+        raw_window_handle_06::HandleError,
+    > {
         Err(raw_window_handle_06::HandleError::NotSupported)
     }
 
@@ -682,7 +689,7 @@ impl WindowInner {
                             .map_to_item_tree(Default::default(), &self.component())
                             .to_vector(),
                     );
-                    menubar_item.parent_item()
+                    menubar_item.parent_item(ParentItemTraversalMode::StopAtPopups)
                 }
             };
 
@@ -766,7 +773,7 @@ impl WindowInner {
                 crate::properties::ChangeTracker::run_change_handlers();
                 return;
             }
-            item = focus_item.parent_item();
+            item = focus_item.parent_item(ParentItemTraversalMode::StopAtPopups);
         }
 
         // Make Tab/Backtab handle keyboard focus

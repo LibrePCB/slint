@@ -2381,7 +2381,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             let base_e = compile_expression(array, ctx);
             let index_e = compile_expression(index, ctx);
             let value_e = compile_expression(value, ctx);
-            quote!((#base_e).set_row_data(#index_e as usize, #value_e as _))
+            quote!((#base_e).set_row_data(#index_e as isize as usize, #value_e as _))
         }
         Expression::BinaryExpression { lhs, rhs, op } => {
             let lhs_ty = lhs.ty(ctx);
@@ -2909,10 +2909,11 @@ fn compile_builtin_function_call(
         BuiltinFunction::ItemFontMetrics => {
             if let [Expression::PropertyReference(pr)] = arguments {
                 let item = access_member(pr, ctx);
+                let item_rc = access_item_rc(pr, ctx);
                 let window_adapter_tokens = access_window_adapter_field(ctx);
                 item.then(|item| {
                     quote!(
-                        #item.font_metrics(#window_adapter_tokens)
+                        #item.font_metrics(#window_adapter_tokens, #item_rc)
                     )
                 })
             } else {
@@ -2924,8 +2925,9 @@ fn compile_builtin_function_call(
                 let item = access_member(pr, ctx);
                 let window_adapter_tokens = access_window_adapter_field(ctx);
                 item.then(|item| {
+                    let item_rc = access_item_rc(pr, ctx);
                     quote!(
-                        sp::Item::layout_info(#item, #orient, #window_adapter_tokens)
+                        sp::Item::layout_info(#item, #orient, #window_adapter_tokens, &#item_rc)
                     )
                 })
             } else {
@@ -2996,10 +2998,12 @@ fn compile_builtin_function_call(
             let (a1, a2) = (a.next().unwrap(), a.next().unwrap());
             quote!((#a1 as f64).log(#a2 as f64))
         }
+        BuiltinFunction::Ln => quote!((#(#a)* as f64).ln()),
         BuiltinFunction::Pow => {
             let (a1, a2) = (a.next().unwrap(), a.next().unwrap());
             quote!((#a1 as f64).powf(#a2 as f64))
         }
+        BuiltinFunction::Exp => quote!((#(#a)* as f64).exp()),
         BuiltinFunction::ToFixed => {
             let (a1, a2) = (a.next().unwrap(), a.next().unwrap());
             quote!(sp::shared_string_from_number_fixed(#a1 as f64, (#a2 as i32).max(0) as usize))

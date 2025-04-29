@@ -15,7 +15,7 @@ if (NOT Corrosion_FOUND)
     FetchContent_Declare(
         Corrosion
         GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
-        GIT_TAG v0.5.1
+        GIT_TAG v0.5.2
     )
 
     FetchContent_MakeAvailable(Corrosion)
@@ -98,6 +98,7 @@ define_cargo_dependent_feature(backend-winit-x11 "Enable support for the winit c
 define_cargo_dependent_feature(backend-winit-wayland "Enable support for the winit create to interact only with the wayland windowing system on Unix. Enable this option and turn off SLINT_FEATURE_BACKEND_WINIT for a smaller build with just wayland support." OFF "NOT SLINT_FEATURE_FREESTANDING")
 
 define_cargo_dependent_feature(renderer-femtovg "Enable support for the OpenGL ES 2.0 based FemtoVG rendering engine." ON "NOT SLINT_FEATURE_FREESTANDING")
+define_cargo_dependent_feature(renderer-femtovg-wgpu "Enable support for the WGPU based FemtoVG rendering engine." ON "NOT SLINT_FEATURE_FREESTANDING")
 define_cargo_dependent_feature(renderer-skia "Enable support for the Skia based rendering engine." OFF "NOT SLINT_FEATURE_FREESTANDING")
 define_cargo_dependent_feature(renderer-skia-opengl "Enable support for the Skia based rendering engine with its OpenGL backend." OFF "NOT SLINT_FEATURE_FREESTANDING")
 define_cargo_dependent_feature(renderer-skia-vulkan "Enable support for the Skia based rendering engine with its Vulkan backend." OFF "NOT SLINT_FEATURE_FREESTANDING")
