@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-04-24 03:32+0000\n"
+"POT-Creation-Date: 2025-04-30 03:34+0000\n"
 "PO-Revision-Date: 2023-06-06 13:52+0000\n"
 "Last-Translator: Olivier Goffart <olivier.goffart@slint-ui.com>, 2023\n"
 "Language-Team: French (https://app.transifex.com/slint/teams/170022/fr/)\n"
@@ -344,63 +344,63 @@ msgctxt "ControlsPage"
 msgid "Open DatePickerPopup"
 msgstr ""
 
-#: ui/pages/controls_page.slint:126
+#: ui/pages/controls_page.slint:127
 msgctxt "ControlsPage"
 msgid "Slider"
 msgstr "Slider"
 
-#: ui/pages/controls_page.slint:139
+#: ui/pages/controls_page.slint:140
 #, fuzzy
 msgctxt "ControlsPage"
 msgid "ProgressIndicator | Spinner"
 msgstr "ProgressIndicator"
 
-#: ui/pages/controls_page.slint:167
+#: ui/pages/controls_page.slint:168
 msgctxt "ControlsPage"
 msgid "indeterminate"
 msgstr "Indéterminé"
 
-#: ui/pages/controls_page.slint:174
+#: ui/pages/controls_page.slint:176
 msgctxt "ControlsPage"
 msgid "TabWidget"
 msgstr "TabWidget"
 
-#: ui/pages/controls_page.slint:178
+#: ui/pages/controls_page.slint:180
 msgctxt "ControlsPage"
 msgid "Tab 1"
 msgstr "1ᵉʳ Onglet"
 
-#: ui/pages/controls_page.slint:184
+#: ui/pages/controls_page.slint:186
 msgctxt "ControlsPage"
 msgid "Content of tab 1"
 msgstr "Contennu du 1ᵉʳ onglet"
 
-#: ui/pages/controls_page.slint:190
+#: ui/pages/controls_page.slint:192
 msgctxt "ControlsPage"
 msgid "Click me"
 msgstr "Clickez moi"
 
-#: ui/pages/controls_page.slint:199
+#: ui/pages/controls_page.slint:201
 msgctxt "ControlsPage"
 msgid "Tab 2"
 msgstr "2ᵉ Onglet"
 
-#: ui/pages/controls_page.slint:205
+#: ui/pages/controls_page.slint:207
 msgctxt "ControlsPage"
 msgid "Content of tab 2"
 msgstr "Contenu du 2ᵉ onglet"
 
-#: ui/pages/controls_page.slint:211
+#: ui/pages/controls_page.slint:213
 msgctxt "ControlsPage"
 msgid "Check me"
 msgstr "Cochez moi"
 
-#: ui/pages/controls_page.slint:220
+#: ui/pages/controls_page.slint:222
 msgctxt "ControlsPage"
 msgid "Tab 3"
 msgstr "3ᵉ Onglet"
 
-#: ui/pages/controls_page.slint:224
+#: ui/pages/controls_page.slint:226
 msgctxt "ControlsPage"
 msgid "Content of tab 3"
 msgstr "Contenu du 3ᵉ conglet"
