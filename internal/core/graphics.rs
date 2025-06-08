@@ -56,6 +56,9 @@ pub mod boxshadowcache;
 pub mod border_radius;
 pub use border_radius::*;
 
+#[cfg(feature = "unstable-wgpu-24")]
+pub mod wgpu_24;
+
 /// CachedGraphicsData allows the graphics backend to store an arbitrary piece of data associated with
 /// an item, which is typically computed by accessing properties. The dependency_tracker is used to allow
 /// for a lazy computation. Typically, back ends store either compute intensive data or handles that refer to
@@ -177,7 +180,7 @@ pub enum RequestedOpenGLVersion {
 
 /// Internal enum specify which graphics API should be used, when
 /// the backend selector requests that from a built-in backend.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum RequestedGraphicsAPI {
     /// OpenGL (ES)
     OpenGL(RequestedOpenGLVersion),
@@ -187,6 +190,9 @@ pub enum RequestedGraphicsAPI {
     Vulkan,
     /// Direct 3D
     Direct3D,
+    #[cfg(feature = "unstable-wgpu-24")]
+    /// WGPU 24.x
+    WGPU24(wgpu_24::WGPUConfiguration),
 }
 
 impl TryFrom<RequestedGraphicsAPI> for RequestedOpenGLVersion {
@@ -204,6 +210,10 @@ impl TryFrom<RequestedGraphicsAPI> for RequestedOpenGLVersion {
             RequestedGraphicsAPI::Direct3D => {
                 Err("Direct3D rendering is not supported with an OpenGL renderer".into())
             }
+            #[cfg(feature = "unstable-wgpu-24")]
+            RequestedGraphicsAPI::WGPU24(..) => {
+                Err("WGPU 24.x rendering is not supported with an OpenGL renderer".into())
+            }
         }
     }
 }
@@ -212,21 +222,6 @@ impl From<RequestedOpenGLVersion> for RequestedGraphicsAPI {
     fn from(version: RequestedOpenGLVersion) -> Self {
         Self::OpenGL(version)
     }
-}
-
-/// This enum describes the how pixels from a source are merged with the pixels in a destination image.
-/// This is a sub-set of the standard [Porter-Duff](https://en.wikipedia.org/wiki/Alpha_compositing) modes.
-#[repr(u8)]
-#[allow(dead_code)]
-#[derive(Default, Copy, Clone, Debug)]
-#[non_exhaustive]
-pub enum CompositionMode {
-    /// Only pixels from the source target are drawn.
-    Source,
-    /// The source is placed over the destination.
-    #[default]
-    SourceOver,
-    // TODO: maybe add more modes (e.g. xor, plus darker, etc.)
 }
 
 /// Internal module for use by cbindgen and the C++ platform API layer.

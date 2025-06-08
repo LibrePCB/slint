@@ -11,6 +11,7 @@ use i_slint_core::accessibility::{
     AccessibilityAction, AccessibleStringProperty, SupportedAccessibilityAction,
 };
 use i_slint_core::api::Window;
+use i_slint_core::input::FocusReason;
 use i_slint_core::item_tree::{ItemTreeRc, ItemTreeRef, ItemTreeWeak, ParentItemTraversalMode};
 use i_slint_core::items::{ItemRc, WindowItem};
 use i_slint_core::lengths::{LogicalPoint, ScaleFactor};
@@ -19,8 +20,8 @@ use i_slint_core::SharedString;
 use i_slint_core::{properties::PropertyTracker, window::WindowAdapter};
 
 use super::WinitWindowAdapter;
-use crate::SlintUserEvent;
-use winit::event_loop::EventLoopProxy;
+use crate::SlintEvent;
+use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 
 /// The AccessKit adapter tries to keep the given window adapter's item tree in sync with accesskit's node tree.
 ///
@@ -51,11 +52,16 @@ pub struct AccessKitAdapter {
 impl AccessKitAdapter {
     pub fn new(
         window_adapter_weak: Weak<WinitWindowAdapter>,
+        active_event_loop: &ActiveEventLoop,
         winit_window: &winit::window::Window,
-        proxy: EventLoopProxy<SlintUserEvent>,
+        proxy: EventLoopProxy<SlintEvent>,
     ) -> Self {
         Self {
-            inner: accesskit_winit::Adapter::with_event_loop_proxy(winit_window, proxy),
+            inner: accesskit_winit::Adapter::with_event_loop_proxy(
+                active_event_loop,
+                winit_window,
+                proxy,
+            ),
             window_adapter_weak: window_adapter_weak.clone(),
             nodes: NodeCollection {
                 next_component_id: 1,
@@ -646,20 +652,12 @@ impl NodeCollection {
             .and_then(|s| s.parse::<usize>().ok())
         {
             node.set_position_in_set(position_in_set);
-            let mut item = item.clone();
-            while let Some(parent) = item.parent_item(ParentItemTraversalMode::StopAtPopups) {
-                if !parent.is_accessible() {
-                    item = parent;
-                    continue;
-                }
-                if let Some(size_of_set) = parent
-                    .accessible_string_property(AccessibleStringProperty::ItemCount)
-                    .and_then(|s| s.parse::<usize>().ok())
-                {
-                    node.set_size_of_set(size_of_set);
-                }
-                break;
-            }
+        }
+        if let Some(size_of_set) = item
+            .accessible_string_property(AccessibleStringProperty::ItemCount)
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            node.set_size_of_set(size_of_set);
         }
 
         let supported = item.supported_accessibility_actions();
@@ -728,9 +726,9 @@ struct CachedNode {
     tracker: Pin<Box<PropertyTracker>>,
 }
 
-impl From<accesskit_winit::Event> for SlintUserEvent {
+impl From<accesskit_winit::Event> for SlintEvent {
     fn from(value: accesskit_winit::Event) -> Self {
-        SlintUserEvent(crate::event_loop::CustomEvent::Accesskit(value))
+        SlintEvent(crate::event_loop::CustomEvent::Accesskit(value))
     }
 }
 
@@ -743,7 +741,8 @@ impl DeferredAccessKitAction {
     pub fn invoke(&self, window: &Window) {
         match self {
             DeferredAccessKitAction::SetFocus(item) => {
-                WindowInner::from_pub(window).set_focus_item(item, true);
+                // pretend this event was caused by a mouse for compatability purposes
+                WindowInner::from_pub(window).set_focus_item(item, true, FocusReason::PointerClick);
             }
             DeferredAccessKitAction::InvokeAccessibleAction(item, accessibility_action) => {
                 item.accessible_action(accessibility_action);

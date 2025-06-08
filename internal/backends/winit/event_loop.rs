@@ -9,7 +9,7 @@
 */
 use crate::drag_resize_window::{handle_cursor_move_for_resize, handle_resize};
 use crate::WinitWindowEventResult;
-use crate::{SharedBackendData, SlintUserEvent};
+use crate::{SharedBackendData, SlintEvent};
 use corelib::graphics::euclid;
 use corelib::input::{KeyEvent, KeyEventType, MouseEvent};
 use corelib::items::{ColorScheme, PointerEventButton};
@@ -25,96 +25,6 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::ControlFlow;
 use winit::window::ResizeDirection;
-pub(crate) struct NotRunningEventLoop {
-    pub(crate) instance: winit::event_loop::EventLoop<SlintUserEvent>,
-}
-
-impl NotRunningEventLoop {
-    pub(crate) fn new(
-        mut builder: winit::event_loop::EventLoopBuilder<SlintUserEvent>,
-    ) -> Result<Self, PlatformError> {
-        #[cfg(all(unix, not(target_vendor = "apple")))]
-        {
-            #[cfg(feature = "wayland")]
-            {
-                use winit::platform::wayland::EventLoopBuilderExtWayland;
-                builder.with_any_thread(true);
-            }
-            #[cfg(feature = "x11")]
-            {
-                use winit::platform::x11::EventLoopBuilderExtX11;
-                builder.with_any_thread(true);
-
-                // Under WSL, the compositor sometimes crashes. Since we cannot reconnect after the compositor
-                // was restarted, the application panics. This does not happen when using XWayland. Therefore,
-                // when running under WSL, try to connect to X11 instead.
-                #[cfg(feature = "wayland")]
-                if std::fs::metadata("/proc/sys/fs/binfmt_misc/WSLInterop").is_ok()
-                    || std::fs::metadata("/run/WSL").is_ok()
-                {
-                    builder.with_x11();
-                }
-            }
-        }
-        #[cfg(target_family = "windows")]
-        {
-            use winit::platform::windows::EventLoopBuilderExtWindows;
-            builder.with_any_thread(true);
-        }
-
-        let instance =
-            builder.build().map_err(|e| format!("Error initializing winit event loop: {e}"))?;
-
-        Ok(Self { instance })
-    }
-}
-
-pub(crate) struct RunningEventLoop<'a> {
-    active_event_loop: &'a ActiveEventLoop,
-}
-
-pub(crate) enum ActiveOrInactiveEventLoop<'a> {
-    #[allow(unused)]
-    Active(&'a ActiveEventLoop),
-    #[allow(unused)]
-    Inactive(&'a winit::event_loop::EventLoop<SlintUserEvent>),
-}
-
-pub(crate) trait EventLoopInterface {
-    fn create_window(
-        &self,
-        window_attributes: winit::window::WindowAttributes,
-    ) -> Result<winit::window::Window, winit::error::OsError>;
-    #[allow(unused)]
-    fn event_loop(&self) -> ActiveOrInactiveEventLoop<'_>;
-}
-
-impl EventLoopInterface for NotRunningEventLoop {
-    fn create_window(
-        &self,
-        window_attributes: winit::window::WindowAttributes,
-    ) -> Result<winit::window::Window, winit::error::OsError> {
-        #[allow(deprecated)]
-        self.instance.create_window(window_attributes)
-    }
-    fn event_loop(&self) -> ActiveOrInactiveEventLoop<'_> {
-        ActiveOrInactiveEventLoop::Inactive(&self.instance)
-    }
-}
-
-impl EventLoopInterface for RunningEventLoop<'_> {
-    fn create_window(
-        &self,
-        window_attributes: winit::window::WindowAttributes,
-    ) -> Result<winit::window::Window, winit::error::OsError> {
-        self.active_event_loop.create_window(window_attributes)
-    }
-    fn event_loop(&self) -> ActiveOrInactiveEventLoop<'_> {
-        ActiveOrInactiveEventLoop::Active(self.active_event_loop)
-    }
-}
-
-scoped_tls_hkt::scoped_thread_local!(pub(crate) static CURRENT_WINDOW_TARGET : for<'a> &'a RunningEventLoop<'a>);
 
 /// This enum captures run-time specific events that can be dispatched to the event loop in
 /// addition to the winit events.
@@ -175,14 +85,10 @@ impl EventLoopState {
     }
 }
 
-impl winit::application::ApplicationHandler<SlintUserEvent> for EventLoopState {
-    fn resumed(&mut self, active_event_loop: &ActiveEventLoop) {
-        for (_, window_weak) in self.shared_backend_data.active_windows.borrow().iter() {
-            if let Some(w) = window_weak.upgrade() {
-                if let Err(e) = w.ensure_window(&RunningEventLoop { active_event_loop }) {
-                    self.loop_error = Some(e);
-                }
-            }
+impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(err) = self.shared_backend_data.create_inactive_windows(event_loop) {
+            self.loop_error = Some(err);
         }
     }
 
@@ -462,7 +368,7 @@ impl winit::application::ApplicationHandler<SlintUserEvent> for EventLoopState {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SlintUserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SlintEvent) {
         match event.0 {
             CustomEvent::UserEvent(user_callback) => user_callback(),
             CustomEvent::Exit => event_loop.exit(),
@@ -506,6 +412,10 @@ impl winit::application::ApplicationHandler<SlintUserEvent> for EventLoopState {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(err) = self.shared_backend_data.create_inactive_windows(event_loop) {
+            self.loop_error = Some(err);
+        }
+
         if !event_loop.exiting() {
             for w in self
                 .shared_backend_data
@@ -532,72 +442,6 @@ impl winit::application::ApplicationHandler<SlintUserEvent> for EventLoopState {
     }
 }
 
-/// Wrapper around a Handler that implements the winit::application::ApplicationHandler
-/// but make sure to call every function with CURRENT_WINDOW_TARGET set
-struct ActiveEventLoopSetterDuringEventProcessing<Handler>(Handler);
-
-impl<Event: 'static, Handler: winit::application::ApplicationHandler<Event>>
-    winit::application::ApplicationHandler<Event>
-    for ActiveEventLoopSetterDuringEventProcessing<Handler>
-{
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let running_instance = RunningEventLoop { active_event_loop: event_loop };
-        CURRENT_WINDOW_TARGET.set(&running_instance, || self.0.resumed(event_loop))
-    }
-
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        window_id: winit::window::WindowId,
-        event: WindowEvent,
-    ) {
-        let running_instance = RunningEventLoop { active_event_loop: event_loop };
-        CURRENT_WINDOW_TARGET
-            .set(&running_instance, || self.0.window_event(event_loop, window_id, event))
-    }
-
-    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
-        let running_instance = RunningEventLoop { active_event_loop: event_loop };
-        CURRENT_WINDOW_TARGET.set(&running_instance, || self.0.new_events(event_loop, cause))
-    }
-
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
-        let running_instance = RunningEventLoop { active_event_loop: event_loop };
-        CURRENT_WINDOW_TARGET.set(&running_instance, || self.0.user_event(event_loop, event))
-    }
-
-    fn device_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        device_id: winit::event::DeviceId,
-        event: winit::event::DeviceEvent,
-    ) {
-        let running_instance = RunningEventLoop { active_event_loop: event_loop };
-        CURRENT_WINDOW_TARGET
-            .set(&running_instance, || self.0.device_event(event_loop, device_id, event))
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let running_instance = RunningEventLoop { active_event_loop: event_loop };
-        CURRENT_WINDOW_TARGET.set(&running_instance, || self.0.about_to_wait(event_loop))
-    }
-
-    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
-        let running_instance = RunningEventLoop { active_event_loop: event_loop };
-        CURRENT_WINDOW_TARGET.set(&running_instance, || self.0.suspended(event_loop))
-    }
-
-    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
-        let running_instance = RunningEventLoop { active_event_loop: event_loop };
-        CURRENT_WINDOW_TARGET.set(&running_instance, || self.0.exiting(event_loop))
-    }
-
-    fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
-        let running_instance = RunningEventLoop { active_event_loop: event_loop };
-        CURRENT_WINDOW_TARGET.set(&running_instance, || self.0.memory_warning(event_loop))
-    }
-}
-
 impl EventLoopState {
     /// Runs the event loop and renders the items in the provided `component` in its
     /// own window.
@@ -609,40 +453,36 @@ impl EventLoopState {
             .not_running_event_loop
             .take()
             .ok_or_else(|| PlatformError::from("Nested event loops are not supported"))?;
-        let mut winit_loop = not_running_loop_instance.instance;
+        let mut winit_loop = not_running_loop_instance;
 
-        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
-        {
-            use winit::platform::run_on_demand::EventLoopExtRunOnDemand as _;
-            winit_loop
-                .run_app_on_demand(&mut ActiveEventLoopSetterDuringEventProcessing(&mut self))
-                .map_err(|e| format!("Error running winit event loop: {e}"))?;
+        cfg_if::cfg_if! {
+            if #[cfg(any(target_arch = "wasm32", ios_and_friends))] {
+                winit_loop
+                    .run_app(&mut self)
+                    .map_err(|e| format!("Error running winit event loop: {e}"))?;
+                // This can't really happen, as run() doesn't return
+                Ok(Self::new(self.shared_backend_data.clone()))
+            } else {
+                use winit::platform::run_on_demand::EventLoopExtRunOnDemand as _;
+                winit_loop
+                    .run_app_on_demand(&mut self)
+                    .map_err(|e| format!("Error running winit event loop: {e}"))?;
 
-            // Keep the EventLoop instance alive and re-use it in future invocations of run_event_loop().
-            // Winit does not support creating multiple instances of the event loop.
-            self.shared_backend_data
-                .not_running_event_loop
-                .replace(Some(NotRunningEventLoop { instance: winit_loop }));
+                // Keep the EventLoop instance alive and re-use it in future invocations of run_event_loop().
+                // Winit does not support creating multiple instances of the event loop.
+                self.shared_backend_data.not_running_event_loop.replace(Some(winit_loop));
 
-            if let Some(error) = self.loop_error {
-                return Err(error);
+                if let Some(error) = self.loop_error {
+                    return Err(error);
+                }
+                Ok(self)
             }
-            Ok(self)
-        }
-
-        #[cfg(any(target_arch = "wasm32", target_os = "ios"))]
-        {
-            winit_loop
-                .run_app(&mut ActiveEventLoopSetterDuringEventProcessing(&mut self))
-                .map_err(|e| format!("Error running winit event loop: {e}"))?;
-            // This can't really happen, as run() doesn't return
-            Ok(Self::new(self.shared_backend_data.clone()))
         }
     }
 
     /// Runs the event loop and renders the items in the provided `component` in its
     /// own window.
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+    #[cfg(all(not(target_arch = "wasm32"), not(ios_and_friends)))]
     pub fn pump_events(
         mut self,
         timeout: Option<std::time::Duration>,
@@ -655,20 +495,17 @@ impl EventLoopState {
             .not_running_event_loop
             .take()
             .ok_or_else(|| PlatformError::from("Nested event loops are not supported"))?;
-        let mut winit_loop = not_running_loop_instance.instance;
+        let mut winit_loop = not_running_loop_instance;
 
         self.pumping_events_instantly = timeout.is_some_and(|duration| duration.is_zero());
 
-        let result = winit_loop
-            .pump_app_events(timeout, &mut ActiveEventLoopSetterDuringEventProcessing(&mut self));
+        let result = winit_loop.pump_app_events(timeout, &mut self);
 
         self.pumping_events_instantly = false;
 
         // Keep the EventLoop instance alive and re-use it in future invocations of run_event_loop().
         // Winit does not support creating multiple instances of the event loop.
-        self.shared_backend_data
-            .not_running_event_loop
-            .replace(Some(NotRunningEventLoop { instance: winit_loop }));
+        self.shared_backend_data.not_running_event_loop.replace(Some(winit_loop));
 
         if let Some(error) = self.loop_error {
             return Err(error);
@@ -685,9 +522,7 @@ impl EventLoopState {
             .take()
             .ok_or_else(|| PlatformError::from("Nested event loops are not supported"))?;
 
-        not_running_loop_instance
-            .instance
-            .spawn_app(ActiveEventLoopSetterDuringEventProcessing(self));
+        not_running_loop_instance.spawn_app(self);
 
         Ok(())
     }

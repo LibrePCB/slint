@@ -11,8 +11,8 @@ use crate::api::{
     WindowPosition, WindowSize,
 };
 use crate::input::{
-    key_codes, ClickState, FocusEvent, InternalKeyboardModifierState, KeyEvent, KeyEventType,
-    MouseEvent, MouseInputState, TextCursorBlinker,
+    key_codes, ClickState, FocusEvent, FocusReason, InternalKeyboardModifierState, KeyEvent,
+    KeyEventType, MouseEvent, MouseInputState, TextCursorBlinker,
 };
 use crate::item_tree::{
     ItemRc, ItemTreeRc, ItemTreeRef, ItemTreeVTable, ItemTreeWeak, ItemWeak,
@@ -762,7 +762,7 @@ impl WindowInner {
 
         if item.as_ref().is_some_and(|i| !i.is_visible()) {
             // Reset the focus... not great, but better than keeping it.
-            self.take_focus_item(&FocusEvent::FocusOut);
+            self.take_focus_item(&FocusEvent::FocusOut(FocusReason::TabNavigation));
             item = None;
         }
 
@@ -835,7 +835,7 @@ impl WindowInner {
 
     /// Sets the focus to the item pointed to by item_ptr. This will remove the focus from any
     /// currently focused item. If set_focus is false, the focus is cleared.
-    pub fn set_focus_item(&self, new_focus_item: &ItemRc, set_focus: bool) {
+    pub fn set_focus_item(&self, new_focus_item: &ItemRc, set_focus: bool, reason: FocusReason) {
         if self.prevent_focus_change.get() {
             return;
         }
@@ -846,7 +846,7 @@ impl WindowInner {
         });
         if let Some(popup_wa) = popup_wa {
             // Set the focus item on the popup's Window instead
-            popup_wa.window().0.set_focus_item(new_focus_item, set_focus);
+            popup_wa.window().0.set_focus_item(new_focus_item, set_focus, reason);
             return;
         }
 
@@ -863,9 +863,12 @@ impl WindowInner {
             }
         }
 
-        let old = self.take_focus_item(&FocusEvent::FocusOut);
-        let new =
-            if set_focus { self.move_focus(new_focus_item.clone(), next_focus_item) } else { None };
+        let old = self.take_focus_item(&FocusEvent::FocusOut(reason));
+        let new = if set_focus {
+            self.move_focus(new_focus_item.clone(), next_focus_item, reason)
+        } else {
+            None
+        };
         let window_adapter = self.window_adapter();
         if let Some(window_adapter) = window_adapter.internal(crate::InternalToken) {
             window_adapter.handle_focus_change(old, new);
@@ -877,7 +880,7 @@ impl WindowInner {
     /// This sends the event whiwh must be either FocusOut or WindowLostFocus for popups
     fn take_focus_item(&self, event: &FocusEvent) -> Option<ItemRc> {
         let focus_item = self.focus_item.take();
-        assert!(matches!(event, FocusEvent::FocusOut | FocusEvent::WindowLostFocus));
+        assert!(matches!(event, FocusEvent::FocusOut(_)));
 
         if let Some(focus_item_rc) = focus_item.upgrade() {
             focus_item_rc.borrow().as_ref().focus_event(
@@ -894,12 +897,16 @@ impl WindowInner {
     /// Publish the new focus_item to this Window and return the FocusEventResult
     ///
     /// This sends a FocusIn event!
-    fn publish_focus_item(&self, item: &Option<ItemRc>) -> crate::input::FocusEventResult {
+    fn publish_focus_item(
+        &self,
+        item: &Option<ItemRc>,
+        reason: FocusReason,
+    ) -> crate::input::FocusEventResult {
         match item {
             Some(item) => {
                 *self.focus_item.borrow_mut() = item.downgrade();
                 item.borrow().as_ref().focus_event(
-                    &FocusEvent::FocusIn,
+                    &FocusEvent::FocusIn(reason),
                     &self.window_adapter(),
                     item,
                 )
@@ -911,13 +918,18 @@ impl WindowInner {
         }
     }
 
-    fn move_focus(&self, start_item: ItemRc, forward: impl Fn(ItemRc) -> ItemRc) -> Option<ItemRc> {
+    fn move_focus(
+        &self,
+        start_item: ItemRc,
+        forward: impl Fn(ItemRc) -> ItemRc,
+        reason: FocusReason,
+    ) -> Option<ItemRc> {
         let mut current_item = start_item;
         let mut visited = Vec::new();
 
         loop {
             if current_item.is_visible()
-                && self.publish_focus_item(&Some(current_item.clone()))
+                && self.publish_focus_item(&Some(current_item.clone()), reason)
                     == crate::input::FocusEventResult::FocusAccepted
             {
                 return Some(current_item); // Item was just published.
@@ -933,8 +945,10 @@ impl WindowInner {
 
     /// Move keyboard focus to the next item
     pub fn focus_next_item(&self) {
-        let start_item =
-            self.take_focus_item(&FocusEvent::FocusOut).map(next_focus_item).unwrap_or_else(|| {
+        let start_item = self
+            .take_focus_item(&FocusEvent::FocusOut(FocusReason::TabNavigation))
+            .map(next_focus_item)
+            .unwrap_or_else(|| {
                 ItemRc::new(
                     self.active_popups
                         .borrow()
@@ -943,7 +957,8 @@ impl WindowInner {
                     0,
                 )
             });
-        let end_item = self.move_focus(start_item.clone(), next_focus_item);
+        let end_item =
+            self.move_focus(start_item.clone(), next_focus_item, FocusReason::TabNavigation);
         let window_adapter = self.window_adapter();
         if let Some(window_adapter) = window_adapter.internal(crate::InternalToken) {
             window_adapter.handle_focus_change(Some(start_item), end_item);
@@ -952,17 +967,21 @@ impl WindowInner {
 
     /// Move keyboard focus to the previous item.
     pub fn focus_previous_item(&self) {
-        let start_item =
-            previous_focus_item(self.take_focus_item(&FocusEvent::FocusOut).unwrap_or_else(|| {
-                ItemRc::new(
-                    self.active_popups
-                        .borrow()
-                        .last()
-                        .map_or_else(|| self.component(), |p| p.component.clone()),
-                    0,
-                )
-            }));
-        let end_item = self.move_focus(start_item.clone(), previous_focus_item);
+        let start_item = previous_focus_item(
+            self.take_focus_item(&FocusEvent::FocusOut(FocusReason::TabNavigation)).unwrap_or_else(
+                || {
+                    ItemRc::new(
+                        self.active_popups
+                            .borrow()
+                            .last()
+                            .map_or_else(|| self.component(), |p| p.component.clone()),
+                        0,
+                    )
+                },
+            ),
+        );
+        let end_item =
+            self.move_focus(start_item.clone(), previous_focus_item, FocusReason::TabNavigation);
         let window_adapter = self.window_adapter();
         if let Some(window_adapter) = window_adapter.internal(crate::InternalToken) {
             window_adapter.handle_focus_change(Some(start_item), end_item);
@@ -977,8 +996,11 @@ impl WindowInner {
     pub fn set_active(&self, have_focus: bool) {
         self.pinned_fields.as_ref().project_ref().active.set(have_focus);
 
-        let event =
-            if have_focus { FocusEvent::WindowReceivedFocus } else { FocusEvent::WindowLostFocus };
+        let event = if have_focus {
+            FocusEvent::FocusIn(FocusReason::WindowActivation)
+        } else {
+            FocusEvent::FocusOut(FocusReason::WindowActivation)
+        };
 
         if let Some(focus_item) = self.focus_item.borrow().upgrade() {
             focus_item.borrow().as_ref().focus_event(&event, &self.window_adapter(), &focus_item);
@@ -1207,7 +1229,7 @@ impl WindowInner {
         };
 
         let focus_item = self
-            .take_focus_item(&FocusEvent::WindowLostFocus)
+            .take_focus_item(&FocusEvent::FocusOut(FocusReason::PopupActivation))
             .map(|item| item.downgrade())
             .unwrap_or_default();
 
@@ -1260,7 +1282,7 @@ impl WindowInner {
             }
         }
         if let Some(focus) = current_popup.focus_item_in_parent.upgrade() {
-            self.set_focus_item(&focus, true);
+            self.set_focus_item(&focus, true, FocusReason::PopupActivation);
         }
     }
 
@@ -1456,6 +1478,8 @@ pub mod ffi {
     pub enum GraphicsAPI {
         /// The rendering is done using OpenGL.
         NativeOpenGL,
+        /// The rendering is done using APIs inaccessible from C++, such as WGPU.
+        Inaccessible,
     }
 
     #[allow(non_camel_case_types)]
@@ -1466,7 +1490,7 @@ pub mod ffi {
     pub struct WindowAdapterRcOpaque(*const c_void, *const c_void);
 
     /// Releases the reference to the windowrc held by handle.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_drop(handle: *mut WindowAdapterRcOpaque) {
         assert_eq!(
             core::mem::size_of::<Rc<dyn WindowAdapter>>(),
@@ -1480,7 +1504,7 @@ pub mod ffi {
     }
 
     /// Releases the reference to the component window held by handle.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_clone(
         source: *const WindowAdapterRcOpaque,
         target: *mut WindowAdapterRcOpaque,
@@ -1494,7 +1518,7 @@ pub mod ffi {
     }
 
     /// Spins an event loop and renders the items of the provided component in this window.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_show(handle: *const WindowAdapterRcOpaque) {
         let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
 
@@ -1502,7 +1526,7 @@ pub mod ffi {
     }
 
     /// Spins an event loop and renders the items of the provided component in this window.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_hide(handle: *const WindowAdapterRcOpaque) {
         let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
         window_adapter.window().hide().unwrap();
@@ -1510,7 +1534,7 @@ pub mod ffi {
 
     /// Returns the visibility state of the window. This function can return false even if you previously called show()
     /// on it, for example if the user minimized the window.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_is_visible(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
@@ -1519,7 +1543,7 @@ pub mod ffi {
     }
 
     /// Returns the window scale factor.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_get_scale_factor(
         handle: *const WindowAdapterRcOpaque,
     ) -> f32 {
@@ -1532,7 +1556,7 @@ pub mod ffi {
     }
 
     /// Sets the window scale factor, merely for testing purposes.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_scale_factor(
         handle: *const WindowAdapterRcOpaque,
         value: f32,
@@ -1542,7 +1566,7 @@ pub mod ffi {
     }
 
     /// Returns the text-input-focused property value.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_get_text_input_focused(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
@@ -1555,7 +1579,7 @@ pub mod ffi {
     }
 
     /// Set the text-input-focused property.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_text_input_focused(
         handle: *const WindowAdapterRcOpaque,
         value: bool,
@@ -1565,18 +1589,19 @@ pub mod ffi {
     }
 
     /// Sets the focus item.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_focus_item(
         handle: *const WindowAdapterRcOpaque,
         focus_item: &ItemRc,
         set_focus: bool,
+        reason: FocusReason,
     ) {
         let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        WindowInner::from_pub(window_adapter.window()).set_focus_item(focus_item, set_focus)
+        WindowInner::from_pub(window_adapter.window()).set_focus_item(focus_item, set_focus, reason)
     }
 
     /// Associates the window with the given component.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_component(
         handle: *const WindowAdapterRcOpaque,
         component: &ItemTreeRc,
@@ -1586,7 +1611,7 @@ pub mod ffi {
     }
 
     /// Show a popup and return its ID. The returned ID will always be non-zero.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_show_popup(
         handle: *const WindowAdapterRcOpaque,
         popup: &ItemTreeRc,
@@ -1606,7 +1631,7 @@ pub mod ffi {
     }
 
     /// Close the popup by the given ID.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_close_popup(
         handle: *const WindowAdapterRcOpaque,
         popup_id: NonZeroU32,
@@ -1616,7 +1641,7 @@ pub mod ffi {
     }
 
     /// C binding to the set_rendering_notifier() API of Window
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_rendering_notifier(
         handle: *const WindowAdapterRcOpaque,
         callback: extern "C" fn(
@@ -1649,6 +1674,8 @@ pub mod ffi {
                 let cpp_graphics_api = match graphics_api {
                     crate::api::GraphicsAPI::NativeOpenGL { .. } => GraphicsAPI::NativeOpenGL,
                     crate::api::GraphicsAPI::WebGL { .. } => unreachable!(), // We don't support wasm with C++
+                    #[cfg(feature = "unstable-wgpu-24")]
+                    crate::api::GraphicsAPI::WGPU24 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
                 };
                 (self.callback)(state, cpp_graphics_api, self.user_data)
             }
@@ -1669,7 +1696,7 @@ pub mod ffi {
     }
 
     /// C binding to the on_close_requested() API of Window
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_on_close_requested(
         handle: *const WindowAdapterRcOpaque,
         callback: extern "C" fn(user_data: *mut c_void) -> CloseRequestResponse,
@@ -1701,7 +1728,7 @@ pub mod ffi {
     }
 
     /// This function issues a request to the windowing system to redraw the contents of the window.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_request_redraw(handle: *const WindowAdapterRcOpaque) {
         let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
         window_adapter.request_redraw();
@@ -1709,7 +1736,7 @@ pub mod ffi {
 
     /// Returns the position of the window on the screen, in physical screen coordinates and including
     /// a window frame (if present).
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_position(
         handle: *const WindowAdapterRcOpaque,
         pos: &mut euclid::default::Point2D<i32>,
@@ -1721,7 +1748,7 @@ pub mod ffi {
     /// Sets the position of the window on the screen, in physical screen coordinates and including
     /// a window frame (if present).
     /// Note that on some windowing systems, such as Wayland, this functionality is not available.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_physical_position(
         handle: *const WindowAdapterRcOpaque,
         pos: &euclid::default::Point2D<i32>,
@@ -1733,7 +1760,7 @@ pub mod ffi {
     /// Sets the position of the window on the screen, in physical screen coordinates and including
     /// a window frame (if present).
     /// Note that on some windowing systems, such as Wayland, this functionality is not available.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_logical_position(
         handle: *const WindowAdapterRcOpaque,
         pos: &euclid::default::Point2D<f32>,
@@ -1744,7 +1771,7 @@ pub mod ffi {
 
     /// Returns the size of the window on the screen, in physical screen coordinates and excluding
     /// a window frame (if present).
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_size(handle: *const WindowAdapterRcOpaque) -> IntSize {
         let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
         window_adapter.size().to_euclid().cast()
@@ -1752,7 +1779,7 @@ pub mod ffi {
 
     /// Resizes the window to the specified size on the screen, in physical pixels and excluding
     /// a window frame (if present).
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_physical_size(
         handle: *const WindowAdapterRcOpaque,
         size: &IntSize,
@@ -1763,7 +1790,7 @@ pub mod ffi {
 
     /// Resizes the window to the specified size on the screen, in physical pixels and excluding
     /// a window frame (if present).
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_logical_size(
         handle: *const WindowAdapterRcOpaque,
         size: &Size,
@@ -1773,7 +1800,7 @@ pub mod ffi {
     }
 
     /// Return whether the style is using a dark theme
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_color_scheme(
         handle: *const WindowAdapterRcOpaque,
     ) -> ColorScheme {
@@ -1784,7 +1811,7 @@ pub mod ffi {
     }
 
     /// Return whether the platform supports native menu bars
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_supports_native_menu_bar(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
@@ -1793,7 +1820,7 @@ pub mod ffi {
     }
 
     /// Setup the native menu bar
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_setup_native_menu_bar(
         handle: *const WindowAdapterRcOpaque,
         vtable: NonNull<MenuVTable>,
@@ -1806,7 +1833,7 @@ pub mod ffi {
     }
 
     /// Return the default-font-size property of the WindowItem
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_default_font_size(
         handle: *const WindowAdapterRcOpaque,
     ) -> f32 {
@@ -1815,7 +1842,7 @@ pub mod ffi {
     }
 
     /// Dispatch a key pressed or release event
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_dispatch_key_event(
         handle: *const WindowAdapterRcOpaque,
         event_type: crate::input::KeyEventType,
@@ -1832,7 +1859,7 @@ pub mod ffi {
     }
 
     /// Dispatch a mouse event
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_dispatch_pointer_event(
         handle: *const WindowAdapterRcOpaque,
         event: crate::input::MouseEvent,
@@ -1842,7 +1869,7 @@ pub mod ffi {
     }
 
     /// Dispatch a window event
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_dispatch_event(
         handle: *const WindowAdapterRcOpaque,
         event: &crate::platform::WindowEvent,
@@ -1851,7 +1878,7 @@ pub mod ffi {
         window_adapter.window().dispatch_event(event.clone());
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_is_fullscreen(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
@@ -1859,7 +1886,7 @@ pub mod ffi {
         window_adapter.window().is_fullscreen()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_is_minimized(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
@@ -1867,7 +1894,7 @@ pub mod ffi {
         window_adapter.window().is_minimized()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_is_maximized(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
@@ -1875,7 +1902,7 @@ pub mod ffi {
         window_adapter.window().is_maximized()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_fullscreen(
         handle: *const WindowAdapterRcOpaque,
         value: bool,
@@ -1884,7 +1911,7 @@ pub mod ffi {
         window_adapter.window().set_fullscreen(value)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_minimized(
         handle: *const WindowAdapterRcOpaque,
         value: bool,
@@ -1893,7 +1920,7 @@ pub mod ffi {
         window_adapter.window().set_minimized(value)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_set_maximized(
         handle: *const WindowAdapterRcOpaque,
         value: bool,
@@ -1903,7 +1930,7 @@ pub mod ffi {
     }
 
     /// Takes a snapshot of the window contents and returns it as RGBA8 encoded pixel buffer.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_take_snapshot(
         handle: *const WindowAdapterRcOpaque,
         data: &mut SharedVector<Rgba8Pixel>,

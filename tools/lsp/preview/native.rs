@@ -5,8 +5,7 @@
 
 use std::collections::HashMap;
 
-use super::PreviewState;
-use crate::common::{PreviewToLspMessage, SourceFileVersion};
+use crate::common::{self, PreviewToLspMessage, SourceFileVersion};
 use crate::ServerNotifier;
 use slint_interpreter::ComponentHandle;
 use std::future::Future;
@@ -33,11 +32,8 @@ static GUI_EVENT_LOOP_STATE_REQUEST: LazyLock<Mutex<RequestedGuiEventLoopState>>
 
 thread_local! {static CLI_ARGS: std::cell::OnceCell<crate::Cli> = Default::default();}
 
-pub fn run_in_ui_thread<F: Future<Output = ()> + 'static>(
-    create_future: impl Send + FnOnce() -> F + 'static,
-) -> Result<(), String> {
-    // Wake up the main thread to start the event loop, if possible
-    {
+pub fn lsp_to_preview_message(message: common::LspToPreviewMessage) {
+    fn ensure_ui_event_loop() -> Result<(), String> {
         let mut state_request = GUI_EVENT_LOOP_STATE_REQUEST.lock().unwrap();
         if *state_request == RequestedGuiEventLoopState::Uninitialized {
             *state_request = RequestedGuiEventLoopState::StartLoop;
@@ -51,12 +47,38 @@ pub fn run_in_ui_thread<F: Future<Output = ()> + 'static>(
         if let RequestedGuiEventLoopState::InitializationError(err) = &*state_request {
             return Err(err.clone());
         }
+
+        Ok(())
     }
 
-    i_slint_core::api::invoke_from_event_loop(move || {
-        slint::spawn_local(create_future()).unwrap();
-    })
-    .map_err(|e| e.to_string())
+    fn run_in_ui_thread<F: Future<Output = ()> + 'static>(
+        create_future: impl Send + FnOnce() -> F + 'static,
+    ) -> Result<(), String> {
+        i_slint_core::api::invoke_from_event_loop(move || {
+            slint::spawn_local(create_future()).unwrap();
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    let loop_is_started = {
+        *GUI_EVENT_LOOP_STATE_REQUEST.lock().unwrap() == RequestedGuiEventLoopState::LoopStarted
+    };
+
+    if matches!(message, common::LspToPreviewMessage::ShowPreview(_)) && !loop_is_started {
+        if let Err(e) = ensure_ui_event_loop() {
+            super::send_platform_error_notification(&e);
+        }
+
+        send_message_to_lsp(PreviewToLspMessage::RequestState { unused: true });
+        return;
+    }
+    if loop_is_started {
+        if let Err(e) = run_in_ui_thread(move || async move {
+            super::lsp_to_preview_message_impl(message);
+        }) {
+            super::send_platform_error_notification(&e);
+        }
+    }
 }
 
 /// This is the main entry for the Slint event loop. It runs on the main thread,
@@ -144,7 +166,9 @@ pub fn quit_ui_event_loop() {
         GUI_EVENT_LOOP_NOTIFIER.notify_one();
     }
 
-    close_ui();
+    let _ = i_slint_core::api::invoke_from_event_loop(move || {
+        close_ui();
+    });
 
     let _ = i_slint_core::api::quit_event_loop();
 
@@ -152,16 +176,17 @@ pub fn quit_ui_event_loop() {
     *SERVER_NOTIFIER.lock().unwrap() = None
 }
 
-pub(super) fn open_ui_impl(preview_state: &mut PreviewState) -> Result<(), slint::PlatformError> {
+pub(super) fn open_ui_impl(
+    preview_state: &mut super::PreviewState,
+) -> Result<(), slint::PlatformError> {
     let (default_style, show_preview_ui, fullscreen) = {
-        let cache = super::CONTENT_CACHE.get_or_init(Default::default).lock().unwrap();
-        let style = cache.config.style.clone();
+        let style = preview_state.config.style.clone();
         let style = if style.is_empty() {
             CLI_ARGS.with(|args| args.get().map(|a| a.style.clone()).unwrap_or_default())
         } else {
             style
         };
-        let hide_ui = cache
+        let hide_ui = preview_state
             .config
             .hide_ui
             .or_else(|| CLI_ARGS.with(|args| args.get().map(|a| a.no_toolbar)))
@@ -172,63 +197,39 @@ pub(super) fn open_ui_impl(preview_state: &mut PreviewState) -> Result<(), slint
 
     let experimental = std::env::var_os("SLINT_ENABLE_EXPERIMENTAL_FEATURES").is_some();
 
-    let ui = match preview_state.ui.as_ref() {
-        Some(ui) => ui,
-        None => {
-            let ui = super::ui::create_ui(default_style, experimental)?;
-            preview_state.ui.insert(ui)
-        }
-    };
+    if preview_state.ui.is_none() {
+        let ui = super::ui::create_ui(default_style, experimental)?;
+        crate::preview::send_telemetry(&mut [(
+            "type".to_string(),
+            serde_json::to_value("preview_opened").unwrap(),
+        )]);
+        let ui = preview_state.ui.insert(ui);
+        ui.window().set_fullscreen(fullscreen);
+        ui.window().on_close_requested(|| slint::CloseRequestResponse::HideWindow);
 
-    super::CONTENT_CACHE.get_or_init(Default::default).lock().unwrap().ui_is_visible = true;
+        let api = ui.global::<crate::preview::ui::Api>();
+        api.set_show_preview_ui(show_preview_ui);
+    }
 
-    let api = ui.global::<crate::preview::ui::Api>();
-    api.set_show_preview_ui(show_preview_ui);
-    ui.window().set_fullscreen(fullscreen);
-    ui.window().on_close_requested(|| {
-        let mut cache = super::CONTENT_CACHE.get_or_init(Default::default).lock().unwrap();
-        cache.ui_is_visible = false;
-        slint::CloseRequestResponse::HideWindow
-    });
     Ok(())
 }
 
 pub fn close_ui() {
-    {
-        let mut cache = super::CONTENT_CACHE.get_or_init(Default::default).lock().unwrap();
-        if !cache.ui_is_visible {
-            return; // UI is already down!
+    super::PREVIEW_STATE.with_borrow_mut(|preview_state| {
+        if let Some(ui) = &preview_state.ui {
+            ui.hide().unwrap();
         }
-        cache.ui_is_visible = false;
-    }
-
-    i_slint_core::api::invoke_from_event_loop(move || {
-        super::PREVIEW_STATE.with(move |preview_state| {
-            let mut preview_state = preview_state.borrow_mut();
-            close_ui_impl(&mut preview_state)
-        });
-    })
-    .unwrap(); // TODO: Handle Error
-}
-
-fn close_ui_impl(preview_state: &mut PreviewState) {
-    let ui = preview_state.ui.take();
-    if let Some(ui) = ui {
-        ui.hide().unwrap();
-    }
+    });
 }
 
 #[cfg(target_vendor = "apple")]
 fn toggle_always_on_top() {
-    i_slint_core::api::invoke_from_event_loop(move || {
-        super::PREVIEW_STATE.with(move |preview_state| {
-            let preview_state = preview_state.borrow_mut();
-            let Some(ui) = preview_state.ui.as_ref() else { return };
-            let api = ui.global::<crate::preview::ui::Api>();
-            api.set_always_on_top(!api.get_always_on_top());
-        });
-    })
-    .unwrap(); // TODO: Handle Error
+    super::PREVIEW_STATE.with(move |preview_state| {
+        let preview_state = preview_state.borrow_mut();
+        let Some(ui) = preview_state.ui.as_ref() else { return };
+        let api = ui.global::<crate::preview::ui::Api>();
+        api.set_always_on_top(!api.get_always_on_top());
+    });
 }
 
 static SERVER_NOTIFIER: Mutex<Option<ServerNotifier>> = Mutex::new(None);
@@ -246,7 +247,7 @@ pub fn notify_diagnostics(
     };
 
     for (url, (version, diagnostics)) in diagnostics {
-        crate::common::lsp_to_editor::notify_lsp_diagnostics(&sender, url, version, diagnostics)?;
+        common::lsp_to_editor::notify_lsp_diagnostics(&sender, url, version, diagnostics)?;
     }
     Some(())
 }
@@ -256,9 +257,8 @@ pub fn ask_editor_to_show_document(file: &str, selection: lsp_types::Range, take
         return;
     };
     let Ok(url) = lsp_types::Url::from_file_path(file) else { return };
-    let fut = crate::common::lsp_to_editor::send_show_document_to_editor(
-        sender, url, selection, take_focus,
-    );
+    let fut =
+        common::lsp_to_editor::send_show_document_to_editor(sender, url, selection, take_focus);
     slint_interpreter::spawn_local(fut).unwrap(); // Fire and forget.
 }
 
@@ -331,13 +331,19 @@ fn init_apple_platform(
     let keep_on_top_id = keep_on_top_menu_item.id().clone();
 
     muda::MenuEvent::set_event_handler(Some(move |menu_event: muda::MenuEvent| {
-        if menu_event.id == close_id {
-            close_ui();
-        } else if menu_event.id == reload_id {
-            super::reload_preview();
-        } else if menu_event.id == keep_on_top_id {
-            toggle_always_on_top();
-        }
+        let close_id = close_id.clone();
+        let reload_id = reload_id.clone();
+        let keep_on_top_id = keep_on_top_id.clone();
+
+        let _ = slint::invoke_from_event_loop(move || {
+            if menu_event.id == close_id {
+                close_ui();
+            } else if menu_event.id == reload_id {
+                super::reload_preview();
+            } else if menu_event.id == keep_on_top_id {
+                toggle_always_on_top();
+            }
+        });
     }));
 
     Ok((close_app_menu_item, reload_menu_item, keep_on_top_menu_item))

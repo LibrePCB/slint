@@ -3,6 +3,65 @@
 # Changelog
 All notable changes to this project are documented in this file.
 
+## [1.12.0] - TBD
+
+### General
+
+ - Added `renderer-femtovg-wgpu` (Rust) / `SLINT_FEATURE_RENDERER_FEMTOVG_WGPU` (CMake) as new rendering option,
+   based on [WGPU](https://wgpu.rs/).
+ - Fix the way Window::default-font is applied, making it work in the live preview.
+ - Updated AccessKit
+ - Initial iOS support
+ - Fixed blinking window icon on Windows (#7994)
+ - FemtoVG: Fixed extra space of the `\n` char in text rendering (#7970)
+ - Winit: Added support for SVG icons in the window title
+ - `TextInput` selects its content when focused with the keyboard on Windows and Linux
+
+
+### Slint Language
+
+ - Detect binding loops that applies to the Window itself
+ - Added `Math.exp` and `Math.ln`
+ - Added `Platform.style-name` and `Platform.os` properties to permit style and OS dependent code.
+ - Fixed changed callback on private global properties (#8269)
+ - Added `ContextMenuArea::enabled`
+ - Slint compilation error for comparison of types that can't be compared with less or greater operator.
+ - `Flickable` now has a change event to keep in bounds when geometry changes (#2227, #7487)
+ - Added `in-out` transition in states.
+ - Added `focus-gained` and `focus-lost` callback to FocusScope.
+ - Pass a `FocusReason` enum to the FocusScope callbacks
+
+### Widgets
+
+ - Fixed `ScrollView` scrollbar actions not triggering `scrolled` callback (#8170)
+ - Added content-padding to GroupBox (#8314)
+ - TextEdit/LineEdit: disable context menu action when the widget is disabled or read-only
+ - Added `mouse-drag-pan-enabled` property to `ScrollView` (#8512)
+
+### Rust
+
+ - Added `unstable-winit-030` feature along with `slint::winit_030` module in the API to provide access
+   to winit APIs.
+ - Added `unstable-wgpu-24` feature along with `slint::wgpu_24` module to enable Slint <> WPU interoperatiblity.
+ - Make `Debug` impl of `PlatformError` show the display string
+ - slint-build: Implement `Clone` for `CompilerConfiguration`
+ - sint-interpreter: The `From<ModelRc> for slint_interpreter::Value` now gives a model that supports `set_row_data`.
+
+### C++
+
+ - Made generated code more robust when in namespaces regarding forward declaration
+ - Added a few asserts to ensure the code is run in the right thread
+ - Don't crash when `Model::row_data` returns `nullopt`
+
+### Python
+
+### LSP and Tooling
+
+ - live preview: Do not apply live data changes after "Reload"
+ - live preview: Added telemetry events
+ - live preview: support Palette names in color picker
+ - figma-inspector: ... TODO ...
+
 ## [1.11.0] - 2025-04-23
 
 ### General
@@ -21,12 +80,12 @@ All notable changes to this project are documented in this file.
 
  - Added `float.to-fixed()` and `float.to-precision()`.
  - Added `string.to-lowercase()` and `string.to-uppercase()`.
- - Fixed change handler on a aliased property. (#7784, #7747)
+ - Fixed change handler on an aliased property. (#7784, #7747)
  - Fixed compiler panic when one branch of the `if` statement is not a void expression. (#7864)
  - Fixed `@children` as sibling to `Timer` or `PopupWindow`. (#7887)
  - Deprecated alias to global callbacks and make it an error when setting it, instead of a panic. (#7806)
  - Conditional element no longer re-instantiates if the condition gets dirty without changing. (#3953)
- - Fixed crash if a component get destroyed when a funciton or callback of it is running. (#7880)
+ - Fixed crash if a component get destroyed when a function or callback of it is running. (#7880)
  - `Color.hsv()`: The hue value now wraps instead of clamping between 0 and 360. e.g. a hue of `480` would wrap as expected to `120`.
    Previously any value equal or greater than 360 would cause the function to output pure black. In the unlikely case an app relied
    on this keep an eye out as a color will now show up instead of black.
@@ -149,7 +208,7 @@ All notable changes to this project are documented in this file.
 ### Slint Language
 
  - Added `AccessibleRole::tab-panel` and fixed accessibility on `TabWidget` (#7270)
- - Added `AccessibleRole::groupbox` and fixed accessibility on on `GroupBox`
+ - Added `AccessibleRole::groupbox` and fixed accessibility on `GroupBox`
  - Better error recovery when element name is missing.
  - Added warning when a type name overwrites another.
  - Added `Path::anti-alias` property.
@@ -1617,7 +1676,7 @@ as well as the [Rust migration guide for the `sixtyfps` crate](api/rs/slint/migr
  - `Slider` now has a `changed` callback.
  - Added `TabWidget` widget.
  - Rust: `sixtyfps::Image` can now be constructed from image data provided by `sixtyfps::SharedPixelBuffer`.
-   This enables integrating with other low-level software rendering or the the popular Rust image crate.
+   This enables integrating with other low-level software rendering or the popular Rust image crate.
  - VSCode extension: added an option to specify command line arguments for the LSP.
 
 ### Fixed

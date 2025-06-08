@@ -50,6 +50,9 @@
     "float": {
         "href": "reference/primitive-types/#float"
     },
+    "FocusReason": {
+        "href": "reference/global-structs-enums/#focusreason"
+    },
     "FocusHandling": {
         "href": "guide/development/focus/"
     },
@@ -106,6 +109,9 @@
     },
     "NumericTypes": {
         "href": "reference/primitive-types/#numeric-types"
+    },
+    "Palette": {
+        "href": "reference/std-widgets/overview/#palette-properties"
     },
     "Path": {
         "href": "reference/elements/path/"
@@ -184,6 +190,9 @@
     },
     "backends_and_renderers": {
         "href": "guide/backends-and-renderers/backends_and_renderers/"
+    },
+    "skia_renderer": {
+        "href": "guide/backends-and-renderers/backends_and_renderers/#skia-renderer"
     },
     "globals": {
         "href": "guide/language/coding/globals/"

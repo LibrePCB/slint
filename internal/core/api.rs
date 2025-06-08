@@ -268,6 +268,20 @@ pub enum GraphicsAPI<'a> {
         /// `getContext` function on the HTML Canvas element.
         context_type: &'a str,
     },
+    /// The rendering is based on WGPU 24.x. Use the provided fields to submit commits to the provided
+    /// WGPU command queue.
+    ///
+    /// *Note*: This enum variant is behind a feature flag and may be removed or changed in future minor releases,
+    ///         as new major WGPU releases become available.
+    #[cfg(feature = "unstable-wgpu-24")]
+    WGPU24 {
+        /// The WGPU instance used for rendering.
+        instance: wgpu_24::Instance,
+        /// The WGPU device used for rendering.
+        device: wgpu_24::Device,
+        /// The WGPU queue for used for command submission.
+        queue: wgpu_24::Queue,
+    },
 }
 
 impl core::fmt::Debug for GraphicsAPI<'_> {
@@ -277,6 +291,8 @@ impl core::fmt::Debug for GraphicsAPI<'_> {
             GraphicsAPI::WebGL { context_type, .. } => {
                 write!(f, "GraphicsAPI::WebGL(context_type = {context_type})")
             }
+            #[cfg(feature = "unstable-wgpu-24")]
+            GraphicsAPI::WGPU24 { .. } => write!(f, "GraphicsAPI::WGPU24"),
         }
     }
 }
@@ -1016,7 +1032,6 @@ impl std::error::Error for EventLoopError {}
 /// use slint::platform::PlatformError;
 /// PlatformError::from(format!("Could not load resource {}", 1234));
 /// ```
-#[derive(Debug)]
 #[non_exhaustive]
 pub enum PlatformError {
     /// No default platform was selected, or no platform could be initialized.
@@ -1045,6 +1060,12 @@ pub enum PlatformError {
 impl From<PlatformError> for wasm_bindgen::JsValue {
     fn from(err: PlatformError) -> wasm_bindgen::JsValue {
         wasm_bindgen::JsError::from(err).into()
+    }
+}
+
+impl core::fmt::Debug for PlatformError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(self, f)
     }
 }
 

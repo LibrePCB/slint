@@ -4,11 +4,11 @@
 
 We warmly welcome contributions to the project. Let's discuss ideas or questions
 in [Github discussions](https://github.com/slint-ui/slint/discussions).
-Please feel welcome to open GitHub issues, pull requests, or comment for example
-on [RFC tagged](https://github.com/slint-ui/slint/labels/rfc) issues.
+Please feel welcome to open GitHub issues or pull requests.
+Use 👍 reaction on issue that you consider important.
 
 Issues which we think are suitable for new contributors are tagged with
-[good first issue](https://github.com/slint-ui/slint/labels/good%20first%20issue).
+https://github.com/slint-ui/slint/labels/good%20first%20issue.
 
 ## Internal documentation
 
@@ -29,6 +29,6 @@ When opening a pull request, you will be asked to sign a
 
 ## Coding Style
 
-For the Rust portion of the code base, the CI enforce the coding style via rustfmt.
-For the C++ portion of the code base, the CI enforce the coding style via `clang-format`.
+For the Rust portion of the code base, the CI enforces the coding style via rustfmt.
+For the C++ portion of the code base, the CI enforces the coding style via `clang-format`.
 

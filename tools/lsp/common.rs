@@ -532,6 +532,8 @@ pub enum PreviewToLspMessage {
     SendWorkspaceEdit { label: Option<String>, edit: lsp_types::WorkspaceEdit },
     /// Pass a `ShowMessage` notification on to the editor
     SendShowMessage { message: lsp_types::ShowMessageParams },
+    /// Senf a telemetry event
+    TelemetryEvent(serde_json::Map<String, serde_json::Value>),
 }
 
 /// Information on the Element types available
@@ -573,6 +575,26 @@ impl ComponentInformation {
                 url.to_file_path().ok().map(|p| p.to_string_lossy().to_string())
             }
         }
+    }
+}
+
+/// Poll a future once and return its result if it was `Ready` afterwards
+/// or `None` otherwise.
+#[cfg(feature = "preview-engine")]
+pub fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
+    struct DummyWaker();
+    impl std::task::Wake for DummyWaker {
+        fn wake(self: std::sync::Arc<Self>) {}
+    }
+
+    let waker = std::sync::Arc::new(DummyWaker()).into();
+    let mut ctx = std::task::Context::from_waker(&waker);
+
+    let future = std::pin::pin!(future);
+
+    match future.poll(&mut ctx) {
+        std::task::Poll::Ready(result) => Some(result),
+        std::task::Poll::Pending => None,
     }
 }
 
@@ -624,6 +646,45 @@ pub mod lsp_to_editor {
 
         let _ = fut.await;
     }
+}
+
+#[cfg(feature = "preview-engine")]
+pub fn fuzzy_filter_iter<T: std::fmt::Debug>(
+    input: &mut impl Iterator<Item = T>,
+    transformer: impl Fn(&T) -> String,
+    needle: &str,
+) -> Vec<T> {
+    use nucleo_matcher::{pattern, Config, Matcher};
+
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let pattern = pattern::Pattern::parse(
+        needle,
+        pattern::CaseMatching::Ignore,
+        pattern::Normalization::Smart,
+    );
+
+    let mut all_matches = input
+        .filter_map(|t| {
+            let terms = [transformer(&t)];
+            pattern.match_list(terms.iter(), &mut matcher).pop().map(|(_, v)| (v, t))
+        })
+        .collect::<Vec<_>>();
+
+    // sort by value, highest first. Sort names with the same value alphabetically
+    all_matches.sort_by(|r, l| l.0.cmp(&r.0));
+
+    let cut_off = {
+        let lowest_value = all_matches.last().map(|(v, _)| *v).unwrap_or_default();
+        let highest_value = all_matches.first().map(|(v, _)| *v).unwrap_or_default();
+
+        if all_matches.len() < 10 {
+            lowest_value
+        } else {
+            highest_value - (highest_value - lowest_value) / 2
+        }
+    };
+
+    all_matches.drain(..).take_while(|(v, _)| *v >= cut_off).map(|(_, t)| t).collect::<Vec<_>>()
 }
 
 #[cfg(test)]

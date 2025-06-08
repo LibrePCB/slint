@@ -66,7 +66,6 @@ jobs:
             - name: Downgrade cc and ring crate to work around https://github.com/slint-ui/slint/issues/6875
               run: |
                   cargo update -p ring --precise 0.17.9
-                  cargo update -p cc --precise 1.1.31
             - name: Fetch Yocto SDK
               run: |
                   # Fetch pre-built SDK built via populate_sdk for core-image-weston with setup from https://github.com/slint-ui/meta-slint/blob/main/.github/workflows/ci.yml
@@ -118,7 +117,7 @@ jobs:
                 components: rust-src
                 target: ${{matrix.target}}
           - name: Setup Zephyr project
-            uses: zephyrproject-rtos/action-zephyr-setup@v1.0.6
+            uses: zephyrproject-rtos/action-zephyr-setup@v1.0.7
             with:
                 app-path: slint
                 manifest-file-name: demos/printerdemo/zephyr/west.yaml
@@ -141,4 +140,52 @@ jobs:
                   target: x86_64-unknown-uefi
             - name: Check
               run: cargo check --target=x86_64-unknown-uefi -p uefi-demo
+
+    ios:
+        strategy:
+            matrix:
+              demo:
+                - demos/home-automation/rust
+                - demos/energy-monitor
+              include:
+                - demo: demos/home-automation/rust
+                  scheme: "Home Automation"
+                  bundle_id: dev.slint.demos.HomeAutomation
+                  device: iPad Pro 13-inch (M4)
+                - demo: demos/energy-monitor
+                  scheme: "Energy Monitor"
+                  bundle_id: dev.slint.demos.EnergyMonitor
+                  device: iPhone 16
+        runs-on: macos-14
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-rust
+              with:
+                  target: aarch64-apple-ios-sim
+            - run: brew install xcodegen
+            - run: xcodegen -s ios-project.yml
+              working-directory: ${{ matrix.demo }}
+            - run: xcodebuild -scheme "${{ matrix.scheme }}" -destination 'platform=iOS Simulator,name=${{ matrix.device }}' build
+              working-directory: ${{ matrix.demo }}
+            - name: "Boot Simulator"
+              run: |
+                xcrun simctl boot "${{ matrix.device }}"
+                sleep 10
+            - name: "Install"
+              run: |
+                APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "${{ matrix.scheme }}.app" | head -n 1)
+                echo "Found app bundle at $APP_PATH"
+                xcrun simctl install booted "$APP_PATH"
+            - name: "Launch"
+              run: |
+                xcrun simctl launch booted "${{ matrix.bundle_id }}"
+                sleep 5
+            - name: "Screenshot"
+              run: xcrun simctl io booted screenshot "${{ matrix.scheme }}.png"
+            - name: Upload Screenshot Artifact
+              uses: actions/upload-artifact@v4
+              with:
+                name: ${{matrix.scheme}}-screenshot
+                path: ${{ matrix.scheme }}.png
+
 

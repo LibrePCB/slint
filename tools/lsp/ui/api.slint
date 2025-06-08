@@ -131,14 +131,15 @@ export struct PropertyValue {
     display-string: string, // ALLWAYS, its a string description of what is there
     value-bool: bool, // boolean
     is-translatable: bool, // string
-    kind: PropertyValueKind,
+    kind: PropertyValueKind, // Defines what to display this as
+    value-kind: PropertyValueKind, // If kind == code, then this is the real kind of data
     brush-kind: BrushKind, // brush
     gradient-stops: [GradientStop], // brush
     value-brush: brush, // brush, color
     value-float: float, // float, brush (angle)
     value-int: int, // integer, enum/float (current index into visual_items)
     default-selection: int, // enum/float (default index into visual_items)
-    value-string: string, // enum (name), string, brush (color value)
+    value-string: string, // enum (name), string, brush (palette name or empty)
     visual-items: [string], // enum (enum members), float (units)
     tr-context: string, // string
     tr-plural: string, // string
@@ -217,6 +218,25 @@ export struct ElementInformation {
     range: Range,
 }
 
+export struct PaletteEntry {
+    name: string,
+    value: PropertyValue,
+}
+
+export enum LogMessageLevel {
+    Debug,
+    Warning,
+    Error,
+}
+
+export struct LogMessage {
+    file: string,
+    line: int,
+    column: int,
+    message: string,
+    level: LogMessageLevel,
+}
+
 export global Api {
     // # Properties
     // ## General preview state:
@@ -248,15 +268,22 @@ export global Api {
     // control, but command on macOS
     in-out property <string> control-key-name: "control";
 
+    // ## Log Output
+    in-out property <[LogMessage]> log-output;
+
     // ## Drawing Area
     // Borders around things
     in property <[Selection]> selections;
     in-out property <DropMark> drop-mark;
     // The actual preview
-    in property <component-factory> preview-area;
+    in-out property <component-factory> preview-area;
 
     // set to true to resize
     in property <bool> resize-to-preferred-size: false;
+
+    // ## Palette data:
+    in-out property <[PaletteEntry]> palettes;
+    in-out property <[color]> recent-colors;
 
     // ## Property Editor
     in-out property <ElementInformation> current-element;
@@ -523,7 +550,7 @@ export global Api {
     pure callback insert-row-into-value-table(table: PropertyValueTable, insert-before: int);
     pure callback remove-row-from-value-table(table: PropertyValueTable, remove-row: int);
 
-    pure callback set-json-preview-data(component: string, name: string, json-value: string) -> string;
+    pure callback set-json-preview-data(component: string, name: string, json-value: string, send-telemetry: bool) -> string;
 
     pure callback as-json-brush(kind: BrushKind, angle: float, color: color, stops: [GradientStop]) -> string;
 
@@ -539,4 +566,13 @@ export global Api {
 
     // Get the property declaration/definition ranges
     callback property-declaration-ranges(property-name: string) -> PropertyDeclaration;
+
+    // Palettes:
+    pure callback filter-palettes(palettes: [PaletteEntry], pattern: string) -> [PaletteEntry];
+    callback add-recent-color(color);
+    pure callback is-css-color(code: string) -> bool;
+
+    // Console / LogMessages
+    pure callback filter-log-messages(messages: [LogMessage], pattern: string) -> [LogMessage];
+    callback clear-log-messages();
 }

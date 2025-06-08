@@ -195,7 +195,7 @@ impl Snapshotter {
             all_documents,
             global_type_registry: self.snapshot_type_register(&type_loader.global_type_registry),
             compiler_config: type_loader.compiler_config.clone(),
-            style: type_loader.style.clone(),
+            resolved_style: type_loader.resolved_style.clone(),
         })
     }
 
@@ -327,13 +327,8 @@ impl Snapshotter {
                     .collect(),
             );
 
-            let child_insertion_point = RefCell::new(
-                component
-                    .child_insertion_point
-                    .borrow()
-                    .as_ref()
-                    .map(|(e, s, n)| (self.use_element(e), *s, n.clone())),
-            );
+            let child_insertion_point =
+                RefCell::new(component.child_insertion_point.borrow().clone());
 
             let popup_windows = RefCell::new(
                 component
@@ -453,7 +448,7 @@ impl Snapshotter {
             .transitions
             .iter()
             .map(|t| object_tree::Transition {
-                is_out: t.is_out,
+                direction: t.direction,
                 state_id: t.state_id.clone(),
                 property_animations: t
                     .property_animations
@@ -570,7 +565,7 @@ impl Snapshotter {
                             .iter()
                             .map(|tpa| object_tree::TransitionPropertyAnimation {
                                 state_id: tpa.state_id,
-                                is_out: tpa.is_out,
+                                direction: tpa.direction,
                                 animation: self.create_and_snapshot_element(&tpa.animation),
                             })
                             .collect(),
@@ -840,7 +835,9 @@ impl Snapshotter {
 pub struct TypeLoader {
     pub global_type_registry: Rc<RefCell<TypeRegister>>,
     pub compiler_config: CompilerConfiguration,
-    style: String,
+    /// The style that was specified in the compiler configuration, but resolved. So "native" for example is resolved to the concrete
+    /// style.
+    pub resolved_style: String,
     all_documents: LoadedDocuments,
 }
 
@@ -868,7 +865,7 @@ impl TypeLoader {
         let myself = Self {
             global_type_registry,
             compiler_config,
-            style: style.clone(),
+            resolved_style: style.clone(),
             all_documents: Default::default(),
         };
 
@@ -1044,7 +1041,7 @@ impl TypeLoader {
                                 .filter_map(|e| {
                                     let (imported_name, exported_name) = ExportedName::from_export_specifier(&e);
                                     let Some(r) = doc.exports.find(&imported_name) else {
-                                        state.diag.push_error(format!("No exported type called '{imported_name}' found in {doc_path:?}"), &e);
+                                        state.diag.push_error(format!("No exported type called '{imported_name}' found in \"{}\"", doc_path.display()), &e);
                                         return None;
                                     };
                                     Some((exported_name, r))
@@ -1528,7 +1525,7 @@ impl TypeLoader {
             .chain(
                 (file_to_import == "std-widgets.slint"
                     || referencing_file.is_some_and(|x| x.starts_with("builtin:/")))
-                .then(|| format!("builtin:/{}", self.style).into()),
+                .then(|| format!("builtin:/{}", self.resolved_style).into()),
             )
             .find_map(|include_dir| {
                 let candidate = crate::pathutils::join(&include_dir, Path::new(file_to_import))?;
@@ -1653,9 +1650,14 @@ fn get_native_style(all_loaded_files: &mut std::collections::BTreeSet<PathBuf>) 
                 )
             })
         });
+
     if let Some(style) = target_path.and_then(|target_path| {
-        all_loaded_files.insert(target_path.clone());
-        std::fs::read_to_string(target_path).map(|style| style.trim().into()).ok()
+        std::fs::read_to_string(&target_path)
+            .map(|style| {
+                all_loaded_files.insert(target_path);
+                style.trim().into()
+            })
+            .ok()
     }) {
         return style;
     }

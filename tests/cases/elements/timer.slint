@@ -5,6 +5,11 @@ export global G {
     in-out property <bool> tArunning: true;
 }
 
+component Bug8541 {
+    out property <bool> bar: true;
+}
+
+
 component SubCompo {
 
     out property <string> r;
@@ -22,7 +27,7 @@ component SubCompo {
         }
         for l in ["c", "d"] : Rectangle {
             Timer {
-                interval: 3.0003s;
+                interval: 3s;
                 triggered => { r += l; }
             }
         }
@@ -51,18 +56,20 @@ export component TestCase inherits Window {
     }
     out property <bool> test: vl.max-width == 0;
 
+    bug8541 := Bug8541 {}
+
     Rectangle {
         tm2 := Timer {
             running: false;
             interval: tm2duration * 1ms;
-            triggered => { result += "2"; }
+            triggered => { if bug8541.bar { result += "2"; } }
         }
     }
 
     Rectangle {
         oops := Timer {
             interval: -5ms;
-            triggered => { result += "oops"; }
+            triggered => { result += "oops"; debug(s.absolute-position.x) }
         }
         s := SubCompo {  }
     }

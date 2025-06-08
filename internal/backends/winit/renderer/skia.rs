@@ -1,76 +1,77 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::winitwindowadapter::physical_size_to_slint;
 use i_slint_core::graphics::RequestedGraphicsAPI;
 use i_slint_core::platform::PlatformError;
+use i_slint_renderer_skia::SkiaRenderer;
 
 pub struct WinitSkiaRenderer {
-    renderer: i_slint_renderer_skia::SkiaRenderer,
-    suspended: Cell<bool>,
+    renderer: SkiaRenderer,
 }
 
 impl WinitSkiaRenderer {
-    pub fn new_suspended() -> Box<dyn super::WinitCompatibleRenderer> {
-        Box::new(Self {
-            renderer: i_slint_renderer_skia::SkiaRenderer::default(),
-            suspended: Default::default(),
-        })
+    pub fn new_suspended(
+        shared_backend_data: &Rc<crate::SharedBackendData>,
+    ) -> Box<dyn super::WinitCompatibleRenderer> {
+        Box::new(Self { renderer: SkiaRenderer::default(&shared_backend_data.skia_context) })
     }
 
     #[cfg(not(target_os = "android"))]
-    pub fn new_software_suspended() -> Box<dyn super::WinitCompatibleRenderer> {
+    pub fn new_software_suspended(
+        shared_backend_data: &Rc<crate::SharedBackendData>,
+    ) -> Box<dyn super::WinitCompatibleRenderer> {
         Box::new(Self {
-            renderer: i_slint_renderer_skia::SkiaRenderer::default_software(),
-            suspended: Default::default(),
+            renderer: SkiaRenderer::default_software(&shared_backend_data.skia_context),
         })
     }
 
-    #[cfg(not(target_os = "ios"))]
-    pub fn new_opengl_suspended() -> Box<dyn super::WinitCompatibleRenderer> {
-        Box::new(Self {
-            renderer: i_slint_renderer_skia::SkiaRenderer::default_opengl(),
-            suspended: Default::default(),
-        })
+    #[cfg(not(ios_and_friends))]
+    pub fn new_opengl_suspended(
+        shared_backend_data: &Rc<crate::SharedBackendData>,
+    ) -> Box<dyn super::WinitCompatibleRenderer> {
+        Box::new(Self { renderer: SkiaRenderer::default_opengl(&shared_backend_data.skia_context) })
     }
 
     #[cfg(target_vendor = "apple")]
-    pub fn new_metal_suspended() -> Box<dyn super::WinitCompatibleRenderer> {
-        Box::new(Self {
-            renderer: i_slint_renderer_skia::SkiaRenderer::default_metal(),
-            suspended: Default::default(),
-        })
+    pub fn new_metal_suspended(
+        shared_backend_data: &Rc<crate::SharedBackendData>,
+    ) -> Box<dyn super::WinitCompatibleRenderer> {
+        Box::new(Self { renderer: SkiaRenderer::default_metal(&shared_backend_data.skia_context) })
     }
 
     #[cfg(feature = "renderer-skia-vulkan")]
-    pub fn new_vulkan_suspended() -> Box<dyn super::WinitCompatibleRenderer> {
-        Box::new(Self {
-            renderer: i_slint_renderer_skia::SkiaRenderer::default_vulkan(),
-            suspended: Default::default(),
-        })
+    pub fn new_vulkan_suspended(
+        shared_backend_data: &Rc<crate::SharedBackendData>,
+    ) -> Box<dyn super::WinitCompatibleRenderer> {
+        Box::new(Self { renderer: SkiaRenderer::default_vulkan(&shared_backend_data.skia_context) })
     }
 
     #[cfg(target_family = "windows")]
-    pub fn new_direct3d_suspended() -> Box<dyn super::WinitCompatibleRenderer> {
+    pub fn new_direct3d_suspended(
+        shared_backend_data: &Rc<crate::SharedBackendData>,
+    ) -> Box<dyn super::WinitCompatibleRenderer> {
         Box::new(Self {
-            renderer: i_slint_renderer_skia::SkiaRenderer::default_direct3d(),
-            suspended: Default::default(),
+            renderer: SkiaRenderer::default_direct3d(&shared_backend_data.skia_context),
         })
     }
 
     pub fn factory_for_graphics_api(
         requested_graphics_api: Option<&RequestedGraphicsAPI>,
-    ) -> Result<fn() -> Box<dyn crate::WinitCompatibleRenderer>, PlatformError> {
+    ) -> Result<
+        fn(&Rc<crate::SharedBackendData>) -> Box<dyn crate::WinitCompatibleRenderer>,
+        PlatformError,
+    > {
         match requested_graphics_api {
             Some(api) => {
                 match api {
                     RequestedGraphicsAPI::OpenGL(_) => {
-                        #[cfg(not(target_os = "ios"))]
+                        #[cfg(not(ios_and_friends))]
                         return Ok(Self::new_opengl_suspended);
-                        #[cfg(target_os = "ios")]
+                        #[cfg(ios_and_friends)]
                         return Err(format!(
                             "OpenGL rendering requested but this is not supported on iOS"
                         )
@@ -100,6 +101,10 @@ impl WinitSkiaRenderer {
                         )
                         .into());
                     }
+                    #[cfg(feature = "unstable-wgpu-24")]
+                    RequestedGraphicsAPI::WGPU24(..) => {
+                        return Err(format!("WGPU rendering is not supported by Skia").into());
+                    }
                 }
             }
             None => Ok(Self::new_suspended),
@@ -117,24 +122,24 @@ impl super::WinitCompatibleRenderer for WinitSkiaRenderer {
     }
 
     fn suspend(&self) -> Result<(), PlatformError> {
-        self.suspended.set(true);
         self.renderer.set_pre_present_callback(None);
         self.renderer.suspend()
     }
 
     fn resume(
         &self,
-        event_loop: &dyn crate::event_loop::EventLoopInterface,
+        active_event_loop: &winit::event_loop::ActiveEventLoop,
         window_attributes: winit::window::WindowAttributes,
         requested_graphics_api: Option<RequestedGraphicsAPI>,
     ) -> Result<Arc<winit::window::Window>, PlatformError> {
-        let winit_window =
-            Arc::new(event_loop.create_window(window_attributes).map_err(|winit_os_error| {
+        let winit_window = Arc::new(active_event_loop.create_window(window_attributes).map_err(
+            |winit_os_error| {
                 PlatformError::from(format!(
                     "Error creating native window for Skia rendering: {}",
                     winit_os_error
                 ))
-            })?);
+            },
+        )?);
 
         let size = winit_window.inner_size();
 
@@ -152,12 +157,6 @@ impl super::WinitCompatibleRenderer for WinitSkiaRenderer {
             }
         })));
 
-        self.suspended.set(false);
-
         Ok(winit_window)
-    }
-
-    fn is_suspended(&self) -> bool {
-        self.suspended.get()
     }
 }

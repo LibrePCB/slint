@@ -32,6 +32,7 @@ mod lower_accessibility;
 mod lower_component_container;
 mod lower_layout;
 mod lower_menus;
+mod lower_platform;
 mod lower_popups;
 mod lower_property_to_element;
 mod lower_shadows;
@@ -110,6 +111,7 @@ pub async fn run_passes(
     });
     lower_tabwidget::lower_tabwidget(doc, type_loader, diag).await;
     lower_menus::lower_menus(doc, type_loader, diag).await;
+    lower_component_container::lower_component_container(doc, type_loader, diag);
     collect_subcomponents::collect_subcomponents(doc);
 
     doc.visit_all_used_components(|component| {
@@ -121,6 +123,7 @@ pub async fn run_passes(
         );
         lower_states::lower_states(component, &doc.local_registry, diag);
         lower_text_input_interface::lower_text_input_interface(component);
+        lower_platform::lower_platform(component, type_loader);
         repeater_component::process_repeater_components(component);
         lower_popups::lower_popups(component, &doc.local_registry, diag);
         collect_init_code::collect_init_code(component);
@@ -141,7 +144,6 @@ pub async fn run_passes(
     doc.visit_all_used_components(|component| {
         border_radius::handle_border_radius(component, diag);
         flickable::handle_flickable(component, &global_type_registry.borrow());
-        lower_component_container::lower_component_container(component, &doc.local_registry, diag);
         lower_layout::lower_layouts(component, type_loader, &style_metrics, diag);
         default_geometry::default_geometry(component, diag);
         lower_absolute_coordinates::lower_absolute_coordinates(component);
@@ -206,7 +208,7 @@ pub async fn run_passes(
         doc.used_types.borrow_mut().sub_components.clear();
     }
 
-    binding_analysis::binding_analysis(doc, diag);
+    binding_analysis::binding_analysis(doc, &type_loader.compiler_config, diag);
     unique_id::assign_unique_id(doc);
 
     doc.visit_all_used_components(|component| {

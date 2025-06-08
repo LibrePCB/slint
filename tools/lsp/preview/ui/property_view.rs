@@ -17,8 +17,186 @@ use slint::{SharedString, VecModel};
 use crate::{
     common,
     preview::{properties, ui},
-    util,
 };
+
+fn is_complex(expression: Option<syntax_nodes::Expression>, ty: &langtype::Type) -> bool {
+    fn handle_node(node: i_slint_compiler::parser::SyntaxNode, ty: &langtype::Type) -> bool {
+        match node.kind() {
+            SyntaxKind::Expression
+            | SyntaxKind::QualifiedName
+            | SyntaxKind::AtGradient
+            | SyntaxKind::AtTr
+            | SyntaxKind::TrContext
+            | SyntaxKind::TrPlural => {}
+            SyntaxKind::UnaryOpExpression if *ty != langtype::Type::Bool => {}
+            _ => return true,
+        }
+
+        for n in node.children() {
+            if handle_node(n, ty) {
+                return true;
+            }
+        }
+        false
+    }
+
+    let Some(expression) = expression else {
+        return false;
+    };
+
+    handle_node(expression.into(), ty)
+}
+
+fn map_property_to_ui(
+    document_cache: &common::DocumentCache,
+    element: &object_tree::ElementRc,
+    property_info: &properties::PropertyInformation,
+) -> (ui::PropertyValue, ui::PropertyDeclaration) {
+    let mut value = ui::palette::evaluate_property(
+        element,
+        property_info.name.as_str(),
+        &property_info.default_value,
+        &property_info.ty,
+    );
+
+    let code_block_or_expression =
+        property_info.defined_at.as_ref().map(|da| da.code_block_or_expression.clone());
+    let expression = code_block_or_expression.as_ref().and_then(|cbe| cbe.expression());
+
+    if let Some(expression) = &expression {
+        value.code = SharedString::from(expression.text().to_string());
+
+        if let Some(qualified_name) = expression.QualifiedName() {
+            let name = SharedString::from(&qualified_name.text().to_string());
+            value.display_string = name.clone();
+            value.accessor_path = name.clone();
+            if property_info.ty == langtype::Type::Color
+                || property_info.ty == langtype::Type::Brush
+            {
+                value.value_string = name;
+            }
+        }
+
+        fn extract_value_with_unit(
+            expression: &syntax_nodes::Expression,
+            units: &[expression_tree::Unit],
+            value: &mut ui::PropertyValue,
+        ) {
+            fn extract_value_with_unit_impl(
+                expression: &syntax_nodes::Expression,
+                units: &[i_slint_compiler::expression_tree::Unit],
+            ) -> Option<(ui::PropertyValueKind, f32, i32, String)> {
+                let (value, unit) = convert_number_literal(expression)?;
+
+                let index = units.iter().position(|u| u == &unit).or_else(|| {
+                    (units.is_empty() && unit == i_slint_compiler::expression_tree::Unit::None)
+                        .then_some(0_usize)
+                })?;
+
+                Some((ui::PropertyValueKind::Float, value as f32, index as i32, unit.to_string()))
+            }
+
+            if let Some((kind, v, index, unit)) = extract_value_with_unit_impl(expression, units) {
+                value.display_string = slint::format!("{v}{unit}");
+                value.value_kind = kind;
+                value.kind = kind;
+                value.value_float = v;
+                value.visual_items = ui::unit_model(units);
+                value.value_int = index
+            }
+        }
+
+        fn extract_tr_data(tr_node: &syntax_nodes::AtTr, value: &mut ui::PropertyValue) {
+            let Some(text) = tr_node
+                .child_text(SyntaxKind::StringLiteral)
+                .and_then(|s| i_slint_compiler::literals::unescape_string(&s))
+            else {
+                return;
+            };
+
+            let context = tr_node
+                .TrContext()
+                .and_then(|n| n.child_text(SyntaxKind::StringLiteral))
+                .and_then(|s| literals::unescape_string(&s))
+                .unwrap_or_default();
+            let plural = tr_node
+                .TrPlural()
+                .and_then(|n| n.child_text(SyntaxKind::StringLiteral))
+                .and_then(|s| literals::unescape_string(&s))
+                .unwrap_or_default();
+            let plural_expression = tr_node
+                .TrPlural()
+                .and_then(|n| n.child_node(SyntaxKind::Expression))
+                .and_then(|e| e.child_node(SyntaxKind::QualifiedName))
+                .map(|n| object_tree::QualifiedTypeName::from_node(n.into()))
+                .map(|qtn| qtn.to_string());
+
+            // We have expressions -> Edit as code
+            if tr_node.Expression().next().is_none()
+                && (plural.is_empty() || plural_expression.is_some())
+            {
+                value.kind = ui::PropertyValueKind::String;
+                value.is_translatable = true;
+                value.tr_context = context.as_str().into();
+                value.tr_plural = plural.as_str().into();
+                value.tr_plural_expression = plural_expression.unwrap_or_default().into();
+                value.value_string = text.as_str().into();
+                value.code = SharedString::from(tr_node.text().to_string());
+            }
+        }
+        if value.value_kind == ui::PropertyValueKind::String {
+            if let Some(tr) = &expression.AtTr() {
+                extract_tr_data(tr, &mut value);
+            }
+        }
+
+        if value.value_kind == ui::PropertyValueKind::Float {
+            use expression_tree::Unit;
+            use langtype::Type;
+
+            match &property_info.ty {
+                Type::Float32 => extract_value_with_unit(expression, &[], &mut value),
+                Type::Duration => {
+                    extract_value_with_unit(expression, &[Unit::S, Unit::Ms], &mut value)
+                }
+                Type::PhysicalLength | Type::LogicalLength | Type::Rem => extract_value_with_unit(
+                    expression,
+                    &[Unit::Px, Unit::Cm, Unit::Mm, Unit::In, Unit::Pt, Unit::Phx, Unit::Rem],
+                    &mut value,
+                ),
+                Type::Angle => extract_value_with_unit(
+                    expression,
+                    &[Unit::Deg, Unit::Grad, Unit::Turn, Unit::Rad],
+                    &mut value,
+                ),
+                Type::Percent => extract_value_with_unit(expression, &[Unit::Percent], &mut value),
+                _ => {}
+            }
+        }
+    }
+
+    if is_complex(expression, &property_info.ty) {
+        value.kind = ui::PropertyValueKind::Code;
+    }
+
+    let defined_at =
+        map_property_definition(&property_info.defined_at).unwrap_or(ui::PropertyDefinition {
+            definition_range: ui::Range { start: 0, end: 0 },
+            selection_range: ui::Range { start: 0, end: 0 },
+            expression_range: ui::Range { start: 0, end: 0 },
+            expression_value: String::new().into(),
+        });
+    let declared_at =
+        map_property_declaration(document_cache, &property_info.declared_at, defined_at.clone())
+            .unwrap_or(ui::PropertyDeclaration {
+                defined_at,
+                source_path: String::new().into(),
+                source_version: -1,
+                range: ui::Range { start: 0, end: 0 },
+            });
+
+    (value, declared_at)
+}
 
 pub fn map_properties_to_ui(
     document_cache: &common::DocumentCache,
@@ -52,25 +230,10 @@ pub fn map_properties_to_ui(
     }
 
     for pi in &properties.properties {
-        let defined_at =
-            map_property_definition(&pi.defined_at).unwrap_or(ui::PropertyDefinition {
-                definition_range: ui::Range { start: 0, end: 0 },
-                selection_range: ui::Range { start: 0, end: 0 },
-                expression_range: ui::Range { start: 0, end: 0 },
-                expression_value: String::new().into(),
-            });
-        let declared_at =
-            map_property_declaration(document_cache, &pi.declared_at, defined_at.clone())
-                .unwrap_or(ui::PropertyDeclaration {
-                    defined_at,
-                    source_path: String::new().into(),
-                    source_version: -1,
-                    range: ui::Range { start: 0, end: 0 },
-                });
+        let (value, declared_at) =
+            map_property_to_ui(document_cache, &properties.element_rc_node.element, pi);
 
         declarations.insert(pi.name.clone(), declared_at);
-
-        let value = simplify_value(document_cache, pi);
 
         property_group_from(
             &mut property_groups,
@@ -178,447 +341,6 @@ fn convert_number_literal(
     }
 }
 
-fn extract_color(
-    expression: &syntax_nodes::Expression,
-    kind: ui::PropertyValueKind,
-    value: &mut ui::PropertyValue,
-) -> bool {
-    if let Some(text) = expression.child_text(SyntaxKind::ColorLiteral) {
-        if let Some(color) = ui::string_to_color(&text) {
-            value.display_string = text.as_str().into();
-            value.kind = kind;
-            value.value_brush = slint::Brush::SolidColor(color);
-            value.gradient_stops =
-                Rc::new(VecModel::from(vec![ui::GradientStop { color, position: 0.5 }])).into();
-            return true;
-        }
-    }
-    false
-}
-
-fn set_default_brush(
-    kind: ui::PropertyValueKind,
-    def_val: Option<&expression_tree::Expression>,
-    value: &mut ui::PropertyValue,
-) {
-    use expression_tree::Expression;
-    value.kind = kind;
-    if let Some(mut def_val) = def_val {
-        if let Expression::Cast { from, .. } = def_val {
-            def_val = from;
-        }
-        if let Expression::NumberLiteral(v, _) = def_val {
-            value.value_brush = slint::Brush::SolidColor(slint::Color::from_argb_encoded(*v as _));
-            return;
-        }
-    }
-    value.brush_kind = ui::BrushKind::Solid;
-    let text = "#00000000";
-    let color = ui::string_to_color(text).unwrap();
-    value.gradient_stops =
-        Rc::new(VecModel::from(vec![ui::GradientStop { color, position: 0.5 }])).into();
-    value.display_string = text.into();
-    value.value_brush = slint::Brush::SolidColor(color);
-}
-
-fn extract_tr_data(tr_node: &syntax_nodes::AtTr, value: &mut ui::PropertyValue) {
-    let Some(text) = tr_node
-        .child_text(SyntaxKind::StringLiteral)
-        .and_then(|s| i_slint_compiler::literals::unescape_string(&s))
-    else {
-        return;
-    };
-
-    let context = tr_node
-        .TrContext()
-        .and_then(|n| n.child_text(SyntaxKind::StringLiteral))
-        .and_then(|s| literals::unescape_string(&s))
-        .unwrap_or_default();
-    let plural = tr_node
-        .TrPlural()
-        .and_then(|n| n.child_text(SyntaxKind::StringLiteral))
-        .and_then(|s| literals::unescape_string(&s))
-        .unwrap_or_default();
-    let plural_expression = tr_node
-        .TrPlural()
-        .and_then(|n| n.child_node(SyntaxKind::Expression))
-        .and_then(|e| e.child_node(SyntaxKind::QualifiedName))
-        .map(|n| object_tree::QualifiedTypeName::from_node(n.into()))
-        .map(|qtn| qtn.to_string());
-
-    // We have expressions -> Edit as code
-    if tr_node.Expression().next().is_none() && (plural.is_empty() || plural_expression.is_some()) {
-        value.kind = ui::PropertyValueKind::String;
-        value.is_translatable = true;
-        value.tr_context = context.as_str().into();
-        value.tr_plural = plural.as_str().into();
-        value.tr_plural_expression = plural_expression.unwrap_or_default().into();
-        value.value_string = text.as_str().into();
-    }
-}
-
-fn is_gradient_too_complex(expression: &syntax_nodes::AtGradient) -> bool {
-    let is_radial = expression
-        .child_token(SyntaxKind::Identifier)
-        .is_some_and(|t| t.text().trim().replace('_', "-") == "radial-gradient");
-
-    expression.Expression().any(|e| {
-        match e
-            .children_with_tokens()
-            .next()
-            .expect("An expression needs to contain at least one node or token")
-        {
-            i_slint_compiler::parser::NodeOrToken::Node(syntax_node) => match syntax_node.kind() {
-                SyntaxKind::QualifiedName => {
-                    if is_radial && syntax_node.text().to_string().trim() == "circle" {
-                        false
-                    } else if let Some(first_identifier) =
-                        syntax_node.child_token(SyntaxKind::Identifier)
-                    {
-                        first_identifier.text().trim() != "Colors"
-                    } else {
-                        true
-                    }
-                }
-                _ => true,
-            },
-            i_slint_compiler::parser::NodeOrToken::Token(syntax_token) => {
-                !matches!(syntax_token.kind(), SyntaxKind::NumberLiteral | SyntaxKind::ColorLiteral)
-            }
-        }
-    })
-}
-
-#[derive(Default)]
-struct NumberValue {
-    value: f64,
-    unit: expression_tree::Unit,
-    normalized_value: f64,
-}
-
-fn extract_number_from_expression_tree(
-    expression: &expression_tree::Expression,
-) -> Option<NumberValue> {
-    match expression {
-        expression_tree::Expression::NumberLiteral(v, u) => {
-            Some(NumberValue { value: *v, unit: *u, normalized_value: u.normalize(*v) })
-        }
-        expression_tree::Expression::Cast { from, to } => {
-            if *to == langtype::Type::Float32 {
-                extract_number_from_expression_tree(from.as_ref())
-            } else {
-                None
-            }
-        }
-        expression_tree::Expression::BinaryExpression { lhs, rhs, op } => {
-            let lhs = extract_number_from_expression_tree(lhs.as_ref())?;
-            let rhs = extract_number_from_expression_tree(rhs.as_ref())?;
-
-            let value = match op {
-                '+' => Some(lhs.value + rhs.value),
-                '-' => Some(lhs.value - rhs.value),
-                '*' => Some(lhs.value * rhs.value),
-                '/' => Some(lhs.value / rhs.value),
-                _ => None,
-            };
-
-            value.map(|v| NumberValue {
-                value: v,
-                unit: lhs.unit,
-                normalized_value: lhs.unit.normalize(v),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn extract_color_from_expression_tree(
-    expression: &expression_tree::Expression,
-) -> Option<slint::Color> {
-    match expression {
-        expression_tree::Expression::NumberLiteral(v, _) => {
-            Some(slint::Color::from_argb_encoded(*v as u32))
-        }
-        expression_tree::Expression::Cast { from, to } => {
-            if *to == langtype::Type::Color {
-                extract_color_from_expression_tree(from.as_ref())
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-fn extract_gradient(
-    document_cache: &common::DocumentCache,
-    expression: &syntax_nodes::AtGradient,
-    value: &mut ui::PropertyValue,
-) {
-    if is_gradient_too_complex(expression) {
-        return;
-    }
-
-    let Some(resolved_expression) =
-        util::with_lookup_ctx(document_cache, expression.clone().into(), |ctx| {
-            expression_tree::Expression::from_at_gradient(expression.clone(), ctx)
-        })
-    else {
-        return;
-    };
-
-    fn parse_stops(
-        stops: &[(expression_tree::Expression, expression_tree::Expression)],
-    ) -> Vec<ui::GradientStop> {
-        stops
-            .iter()
-            .filter_map(|(c, p)| {
-                Some(ui::GradientStop {
-                    color: extract_color_from_expression_tree(c)?,
-                    position: extract_number_from_expression_tree(p)?.normalized_value as f32,
-                })
-            })
-            .collect::<Vec<_>>()
-    }
-
-    let stops = match resolved_expression {
-        expression_tree::Expression::LinearGradient { angle, stops } => {
-            let angle = extract_number_from_expression_tree(angle.as_ref());
-            value.value_float = angle.unwrap_or_default().normalized_value as f32;
-            value.display_string = "Linear Gradient".into();
-            value.brush_kind = ui::BrushKind::Linear;
-
-            parse_stops(&stops)
-        }
-        expression_tree::Expression::RadialGradient { stops } => {
-            value.display_string = "Radial Gradient".into();
-            value.brush_kind = ui::BrushKind::Radial;
-            parse_stops(&stops)
-        }
-
-        _ => vec![],
-    };
-
-    value.gradient_stops = Rc::new(VecModel::from(stops)).into();
-    value.value_brush = super::create_brush(
-        value.brush_kind,
-        value.value_float,
-        slint::Color::default(),
-        value.gradient_stops.clone(),
-    );
-    value.kind = ui::PropertyValueKind::Brush;
-}
-
-fn simplify_value(
-    document_cache: &common::DocumentCache,
-    prop_info: &properties::PropertyInformation,
-) -> ui::PropertyValue {
-    use i_slint_compiler::expression_tree::Unit;
-    use langtype::Type;
-
-    let code_block_or_expression =
-        prop_info.defined_at.as_ref().map(|da| da.code_block_or_expression.clone());
-    let expression = code_block_or_expression.as_ref().and_then(|cbe| cbe.expression());
-
-    let mut value = ui::PropertyValue {
-        code: code_block_or_expression
-            .as_ref()
-            .map(|cbe| cbe.text().to_string())
-            .unwrap_or_default()
-            .into(),
-        kind: ui::PropertyValueKind::Code,
-        ..Default::default()
-    };
-
-    let def_val = prop_info.default_value.as_ref();
-
-    match &prop_info.ty {
-        Type::Float32 => extract_value_with_unit(&expression, def_val, &[], &mut value),
-        Type::Duration => {
-            extract_value_with_unit(&expression, def_val, &[Unit::S, Unit::Ms], &mut value)
-        }
-        Type::PhysicalLength | Type::LogicalLength | Type::Rem => extract_value_with_unit(
-            &expression,
-            def_val,
-            &[Unit::Px, Unit::Cm, Unit::Mm, Unit::In, Unit::Pt, Unit::Phx, Unit::Rem],
-            &mut value,
-        ),
-        Type::Angle => extract_value_with_unit(
-            &expression,
-            def_val,
-            &[Unit::Deg, Unit::Grad, Unit::Turn, Unit::Rad],
-            &mut value,
-        ),
-        Type::Percent => {
-            extract_value_with_unit(&expression, def_val, &[Unit::Percent], &mut value)
-        }
-        Type::Int32 => {
-            if let Some(expression) = expression {
-                if let Some((v, unit)) = convert_number_literal(&expression) {
-                    if unit == i_slint_compiler::expression_tree::Unit::None {
-                        value.display_string = slint::format!("{v}");
-                        value.kind = ui::PropertyValueKind::Integer;
-                        value.value_int = v as i32;
-                    }
-                }
-            } else if value.code.is_empty() {
-                value.kind = ui::PropertyValueKind::Integer;
-            }
-        }
-        Type::Color => {
-            if let Some(expression) = expression {
-                extract_color(&expression, ui::PropertyValueKind::Color, &mut value);
-                // TODO: Extract `Foo.bar` as Palette `Foo`, entry `bar`.
-                // This makes no sense right now, as we have no way to get any
-                // information on the palettes.
-            } else if value.code.is_empty() {
-                set_default_brush(ui::PropertyValueKind::Color, def_val, &mut value);
-            }
-        }
-        Type::Brush => {
-            if let Some(expression) = expression {
-                if let Some(gradient) = expression.AtGradient() {
-                    extract_gradient(document_cache, &gradient, &mut value);
-                } else {
-                    extract_color(&expression, ui::PropertyValueKind::Brush, &mut value);
-                }
-            } else if value.code.is_empty() {
-                set_default_brush(ui::PropertyValueKind::Brush, def_val, &mut value);
-            }
-        }
-        Type::Bool => {
-            if let Some(expression) = expression {
-                let qualified_name =
-                    expression.QualifiedName().map(|qn| qn.text().to_string()).unwrap_or_default();
-                if ["true", "false"].contains(&qualified_name.as_str()) {
-                    value.kind = ui::PropertyValueKind::Boolean;
-                    value.value_bool = &qualified_name == "true";
-                }
-            } else if value.code.is_empty() {
-                if let Some(expression_tree::Expression::BoolLiteral(v)) = def_val {
-                    value.value_bool = *v;
-                }
-                value.kind = ui::PropertyValueKind::Boolean;
-            }
-        }
-        Type::String => {
-            if let Some(expression) = &expression {
-                if let Some(text) = expression
-                    .child_text(SyntaxKind::StringLiteral)
-                    .and_then(|s| i_slint_compiler::literals::unescape_string(&s))
-                {
-                    value.kind = ui::PropertyValueKind::String;
-                    value.value_string = text.as_str().into();
-                } else if let Some(tr_node) = &expression.AtTr() {
-                    extract_tr_data(tr_node, &mut value)
-                }
-            } else if value.code.is_empty() {
-                if let Some(expression_tree::Expression::StringLiteral(v)) = def_val {
-                    value.value_string = v.as_str().into();
-                }
-                value.kind = ui::PropertyValueKind::String;
-            }
-        }
-        Type::Enumeration(enumeration) => {
-            value.kind = ui::PropertyValueKind::Enum;
-            value.value_string = enumeration.name.as_str().into();
-            value.default_selection = i32::try_from(enumeration.default_value).unwrap_or_default();
-            value.visual_items = Rc::new(VecModel::from(
-                enumeration
-                    .values
-                    .iter()
-                    .map(|s| SharedString::from(s.as_str()))
-                    .collect::<Vec<_>>(),
-            ))
-            .into();
-
-            if let Some(expression) = expression {
-                if let Some(text) = expression
-                    .child_node(SyntaxKind::QualifiedName)
-                    .map(|n| i_slint_compiler::object_tree::QualifiedTypeName::from_node(n.into()))
-                    .map(|n| {
-                        let n_str = n.to_string();
-                        n_str
-                            .strip_prefix(&format!("{}.", enumeration.name))
-                            .map(|s| s.to_string())
-                            .unwrap_or(n_str)
-                    })
-                    .map(|s| s.to_string())
-                {
-                    value.value_int = enumeration
-                        .values
-                        .iter()
-                        .position(|v| v == &text)
-                        .and_then(|v| i32::try_from(v).ok())
-                        .unwrap_or_default();
-                }
-            } else if let Some(expression_tree::Expression::EnumerationValue(v)) = def_val {
-                value.value_int = v.value as i32
-            }
-        }
-        _ => {}
-    }
-
-    value
-}
-
-fn extract_value_with_unit_impl(
-    expression: &Option<syntax_nodes::Expression>,
-    def_val: Option<&expression_tree::Expression>,
-    code: &str,
-    units: &[i_slint_compiler::expression_tree::Unit],
-) -> Option<(ui::PropertyValueKind, f32, i32, String)> {
-    if let Some(expression) = expression {
-        if let Some((value, unit)) = convert_number_literal(expression) {
-            let index = units.iter().position(|u| u == &unit).or_else(|| {
-                (units.is_empty() && unit == i_slint_compiler::expression_tree::Unit::None)
-                    .then_some(0_usize)
-            })?;
-
-            return Some((
-                ui::PropertyValueKind::Float,
-                value as f32,
-                index as i32,
-                unit.to_string(),
-            ));
-        }
-    } else if code.is_empty() {
-        if let Some(expression_tree::Expression::NumberLiteral(value, unit)) = def_val {
-            let index = units.iter().position(|u| u == unit).unwrap_or(0);
-            return Some((
-                ui::PropertyValueKind::Float,
-                *value as f32,
-                index as i32,
-                String::new(),
-            ));
-        } else {
-            // FIXME: if def_vale is Some but not a NumberLiteral, we should not show "0"
-            return Some((ui::PropertyValueKind::Float, 0.0, 0, String::new()));
-        }
-    }
-
-    None
-}
-
-fn extract_value_with_unit(
-    expression: &Option<syntax_nodes::Expression>,
-    def_val: Option<&expression_tree::Expression>,
-    units: &[expression_tree::Unit],
-    value: &mut ui::PropertyValue,
-) {
-    let Some((kind, v, index, unit)) =
-        extract_value_with_unit_impl(expression, def_val, &value.code, units)
-    else {
-        return;
-    };
-
-    value.display_string = slint::format!("{v}{unit}");
-    value.kind = kind;
-    value.value_float = v;
-    value.visual_items = ui::unit_model(units);
-    value.value_int = index
-}
-
 #[cfg(test)]
 mod tests {
     use slint::{Model, SharedString};
@@ -639,7 +361,16 @@ mod tests {
         common::DocumentCache,
         lsp_types::Url,
     )> {
-        let (dc, url, _) = loaded_document_cache(source.to_string());
+        let (dc, url, diag) = loaded_document_cache(source.to_string());
+        for (u, diag) in diag.iter() {
+            if diag.is_empty() {
+                continue;
+            }
+            eprintln!("Diags for {u}");
+            for d in diag {
+                eprintln!("{d:#?}");
+            }
+        }
         if let Some((e, p)) =
             properties::tests::properties_at_position_in_cache(line, character, &dc, &url)
         {
@@ -650,15 +381,18 @@ mod tests {
     }
 
     fn property_conversion_test(contents: &str, property_line: u32) -> ui::PropertyValue {
-        let (_, pi, dc, _) = properties_at_position(contents, property_line, 30).unwrap();
+        eprintln!("\n\n\n{contents}:");
+        let (e, pi, dc, _) = properties_at_position(contents, property_line, 30).unwrap();
         let test1 = pi.iter().find(|pi| pi.name == "test1").unwrap();
-        super::simplify_value(&dc, test1)
+        super::map_property_to_ui(&dc, &e.element, test1).0
     }
 
     #[test]
     fn test_property_bool() {
         let result =
             property_conversion_test(r#"export component Test { in property <bool> test1; }"#, 0);
+
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Boolean);
         assert_eq!(result.kind, ui::PropertyValueKind::Boolean);
         assert!(!result.value_bool);
         assert!(result.code.is_empty());
@@ -667,6 +401,8 @@ mod tests {
             r#"export component Test { in property <bool> test1: true; }"#,
             0,
         );
+
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Boolean);
         assert_eq!(result.kind, ui::PropertyValueKind::Boolean);
         assert!(result.value_bool);
         assert!(!result.code.is_empty());
@@ -675,6 +411,7 @@ mod tests {
             r#"export component Test { in property <bool> test1: false; }"#,
             0,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Boolean);
         assert_eq!(result.kind, ui::PropertyValueKind::Boolean);
         assert!(!result.value_bool);
         assert!(!result.code.is_empty());
@@ -683,8 +420,9 @@ mod tests {
             r#"export component Test { in property <bool> test1: 1.1.round() == 1.1.floor(); }"#,
             0,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Boolean);
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
-        assert!(!result.value_bool);
+        assert!(result.value_bool);
         assert!(!result.code.is_empty());
     }
 
@@ -692,6 +430,7 @@ mod tests {
     fn test_property_string() {
         let result =
             property_conversion_test(r#"export component Test { in property <string> test1; }"#, 0);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::String);
         assert_eq!(result.kind, ui::PropertyValueKind::String);
         assert!(!result.is_translatable);
         assert_eq!(result.tr_context, "");
@@ -703,6 +442,7 @@ mod tests {
             r#"export component Test { in property <string> test1: ""; }"#,
             0,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::String);
         assert_eq!(result.kind, ui::PropertyValueKind::String);
         assert!(!result.is_translatable);
         assert_eq!(result.tr_context, "");
@@ -714,6 +454,7 @@ mod tests {
             r#"export component Test { in property <string> test1: "string"; }"#,
             0,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::String);
         assert_eq!(result.kind, ui::PropertyValueKind::String);
         assert!(!result.is_translatable);
         assert_eq!(result.tr_context, "");
@@ -722,9 +463,11 @@ mod tests {
         assert!(!result.code.is_empty());
 
         let result = property_conversion_test(
-            r#"export component Test { in property <string> test1: "" + "test"); }"#,
+            r#"export component Test { in property <string> test1: "" + "test"; }"#,
             0,
         );
+
+        assert_eq!(result.value_kind, ui::PropertyValueKind::String);
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
         assert!(!result.is_translatable);
         assert_eq!(result.tr_context, "");
@@ -769,6 +512,7 @@ mod tests {
             2,
         );
         assert_eq!(result.kind, ui::PropertyValueKind::String);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::String);
         assert!(result.is_translatable);
         assert_eq!(result.tr_context, "");
         assert_eq!(result.tr_plural, "{n} strings");
@@ -781,32 +525,23 @@ mod tests {
             r#"export component Test { in property <string> test1: @tr("{n} string" | "{n} strings" % 15); }"#,
             0,
         );
-        assert_eq!(result.kind, ui::PropertyValueKind::Code);
+        assert_eq!(result.kind, ui::PropertyValueKind::String);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::String);
         assert!(!result.is_translatable);
         assert_eq!(result.tr_context, "");
         assert_eq!(result.tr_plural, "");
-        assert_eq!(result.value_string, "");
+        assert_eq!(result.value_string, "15 strings");
         assert!(!result.code.is_empty());
 
         let result = property_conversion_test(
-            r#"export component Test { in property <string> test1: @tr("" + "test"); }"#,
+            r#"export component Test { in property <string> test1: @tr("width {}", self.width / 1px); }"#,
             0,
         );
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
         assert!(!result.is_translatable);
         assert_eq!(result.tr_context, "");
         assert_eq!(result.tr_plural, "");
-        assert_eq!(result.value_string, "");
-        assert!(!result.code.is_empty());
-        let result = property_conversion_test(
-            r#"export component Test { in property <string> test1: @tr("width {}", self.width()); }"#,
-            0,
-        );
-        assert_eq!(result.kind, ui::PropertyValueKind::Code);
-        assert!(!result.is_translatable);
-        assert_eq!(result.tr_context, "");
-        assert_eq!(result.tr_plural, "");
-        assert_eq!(result.value_string, "");
+        assert_eq!(result.value_string, "width ");
         assert!(!result.code.is_empty());
     }
 
@@ -912,13 +647,14 @@ export component Test { in property <Foobar> test1; }"#,
             0,
         );
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
-        assert_eq!(result.value_float, 0.0);
+        assert_eq!(result.value_float, 966.0);
     }
 
     #[test]
     fn test_property_integer() {
         let result =
             property_conversion_test(r#"export component Test { in property <int> test1; }"#, 0);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Integer);
         assert_eq!(result.kind, ui::PropertyValueKind::Integer);
         assert_eq!(result.value_int, 0);
 
@@ -926,6 +662,7 @@ export component Test { in property <Foobar> test1; }"#,
             r#"export component Test { in property <int> test1: 42; }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Integer);
         assert_eq!(result.kind, ui::PropertyValueKind::Integer);
         assert_eq!(result.value_int, 42);
 
@@ -933,6 +670,7 @@ export component Test { in property <Foobar> test1; }"#,
             r#"export component Test { in property <int> test1: +42; }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Integer);
         assert_eq!(result.kind, ui::PropertyValueKind::Integer);
         assert_eq!(result.value_int, 42);
 
@@ -940,6 +678,7 @@ export component Test { in property <Foobar> test1; }"#,
             r#"export component Test { in property <int> test1: -42; }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Integer);
         assert_eq!(result.kind, ui::PropertyValueKind::Integer);
         assert_eq!(result.value_int, -42);
 
@@ -947,16 +686,20 @@ export component Test { in property <Foobar> test1; }"#,
             r#"export component Test { in property <int> test1: 42 * 23; }"#,
             0,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Integer);
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
-        assert_eq!(result.value_int, 0);
+        assert_eq!(result.value_int, 966);
     }
 
     #[test]
     fn test_property_color() {
         let result =
             property_conversion_test(r#"export component Test { in property <color> test1; }"#, 0);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
         assert_eq!(result.kind, ui::PropertyValueKind::Color);
         assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.display_string, "#00000000");
+        assert!(result.value_string.is_empty());
         assert_eq!(result.value_brush.color().red(), 0);
         assert_eq!(result.value_brush.color().green(), 0);
         assert_eq!(result.value_brush.color().blue(), 0);
@@ -966,8 +709,11 @@ export component Test { in property <Foobar> test1; }"#,
             r#"export component Test { in property <color> test1: #10203040; }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
         assert_eq!(result.kind, ui::PropertyValueKind::Color);
         assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.display_string, "#10203040");
+        assert!(result.value_string.is_empty());
         assert_eq!(result.value_brush.color().red(), 0x10);
         assert_eq!(result.value_brush.color().green(), 0x20);
         assert_eq!(result.value_brush.color().blue(), 0x30);
@@ -977,21 +723,230 @@ export component Test { in property <Foobar> test1; }"#,
             r#"export component Test { in property <color> test1: #10203040.darker(0.5); }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
 
         let result = property_conversion_test(
             r#"export component Test { in property <color> test1: Colors.red; }"#,
             0,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
+        assert_eq!(result.kind, ui::PropertyValueKind::Color);
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.display_string, "Colors.red");
+        assert_eq!(result.value_string, "Colors.red");
+        assert_eq!(result.accessor_path, "Colors.red");
+        assert_eq!(result.value_brush.color().red(), 0xff);
+        assert_eq!(result.value_brush.color().green(), 0x00);
+        assert_eq!(result.value_brush.color().blue(), 0x00);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
+
+        let result = property_conversion_test(
+            r#"export component Test { in property <color> test1: red; }"#,
+            0,
+        );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
+        assert_eq!(result.kind, ui::PropertyValueKind::Color);
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.value_string, "red");
+        assert_eq!(result.accessor_path, "red");
+        assert_eq!(result.value_brush.color().red(), 0xff);
+        assert_eq!(result.value_brush.color().green(), 0x00);
+        assert_eq!(result.value_brush.color().blue(), 0x00);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
+
+        let result = property_conversion_test(
+            r#"global Foo {
+                out property <color> red: blue;
+            }
+            export component Test { in property <color> test1: Foo.red; }"#,
+            3,
+        );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
+        assert_eq!(result.kind, ui::PropertyValueKind::Color);
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.value_string, "Foo.red");
+        assert_eq!(result.accessor_path, "Foo.red");
+        assert_eq!(result.value_brush.color().red(), 0x00);
+        assert_eq!(result.value_brush.color().green(), 0x00);
+        assert_eq!(result.value_brush.color().blue(), 0xff);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
+
+        let result = property_conversion_test(
+            r#"struct Bar {
+                foo: color,
+            }
+            global Foo {
+                out property <Bar> s: { foo: Colors.blue };
+            }
+            export component Test { in property <color> test1: Foo.s.foo; }"#,
+            6,
+        );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
+        assert_eq!(result.kind, ui::PropertyValueKind::Color);
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.value_string, "Foo.s.foo");
+        assert_eq!(result.value_brush.color().red(), 0x00);
+        assert_eq!(result.value_brush.color().green(), 0x00);
+        assert_eq!(result.value_brush.color().blue(), 0xff);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
+
+        let result = property_conversion_test(
+            r#"struct Bar {
+                bar: color,
+            }
+            struct Baz {
+                baz: Bar,
+            }
+            global Foo {
+                out property <Baz> s: { baz: { bar: Colors.blue } };
+            }
+            export component Test { in property <color> test1: Foo.s.baz.bar; }"#,
+            9,
+        );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
+        assert_eq!(result.kind, ui::PropertyValueKind::Color);
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.value_string, "Foo.s.baz.bar");
+        assert_eq!(result.value_brush.color().red(), 0x00);
+        assert_eq!(result.value_brush.color().green(), 0x00);
+        assert_eq!(result.value_brush.color().blue(), 0xff);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
+
+        let result = property_conversion_test(
+            r#"struct Bar {
+                bar: color,
+            }
+            struct Baz {
+                baz: Bar,
+            }
+            global Foo2 {
+                out property <Baz> test: Foo.s;
+            }
+            global Foo {
+                out property <Baz> s: { baz: { bar: Colors.blue } };
+            }
+            export component Test { in property <color> test1: Foo.s.baz.bar; }"#,
+            12,
+        );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
+        assert_eq!(result.kind, ui::PropertyValueKind::Color);
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.value_string, "Foo.s.baz.bar");
+        assert_eq!(result.value_brush.color().red(), 0x00);
+        assert_eq!(result.value_brush.color().green(), 0x00);
+        assert_eq!(result.value_brush.color().blue(), 0xff);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
+
+        let result = property_conversion_test(
+            r#"struct Bar {
+                bar: color,
+            }
+            struct Baz {
+                baz: Bar,
+            }
+            global Foo2 {
+                in property <int> index;
+                out property <Baz> test: index == 0 ? Foo.s : FooBar.s;
+            }
+            global Foo {
+                out property <Baz> s: { baz: { bar: Colors.blue } };
+            }
+            global FooBar {
+                out property <Baz> s: { baz: { bar: Colors.green } };
+            }
+            export component Test { in property <color> test1: Foo.s.baz.bar; }"#,
+            16,
+        );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
+        assert_eq!(result.kind, ui::PropertyValueKind::Color);
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.value_string, "Foo.s.baz.bar");
+        assert_eq!(result.value_brush.color().red(), 0x00);
+        assert_eq!(result.value_brush.color().green(), 0x00);
+        assert_eq!(result.value_brush.color().blue(), 0xff);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
+
+        let result = property_conversion_test(
+            r#"export component Test {
+            in property <int> foo;
+            in property <color> test1: foo == 0 ? red : blue;
+            }"#,
+            2,
+        );
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
+
+        let result = property_conversion_test(
+            r#"global Foo {
+                in property <int> foo;
+                out property <color> red: foo == 0 ? blue : red;
+            }
+            export component Test { in property <color> test1: Foo.red; }"#,
+            4,
+        );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
+        assert_eq!(result.kind, ui::PropertyValueKind::Color);
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.value_string, "Foo.red");
+        assert_eq!(result.value_brush.color().red(), 0x00);
+        assert_eq!(result.value_brush.color().green(), 0x00);
+        assert_eq!(result.value_brush.color().blue(), 0xff);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
+
+        let result = property_conversion_test(
+            r#"struct Bar {
+                foo: color,
+            }
+            global Foo {
+                in property <int> foo;
+                out property <Bar> s: foo == 0 ? { foo: Colors.blue } : { foo: Colors.red };
+            }
+            export component Test { in property <color> test1: Foo.s.foo; }"#,
+            7,
+        );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
+        assert_eq!(result.kind, ui::PropertyValueKind::Color);
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.value_string, "Foo.s.foo");
+        assert_eq!(result.value_brush.color().red(), 0x00);
+        assert_eq!(result.value_brush.color().green(), 0x00);
+        assert_eq!(result.value_brush.color().blue(), 0xff);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
+
+        let result = property_conversion_test(
+            r#"struct Bar {
+                bar: color,
+            }
+            struct Baz {
+                baz: Bar,
+            }
+            global Foo {
+                in property <int> foo;
+                out property <Baz> s: foo == 0 ? { baz: { bar: Colors.blue } } : { baz: { bar: Colors.blue } };
+            }
+            export component Test { in property <color> test1: Foo.s.baz.bar; }"#,
+            10,
+        );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Color);
+        assert_eq!(result.kind, ui::PropertyValueKind::Color);
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.value_string, "Foo.s.baz.bar");
+        assert_eq!(result.value_brush.color().red(), 0x00);
+        assert_eq!(result.value_brush.color().green(), 0x00);
+        assert_eq!(result.value_brush.color().blue(), 0xff);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
     }
 
     #[test]
     fn test_property_brush() {
         let result =
             property_conversion_test(r#"export component Test { in property <brush> test1; }"#, 0);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
         assert_eq!(result.kind, ui::PropertyValueKind::Brush);
         assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert!(matches!(result.brush_kind, ui::BrushKind::Solid));
+        assert_eq!(result.display_string, "#00000000");
+        assert!(result.value_string.is_empty());
         assert_eq!(result.value_brush.color().red(), 0);
         assert_eq!(result.value_brush.color().green(), 0);
         assert_eq!(result.value_brush.color().blue(), 0);
@@ -1001,8 +956,12 @@ export component Test { in property <Foobar> test1; }"#,
             r#"export component Test { in property <brush> test1: #10203040; }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
         assert_eq!(result.kind, ui::PropertyValueKind::Brush);
+        assert!(matches!(result.brush_kind, ui::BrushKind::Solid));
         assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.display_string, "#10203040");
+        assert!(result.value_string.is_empty());
         assert_eq!(result.value_brush.color().red(), 0x10);
         assert_eq!(result.value_brush.color().green(), 0x20);
         assert_eq!(result.value_brush.color().blue(), 0x30);
@@ -1012,46 +971,78 @@ export component Test { in property <Foobar> test1; }"#,
             r#"export component Test { in property <brush> test1: #10203040.darker(0.5); }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
+        assert!(matches!(result.brush_kind, ui::BrushKind::Solid));
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.display_string, "#0b152040");
+        assert!(result.value_string.is_empty());
+        assert_eq!(result.value_brush.color().red(), 0x0b);
+        assert_eq!(result.value_brush.color().green(), 0x15);
+        assert_eq!(result.value_brush.color().blue(), 0x20);
+        assert_eq!(result.value_brush.color().alpha(), 0x40);
 
         let result = property_conversion_test(
             r#"export component Test { in property <brush> test1: Colors.red; }"#,
             0,
         );
-        assert_eq!(result.kind, ui::PropertyValueKind::Code);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
+        assert_eq!(result.kind, ui::PropertyValueKind::Brush);
+        assert!(matches!(result.brush_kind, ui::BrushKind::Solid));
+        assert!(matches!(result.value_brush, slint::Brush::SolidColor(_)));
+        assert_eq!(result.display_string, "Colors.red");
+        assert_eq!(result.value_string, "Colors.red");
+        assert_eq!(result.accessor_path, "Colors.red");
+        assert_eq!(result.value_brush.color().red(), 0xff);
+        assert_eq!(result.value_brush.color().green(), 0);
+        assert_eq!(result.value_brush.color().blue(), 0);
+        assert_eq!(result.value_brush.color().alpha(), 0xff);
 
         let result = property_conversion_test(
             r#"export component Test { in property <brush> test1: @linear-gradient(90deg, #3f87a6 0%, #ebf8e1 50%, #f69d3c 100%); }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
         assert_eq!(result.kind, ui::PropertyValueKind::Brush);
+        assert!(matches!(result.brush_kind, ui::BrushKind::Linear));
 
         let result = property_conversion_test(
             r#"export component Test { in property <brush> test1: @radial-gradient(circle, #f00 0%, #0f0 50%, #00f 100%); }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
         assert_eq!(result.kind, ui::PropertyValueKind::Brush);
+        assert!(matches!(result.brush_kind, ui::BrushKind::Radial));
 
         let result = property_conversion_test(
             r#"export component Test { in property <brush> test1: @linear-gradient(90deg, #3f87a6 0%, #ebf8e1 50% - 10%, #f69d3c 100%); }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
+        assert!(matches!(result.brush_kind, ui::BrushKind::Linear));
 
         let result = property_conversion_test(
             r#"export component Test { in property <brush> test1: @radial-gradient(circle, #f00 0%, #0f0 50% - 10%, #00f 100%); }"#,
             1,
         );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
+        assert!(matches!(result.brush_kind, ui::BrushKind::Radial));
     }
 
     #[test]
     fn test_property_units() {
         let result =
             property_conversion_test(r#"export component Test { in property <length> test1; }"#, 0);
+
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Float);
         assert_eq!(result.kind, ui::PropertyValueKind::Float);
-        assert_eq!(result.default_selection, 0);
         assert_eq!(result.value_int, 0);
+        assert_eq!(
+            result.visual_items.row_data(result.default_selection as usize),
+            Some("px".into())
+        );
         assert_eq!(result.visual_items.row_data(result.value_int as usize), Some("px".into()));
         let length_row_count = result.visual_items.row_count();
         assert!(length_row_count > 2);
@@ -1060,9 +1051,14 @@ export component Test { in property <Foobar> test1; }"#,
             r#"export component Test { in property <duration> test1: 25s; }"#,
             1,
         );
+
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Float);
         assert_eq!(result.kind, ui::PropertyValueKind::Float);
         assert_eq!(result.value_float, 25.0);
-        assert_eq!(result.default_selection, 0);
+        assert_eq!(
+            result.visual_items.row_data(result.default_selection as usize),
+            Some("ms".into())
+        );
         assert_eq!(result.visual_items.row_data(result.value_int as usize), Some("s".into()));
         assert_eq!(result.visual_items.row_count(), 2); // ms, s
 
@@ -1070,10 +1066,30 @@ export component Test { in property <Foobar> test1; }"#,
             r#"export component Test { in property <physical-length> test1: 1.5phx; }"#,
             1,
         );
+
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Float);
         assert_eq!(result.kind, ui::PropertyValueKind::Float);
         assert_eq!(result.value_float, 1.5);
-        assert_eq!(result.default_selection, 0);
+        assert_eq!(
+            result.visual_items.row_data(result.default_selection as usize),
+            Some("phx".into())
+        );
         assert_eq!(result.visual_items.row_data(result.value_int as usize), Some("phx".into()));
+        assert!(result.visual_items.row_count() > 1); // More than just physical length
+
+        let result = property_conversion_test(
+            r#"export component Test { in property <relative-font-size> test1: 1.5rem; }"#,
+            1,
+        );
+
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Float);
+        assert_eq!(result.kind, ui::PropertyValueKind::Float);
+        assert_eq!(result.value_float, 1.5);
+        assert_eq!(
+            result.visual_items.row_data(result.default_selection as usize),
+            Some("rem".into())
+        );
+        assert_eq!(result.visual_items.row_data(result.value_int as usize), Some("rem".into()));
         assert!(result.visual_items.row_count() > 1); // More than just physical length
 
         let result = property_conversion_test(
@@ -1107,28 +1123,28 @@ export component X {
         let pi = super::properties::get_properties(&element, super::properties::LayoutKind::None);
 
         let prop = pi.iter().find(|pi| pi.name == "visible").unwrap();
-        let result = super::simplify_value(&dc, prop);
+        let result = super::map_property_to_ui(&dc, &element.element, prop).0;
         assert_eq!(result.kind, ui::PropertyValueKind::Boolean);
         assert!(result.value_bool);
 
         let prop = pi.iter().find(|pi| pi.name == "enabled").unwrap();
-        let result = super::simplify_value(&dc, prop);
+        let result = super::map_property_to_ui(&dc, &element.element, prop).0;
         assert_eq!(result.kind, ui::PropertyValueKind::Boolean);
         assert!(result.value_bool);
 
         let prop = pi.iter().find(|pi| pi.name == "text").unwrap();
-        let result = super::simplify_value(&dc, prop);
+        let result = super::map_property_to_ui(&dc, &element.element, prop).0;
         assert_eq!(result.kind, ui::PropertyValueKind::String);
         assert_eq!(result.value_string, "Ok");
 
         let prop = pi.iter().find(|pi| pi.name == "alias").unwrap();
-        let result = super::simplify_value(&dc, prop);
+        let result = super::map_property_to_ui(&dc, &element.element, prop).0;
         assert_eq!(result.kind, ui::PropertyValueKind::Float);
-        assert_eq!(result.value_float, 45.);
-        assert_eq!(result.visual_items.row_data(result.value_int as usize).unwrap(), "cm");
+        assert!(result.value_float >= 45.);
+        assert_eq!(result.visual_items.row_data(result.value_int as usize).unwrap(), "px");
 
         let prop = pi.iter().find(|pi| pi.name == "color").unwrap();
-        let result = super::simplify_value(&dc, prop);
+        let result = super::map_property_to_ui(&dc, &element.element, prop).0;
         assert_eq!(result.kind, ui::PropertyValueKind::Color);
         assert_eq!(
             result.value_brush,
@@ -1162,8 +1178,56 @@ export component X {
         let pi = super::properties::get_properties(&element, super::properties::LayoutKind::None);
 
         let prop = pi.iter().find(|pi| pi.name == "visible").unwrap();
-        let result = super::simplify_value(&dc, prop);
+        let result = super::map_property_to_ui(&dc, &element.element, prop).0;
+
         assert_eq!(result.kind, ui::PropertyValueKind::Boolean);
         assert!(result.value_bool);
+    }
+
+    #[test]
+    fn test_property_referencing_global() {
+        let source = r#"
+global Other {
+    in-out property <brush> test: @linear-gradient(90deg, #0ff, #f0f, #ff0);
+}
+component Abc {
+    in-out property <brush> local-test-brush: @linear-gradient(90deg, #0ff, #f0f, #ff0);
+    in-out property <brush> test-brush1 <=> Other.test;
+    in-out property <brush> test-brush2: Other.test;
+    in-out property <brush> test-brush3: true ? Other.test : self.local-test-brush;
+    /*CURSOR*/
+}
+        "#;
+
+        let (dc, url, _diag) = loaded_document_cache(source.to_string());
+
+        let element = dc
+            .element_at_offset(&url, (source.find("/*CURSOR*/").expect("cursor") as u32).into())
+            .unwrap();
+        let pi = super::properties::get_properties(&element, super::properties::LayoutKind::None);
+
+        let prop = pi.iter().find(|pi| pi.name == "local-test-brush").unwrap();
+        let result = super::map_property_to_ui(&dc, &element.element, prop).0;
+        assert_eq!(result.kind, ui::PropertyValueKind::Brush);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
+        assert_eq!(result.brush_kind, ui::BrushKind::Linear);
+
+        let prop = pi.iter().find(|pi| pi.name == "test-brush1").unwrap();
+        let result = super::map_property_to_ui(&dc, &element.element, prop).0;
+        assert_eq!(result.kind, ui::PropertyValueKind::Brush);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
+        assert_eq!(result.brush_kind, ui::BrushKind::Linear);
+
+        let prop = pi.iter().find(|pi| pi.name == "test-brush2").unwrap();
+        let result = super::map_property_to_ui(&dc, &element.element, prop).0;
+        assert_eq!(result.kind, ui::PropertyValueKind::Brush);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
+        assert_eq!(result.brush_kind, ui::BrushKind::Linear);
+
+        let prop = pi.iter().find(|pi| pi.name == "test-brush3").unwrap();
+        let result = super::map_property_to_ui(&dc, &element.element, prop).0;
+        assert_eq!(result.kind, ui::PropertyValueKind::Code);
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
+        assert_eq!(result.brush_kind, ui::BrushKind::Linear);
     }
 }

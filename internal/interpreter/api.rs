@@ -10,8 +10,7 @@ use i_slint_core::model::{Model, ModelExt, ModelRc};
 #[cfg(feature = "internal")]
 use i_slint_core::window::WindowInner;
 use i_slint_core::{PathData, SharedVector};
-use smol_str::{SmolStr, StrExt};
-use std::borrow::Cow;
+use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -99,7 +98,7 @@ impl From<LangType> for ValueType {
 #[repr(u8)]
 pub enum Value {
     /// There is nothing in this value. That's the default.
-    /// For example, a function that do not return a result would return a Value::Void
+    /// For example, a function that does not return a result would return a Value::Void
     #[default]
     Void = 0,
     /// An `int` or a `float` (this is also used for unit based type such as `length` or `angle`)
@@ -339,10 +338,7 @@ macro_rules! declare_value_enum_conversion {
     ($( $(#[$enum_doc:meta])* enum $Name:ident { $($body:tt)* })*) => { $(
         impl From<i_slint_core::items::$Name> for Value {
             fn from(v: i_slint_core::items::$Name) -> Self {
-                Value::EnumerationValue(
-                    stringify!($Name).to_owned(),
-                    v.to_string().trim_start_matches("r#").replace('_', "-"),
-                )
+                Value::EnumerationValue(stringify!($Name).to_owned(), v.to_string())
             }
         }
         impl TryFrom<Value> for i_slint_core::items::$Name {
@@ -354,14 +350,7 @@ macro_rules! declare_value_enum_conversion {
                         if enumeration != stringify!($Name) {
                             return Err(());
                         }
-
-                        <i_slint_core::items::$Name>::from_str(value.as_str())
-                            .or_else(|_| {
-                                let norm = value.as_str().replace('-', "_");
-                                <i_slint_core::items::$Name>::from_str(&norm)
-                                    .or_else(|_| <i_slint_core::items::$Name>::from_str(&format!("r#{}", norm)))
-                            })
-                            .map_err(|_| ())
+                        i_slint_core::items::$Name::from_str(value.as_str()).map_err(|_| ())
                     }
                     _ => Err(()),
                 }
@@ -435,12 +424,12 @@ impl TryFrom<Value> for i_slint_core::lengths::LogicalLength {
     }
 }
 
-impl<T: Into<Value> + 'static> From<ModelRc<T>> for Value {
+impl<T: Into<Value> + TryFrom<Value> + 'static> From<ModelRc<T>> for Value {
     fn from(m: ModelRc<T>) -> Self {
         if let Some(v) = <dyn core::any::Any>::downcast_ref::<ModelRc<Value>>(&m) {
             Value::Model(v.clone())
         } else {
-            Value::Model(ModelRc::new(m.map(|v| v.into())))
+            Value::Model(ModelRc::new(crate::value_model::ValueMapModel(m)))
         }
     }
 }
@@ -452,6 +441,10 @@ impl<T: TryFrom<Value> + Default + 'static> TryFrom<Value> for ModelRc<T> {
             Value::Model(m) => {
                 if let Some(v) = <dyn core::any::Any>::downcast_ref::<ModelRc<T>>(&m) {
                     Ok(v.clone())
+                } else if let Some(v) =
+                    m.as_any().downcast_ref::<crate::value_model::ValueMapModel<T>>()
+                {
+                    Ok(v.0.clone())
                 } else {
                     Ok(ModelRc::new(m.map(|v| T::try_from(v).unwrap_or_default())))
                 }
@@ -485,23 +478,34 @@ fn value_model_conversion() {
 
     let err: Result<ModelRc<Value>, _> = Value::Bool(true).try_into();
     assert!(err.is_err());
+
+    let model =
+        Rc::new(VecModel::<SharedString>::from_iter(["foo".into(), "bar".into(), "baz".into()]));
+
+    let value: Value = ModelRc::from(model.clone()).into();
+    let value_model: ModelRc<Value> = value.clone().try_into().unwrap();
+    assert_eq!(value_model.row_data(2).unwrap(), Value::String("baz".into()));
+    value_model.set_row_data(1, Value::String("qux".into()));
+    value_model.set_row_data(0, Value::Bool(true));
+    assert_eq!(value_model.row_data(1).unwrap(), Value::String("qux".into()));
+    // This is backed by a string model, so changing to bool has no effect
+    assert_eq!(value_model.row_data(0).unwrap(), Value::String("foo".into()));
+
+    // The original values are changed
+    assert_eq!(model.row_data(1).unwrap(), SharedString::from("qux"));
+    assert_eq!(model.row_data(0).unwrap(), SharedString::from("foo"));
+
+    let the_model: ModelRc<SharedString> = value.try_into().unwrap();
+    assert_eq!(the_model.row_data(1).unwrap(), SharedString::from("qux"));
+    assert_eq!(
+        model.as_ref() as *const VecModel<SharedString>,
+        the_model.as_any().downcast_ref::<VecModel<SharedString>>().unwrap()
+            as *const VecModel<SharedString>
+    );
 }
 
-/// Normalize the identifier to use dashes
-pub(crate) fn normalize_identifier(ident: &str) -> Cow<'_, str> {
-    if ident.contains('_') {
-        ident.replace('_', "-").into()
-    } else {
-        ident.into()
-    }
-}
-
-pub(crate) fn normalize_identifier_smolstr(ident: &str) -> SmolStr {
-    if ident.contains('_') {
-        ident.replace_smolstr("_", "-")
-    } else {
-        ident.into()
-    }
+pub(crate) fn normalize_identifier(ident: &str) -> SmolStr {
+    i_slint_compiler::parser::normalize_identifier(ident)
 }
 
 /// This type represents a runtime instance of structure in `.slint`.
@@ -526,7 +530,7 @@ pub(crate) fn normalize_identifier_smolstr(ident: &str) -> SmolStr {
 /// assert_eq!(s.get_field("foo").cloned().unwrap().try_into(), Ok(45u32));
 /// ```
 #[derive(Clone, PartialEq, Debug, Default)]
-pub struct Struct(pub(crate) HashMap<String, Value>);
+pub struct Struct(pub(crate) HashMap<SmolStr, Value>);
 impl Struct {
     /// Get the value for a given struct field
     pub fn get_field(&self, name: &str) -> Option<&Value> {
@@ -534,11 +538,7 @@ impl Struct {
     }
     /// Set the value of a given struct field
     pub fn set_field(&mut self, name: String, value: Value) {
-        if name.contains('_') {
-            self.0.insert(name.replace('_', "-"), value);
-        } else {
-            self.0.insert(name, value);
-        }
+        self.0.insert(normalize_identifier(&name), value);
     }
 
     /// Iterate over all the fields in this struct
@@ -549,11 +549,7 @@ impl Struct {
 
 impl FromIterator<(String, Value)> for Struct {
     fn from_iter<T: IntoIterator<Item = (String, Value)>>(iter: T) -> Self {
-        Self(
-            iter.into_iter()
-                .map(|(s, v)| (if s.contains('_') { s.replace('_', "-") } else { s }, v))
-                .collect(),
-        )
+        Self(iter.into_iter().map(|(s, v)| (normalize_identifier(&s), v)).collect())
     }
 }
 
@@ -961,6 +957,18 @@ pub struct ComponentDefinition {
 }
 
 impl ComponentDefinition {
+    /// Set a `debug(...)` handler
+    #[doc(hidden)]
+    #[cfg(feature = "internal")]
+    pub fn set_debug_handler(
+        &self,
+        handler: impl Fn(&Option<i_slint_compiler::diagnostics::SourceLocation>, &str) + 'static,
+        _: i_slint_core::InternalToken,
+    ) {
+        generativity::make_guard!(guard);
+        let handler = Box::new(handler);
+        *self.inner.unerase(guard).debug_handler.borrow_mut() = handler;
+    }
     /// Creates a new instance of the component and returns a shared handle to it.
     pub fn create(&self) -> Result<ComponentInstance, PlatformError> {
         generativity::make_guard!(guard);
@@ -1209,7 +1217,7 @@ pub fn print_diagnostics(diagnostics: &[Diagnostic]) {
     build_diagnostics.print();
 }
 
-/// This represent an instance of a dynamic component
+/// This represents an instance of a dynamic component
 ///
 /// You can create an instance with the [`ComponentDefinition::create`] function.
 ///
@@ -1258,7 +1266,7 @@ impl ComponentInstance {
             .root_element
             .borrow()
             .property_declarations
-            .get(name.as_ref())
+            .get(&name)
             .is_none_or(|d| !d.expose_in_public_api)
         {
             return Err(GetPropertyError::NoSuchProperty);
@@ -1276,10 +1284,7 @@ impl ComponentInstance {
         let comp = self.inner.unerase(guard);
         let d = comp.description();
         let elem = d.original.root_element.borrow();
-        let decl = elem
-            .property_declarations
-            .get(name.as_ref())
-            .ok_or(SetPropertyError::NoSuchProperty)?;
+        let decl = elem.property_declarations.get(&name).ok_or(SetPropertyError::NoSuchProperty)?;
 
         if !decl.expose_in_public_api {
             return Err(SetPropertyError::NoSuchProperty);
@@ -1344,7 +1349,7 @@ impl ComponentInstance {
         generativity::make_guard!(guard);
         let comp = self.inner.unerase(guard);
         comp.description()
-            .invoke(comp.borrow(), &normalize_identifier_smolstr(name), args)
+            .invoke(comp.borrow(), &normalize_identifier(name), args)
             .map_err(|()| InvokeError::NoSuchCallable)
     }
 
@@ -1380,7 +1385,7 @@ impl ComponentInstance {
         generativity::make_guard!(guard);
         let comp = self.inner.unerase(guard);
         comp.description()
-            .get_global(comp.borrow(), &normalize_identifier(global))
+            .get_global(comp.borrow(), &&normalize_identifier(global))
             .map_err(|()| GetPropertyError::NoSuchProperty)? // FIXME: should there be a NoSuchGlobal error?
             .as_ref()
             .get_property(&normalize_identifier(property))
@@ -1397,10 +1402,10 @@ impl ComponentInstance {
         generativity::make_guard!(guard);
         let comp = self.inner.unerase(guard);
         comp.description()
-            .get_global(comp.borrow(), &normalize_identifier(global))
+            .get_global(comp.borrow(), &&normalize_identifier(global))
             .map_err(|()| SetPropertyError::NoSuchProperty)? // FIXME: should there be a NoSuchGlobal error?
             .as_ref()
-            .set_property(&normalize_identifier(property), value)
+            .set_property(&&normalize_identifier(property), value)
     }
 
     /// Set a handler for the callback in the exported global singleton. A callback with that
@@ -1469,7 +1474,7 @@ impl ComponentInstance {
             .description()
             .get_global(comp.borrow(), &normalize_identifier(global))
             .map_err(|()| InvokeError::NoSuchCallable)?; // FIXME: should there be a NoSuchGlobal error?
-        let callable_name = normalize_identifier_smolstr(callable_name);
+        let callable_name = normalize_identifier(callable_name);
         if matches!(
             comp.description()
                 .original
@@ -1516,7 +1521,7 @@ impl ComponentInstance {
         )
     }
 
-    /// Find the the `element` that was defined at the text position.
+    /// Find the `element` that was defined at the text position.
     ///
     /// WARNING: this is not part of the public API
     #[cfg(feature = "internal-highlight")]

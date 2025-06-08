@@ -223,7 +223,7 @@ fn collect_all_element_nodes_covering_impl(
     }
 }
 
-fn assign_is_in_root_component(candidates: &mut Vec<SelectionCandidate>) {
+fn assign_is_in_root_component(candidates: &mut [SelectionCandidate]) {
     let mut root_text_range: Option<i_slint_compiler::parser::TextRange> = None;
     for sc in candidates.iter_mut().rev() {
         let Some(en) = sc.as_element_node() else {
@@ -453,12 +453,8 @@ pub fn filter_sort_selection_stack(
             SelectionStackFilter::Interactive => frame.is_interactive,
             SelectionStackFilter::Others => !frame.is_interactive && !frame.is_layout,
             SelectionStackFilter::LayoutsAndInteractive => frame.is_layout || frame.is_interactive,
-            SelectionStackFilter::LayoutsAndOthers => {
-                frame.is_layout || (!frame.is_layout && !frame.is_interactive)
-            }
-            SelectionStackFilter::InteractiveAndOthers => {
-                frame.is_interactive || (!frame.is_layout && !frame.is_interactive)
-            }
+            SelectionStackFilter::LayoutsAndOthers => frame.is_layout || !frame.is_interactive,
+            SelectionStackFilter::InteractiveAndOthers => frame.is_interactive || !frame.is_layout,
             SelectionStackFilter::Everything => true,
         }
     }
@@ -499,7 +495,7 @@ fn filter_nodes_for_selection(
     }
 
     selection_candidate.as_element_node().filter(|en| {
-        en.with_element_node(|n| n.parent().map_or(true, |p| p.kind() != SyntaxKind::Component))
+        en.with_element_node(|n| n.parent().is_none_or(|p| p.kind() != SyntaxKind::Component))
     })
 }
 

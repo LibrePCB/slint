@@ -19,6 +19,7 @@ use i_slint_compiler::langtype::Type;
 use i_slint_compiler::namedreference::NamedReference;
 use i_slint_compiler::object_tree::ElementRc;
 use i_slint_core as corelib;
+use i_slint_core::input::FocusReason;
 use i_slint_core::items::ItemRc;
 use smol_str::SmolStr;
 use std::collections::HashMap;
@@ -203,7 +204,7 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
             }
             v
         }
-        Expression::FunctionCall { function, arguments, source_location: _ } => match &function {
+        Expression::FunctionCall { function, arguments, source_location } => match &function {
             Callable::Function(nr) => {
                 let is_item_member = nr.element().borrow().native_class().is_some_and(|n| n.properties.contains_key(nr.name()));
                 if is_item_member {
@@ -217,7 +218,7 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                 let args = arguments.iter().map(|e| eval_expression(e, local_context)).collect::<Vec<_>>();
                 invoke_callback(&ComponentInstance::InstanceRef(local_context.component_instance), &nr.element(), nr.name(), &args).unwrap()
             }
-            Callable::Builtin(f) => call_builtin_function(f.clone(), arguments, local_context),
+            Callable::Builtin(f) => call_builtin_function(f.clone(), arguments, local_context, source_location),
         }
         Expression::SelfAssignment { lhs, rhs, op, .. } => {
             let rhs = eval_expression(rhs, local_context);
@@ -405,6 +406,7 @@ fn call_builtin_function(
     f: BuiltinFunction,
     arguments: &[Expression],
     local_context: &mut EvalLocalContext,
+    source_location: &Option<i_slint_compiler::diagnostics::SourceLocation>,
 ) -> Value {
     match f {
         BuiltinFunction::GetWindowScaleFactor => Value::Number(
@@ -421,7 +423,10 @@ fn call_builtin_function(
         BuiltinFunction::Debug => {
             let to_print: SharedString =
                 eval_expression(&arguments[0], local_context).try_into().unwrap();
-            corelib::debug_log!("{}", to_print);
+            local_context.component_instance.description.debug_handler.borrow()(
+                source_location,
+                &to_print,
+            );
             Value::Void
         }
         BuiltinFunction::Mod => {
@@ -532,6 +537,7 @@ fn call_builtin_function(
                             item_info.item_index(),
                         ),
                         true,
+                        FocusReason::Programmatic,
                     )
                 });
                 Value::Void
@@ -564,6 +570,7 @@ fn call_builtin_function(
                             item_info.item_index(),
                         ),
                         false,
+                        FocusReason::Programmatic,
                     )
                 });
                 Value::Void
@@ -867,7 +874,7 @@ fn call_builtin_function(
                 );
                 metrics.into()
             } else {
-                panic!("internal error: argument to set-selection-offsetsAll must be an element")
+                panic!("internal error: argument to item-font-metrics must be an element")
             }
         }
         BuiltinFunction::StringIsFloat => {
@@ -1336,6 +1343,7 @@ fn call_builtin_function(
             crate::dynamic_item_tree::update_timers(local_context.component_instance);
             Value::Void
         }
+        BuiltinFunction::DetectOperatingSystem => i_slint_core::detect_operating_system().into(),
     }
 }
 

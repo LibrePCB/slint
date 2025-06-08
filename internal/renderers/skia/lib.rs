@@ -4,6 +4,8 @@
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
 
+#[cfg(any(target_vendor = "apple", skia_backend_vulkan))]
+use std::cell::OnceCell;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -14,7 +16,8 @@ use i_slint_core::api::{
 };
 use i_slint_core::graphics::euclid::{self, Vector2D};
 use i_slint_core::graphics::rendering_metrics_collector::RenderingMetricsCollector;
-use i_slint_core::graphics::{BorderRadius, FontRequest, RequestedGraphicsAPI, SharedPixelBuffer};
+use i_slint_core::graphics::RequestedGraphicsAPI;
+use i_slint_core::graphics::{BorderRadius, FontRequest, SharedPixelBuffer};
 use i_slint_core::item_rendering::{DirtyRegion, ItemCache, ItemRenderer, PartialRenderingState};
 use i_slint_core::lengths::{
     LogicalLength, LogicalPoint, LogicalRect, LogicalSize, PhysicalPx, ScaleFactor,
@@ -45,7 +48,7 @@ pub mod d3d_surface;
 #[cfg(skia_backend_vulkan)]
 pub mod vulkan_surface;
 
-#[cfg(not(target_os = "ios"))]
+#[cfg(any(not(target_vendor = "apple"), target_os = "macos"))]
 pub mod opengl_surface;
 
 use i_slint_core::items::TextWrap;
@@ -65,12 +68,14 @@ cfg_if::cfg_if! {
 }
 
 fn create_default_surface(
+    context: &SkiaSharedContext,
     window_handle: Arc<dyn raw_window_handle::HasWindowHandle>,
     display_handle: Arc<dyn raw_window_handle::HasDisplayHandle>,
     size: PhysicalWindowSize,
     requested_graphics_api: Option<RequestedGraphicsAPI>,
 ) -> Result<Box<dyn Surface>, PlatformError> {
     match DefaultSurface::new(
+        context,
         window_handle.clone(),
         display_handle.clone(),
         size,
@@ -83,8 +88,14 @@ fn create_default_surface(
                 "Failed to initialize Skia GPU renderer: {} . Falling back to software rendering",
                 err
             );
-            software_surface::SoftwareSurface::new(window_handle, display_handle, size, None)
-                .map(|r| Box::new(r) as Box<dyn Surface>)
+            software_surface::SoftwareSurface::new(
+                context,
+                window_handle,
+                display_handle,
+                size,
+                None,
+            )
+            .map(|r| Box::new(r) as Box<dyn Surface>)
         }
         #[cfg(not(skia_backend_software))]
         Err(err) => Err(err),
@@ -118,6 +129,22 @@ fn create_partial_renderer_state(
         .then(|| PartialRenderingState::default())
 }
 
+#[derive(Default)]
+struct SkiaSharedContextInner {
+    #[cfg(target_vendor = "apple")]
+    metal_context: OnceCell<metal_surface::SharedMetalContext>,
+    #[cfg(skia_backend_vulkan)]
+    vulkan_context: OnceCell<vulkan_surface::SharedVulkanContext>,
+}
+
+/// This data structure contains data that's intended to be shared across several instances of SkiaRenderer.
+/// For example, for Vulkan rendering, this shares the Vulkan instance.
+///
+/// Create an instance once and pass clones of it to the difference constructor functions, to ensure most
+/// efficient resource usage.
+#[derive(Clone, Default)]
+pub struct SkiaSharedContext(#[allow(dead_code)] Rc<SkiaSharedContextInner>);
+
 /// Use the SkiaRenderer when implementing a custom Slint platform where you deliver events to
 /// Slint and want the scene to be rendered using Skia as underlying graphics library.
 pub struct SkiaRenderer {
@@ -129,6 +156,7 @@ pub struct SkiaRenderer {
     rendering_first_time: Cell<bool>,
     surface: RefCell<Option<Box<dyn Surface>>>,
     surface_factory: fn(
+        &SkiaSharedContext,
         window_handle: Arc<dyn raw_window_handle::HasWindowHandle>,
         display_handle: Arc<dyn raw_window_handle::HasDisplayHandle>,
         size: PhysicalWindowSize,
@@ -139,10 +167,11 @@ pub struct SkiaRenderer {
     dirty_region_debug_mode: DirtyRegionDebugMode,
     /// Tracking dirty regions indexed by buffer age - 1. More than 3 back buffers aren't supported, but also unlikely to happen.
     dirty_region_history: RefCell<[DirtyRegion; 3]>,
+    shared_context: SkiaSharedContext,
 }
 
-impl Default for SkiaRenderer {
-    fn default() -> Self {
+impl SkiaRenderer {
+    pub fn default(context: &SkiaSharedContext) -> Self {
         Self {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
@@ -156,14 +185,13 @@ impl Default for SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            shared_context: context.clone(),
         }
     }
-}
 
-impl SkiaRenderer {
     #[cfg(skia_backend_software)]
     /// Creates a new SkiaRenderer that will always use Skia's software renderer.
-    pub fn default_software() -> Self {
+    pub fn default_software(context: &SkiaSharedContext) -> Self {
         Self {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
@@ -172,8 +200,13 @@ impl SkiaRenderer {
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
             surface: Default::default(),
-            surface_factory: |window_handle, display_handle, size, requested_graphics_api| {
+            surface_factory: |context,
+                              window_handle,
+                              display_handle,
+                              size,
+                              requested_graphics_api| {
                 software_surface::SoftwareSurface::new(
+                    context,
                     window_handle,
                     display_handle,
                     size,
@@ -185,12 +218,13 @@ impl SkiaRenderer {
             partial_rendering_state: PartialRenderingState::default().into(),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            shared_context: context.clone(),
         }
     }
 
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(any(not(target_vendor = "apple"), target_os = "macos"))]
     /// Creates a new SkiaRenderer that will always use Skia's OpenGL renderer.
-    pub fn default_opengl() -> Self {
+    pub fn default_opengl(context: &SkiaSharedContext) -> Self {
         Self {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
@@ -199,8 +233,13 @@ impl SkiaRenderer {
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
             surface: Default::default(),
-            surface_factory: |window_handle, display_handle, size, requested_graphics_api| {
+            surface_factory: |context,
+                              window_handle,
+                              display_handle,
+                              size,
+                              requested_graphics_api| {
                 opengl_surface::OpenGLSurface::new(
+                    context,
                     window_handle,
                     display_handle,
                     size,
@@ -212,12 +251,13 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            shared_context: context.clone(),
         }
     }
 
     #[cfg(target_vendor = "apple")]
     /// Creates a new SkiaRenderer that will always use Skia's Metal renderer.
-    pub fn default_metal() -> Self {
+    pub fn default_metal(context: &SkiaSharedContext) -> Self {
         Self {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
@@ -226,8 +266,13 @@ impl SkiaRenderer {
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
             surface: Default::default(),
-            surface_factory: |window_handle, display_handle, size, requested_graphics_api| {
+            surface_factory: |context,
+                              window_handle,
+                              display_handle,
+                              size,
+                              requested_graphics_api| {
                 metal_surface::MetalSurface::new(
+                    context,
                     window_handle,
                     display_handle,
                     size,
@@ -239,12 +284,13 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            shared_context: context.clone(),
         }
     }
 
     #[cfg(skia_backend_vulkan)]
     /// Creates a new SkiaRenderer that will always use Skia's Vulkan renderer.
-    pub fn default_vulkan() -> Self {
+    pub fn default_vulkan(context: &SkiaSharedContext) -> Self {
         Self {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
@@ -253,8 +299,13 @@ impl SkiaRenderer {
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
             surface: Default::default(),
-            surface_factory: |window_handle, display_handle, size, requested_graphics_api| {
+            surface_factory: |context,
+                              window_handle,
+                              display_handle,
+                              size,
+                              requested_graphics_api| {
                 vulkan_surface::VulkanSurface::new(
+                    context,
                     window_handle,
                     display_handle,
                     size,
@@ -266,12 +317,13 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            shared_context: context.clone(),
         }
     }
 
     #[cfg(target_family = "windows")]
     /// Creates a new SkiaRenderer that will always use Skia's Direct3D renderer.
-    pub fn default_direct3d() -> Self {
+    pub fn default_direct3d(context: &SkiaSharedContext) -> Self {
         Self {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
@@ -280,8 +332,13 @@ impl SkiaRenderer {
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
             surface: Default::default(),
-            surface_factory: |window_handle, display_handle, size, requested_graphics_api| {
+            surface_factory: |context,
+                              window_handle,
+                              display_handle,
+                              size,
+                              requested_graphics_api| {
                 d3d_surface::D3DSurface::new(
+                    context,
                     window_handle,
                     display_handle,
                     size,
@@ -293,25 +350,28 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            shared_context: context.clone(),
         }
     }
 
     /// Creates a new renderer is associated with the provided window adapter.
     pub fn new(
+        context: &SkiaSharedContext,
         window_handle: Arc<dyn raw_window_handle::HasWindowHandle>,
         display_handle: Arc<dyn raw_window_handle::HasDisplayHandle>,
         size: PhysicalWindowSize,
     ) -> Result<Self, PlatformError> {
-        Ok(Self::new_with_surface(create_default_surface(
-            window_handle,
-            display_handle,
-            size,
-            None,
-        )?))
+        Ok(Self::new_with_surface(
+            context,
+            create_default_surface(context, window_handle, display_handle, size, None)?,
+        ))
     }
 
     /// Creates a new renderer with the given surface trait implementation.
-    pub fn new_with_surface(surface: Box<dyn Surface + 'static>) -> Self {
+    pub fn new_with_surface(
+        context: &SkiaSharedContext,
+        surface: Box<dyn Surface + 'static>,
+    ) -> Self {
         let partial_rendering_state = create_partial_renderer_state(Some(surface.as_ref())).into();
         Self {
             maybe_window_adapter: Default::default(),
@@ -321,13 +381,14 @@ impl SkiaRenderer {
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Cell::new(true),
             surface: RefCell::new(Some(surface)),
-            surface_factory: |_, _, _, _| {
+            surface_factory: |_, _, _, _, _| {
                 Err("Skia renderer constructed with surface does not support dynamic surface re-creation".into())
             },
             pre_present_callback: Default::default(),
             partial_rendering_state,
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            shared_context: context.clone(),
         }
     }
 
@@ -383,8 +444,13 @@ impl SkiaRenderer {
     ) -> Result<(), PlatformError> {
         // just in case
         self.suspend()?;
-        let surface =
-            (self.surface_factory)(window_handle, display_handle, size, requested_graphics_api)?;
+        let surface = (self.surface_factory)(
+            &self.shared_context,
+            window_handle,
+            display_handle,
+            size,
+            requested_graphics_api,
+        )?;
         self.set_surface(surface);
         Ok(())
     }
@@ -504,6 +570,7 @@ impl SkiaRenderer {
         let mut skia_item_renderer = itemrenderer::SkiaItemRenderer::new(
             skia_canvas,
             window,
+            surface,
             &self.image_cache,
             &self.path_cache,
             &mut box_shadow_cache,
@@ -916,6 +983,7 @@ impl Drop for SkiaRenderer {
 pub trait Surface {
     /// Creates a new surface with the given window, display, and size.
     fn new(
+        shared_context: &SkiaSharedContext,
         window_handle: Arc<dyn raw_window_handle::HasWindowHandle>,
         display_handle: Arc<dyn raw_window_handle::HasDisplayHandle>,
         size: PhysicalWindowSize,
@@ -971,6 +1039,14 @@ pub trait Surface {
 
     fn use_partial_rendering(&self) -> bool {
         false
+    }
+
+    fn import_opengl_texture(
+        &self,
+        _canvas: &skia_safe::Canvas,
+        _texture: &i_slint_core::graphics::BorrowedOpenGLTexture,
+    ) -> Option<skia_safe::Image> {
+        None
     }
 
     /// Implementations should return self to allow upcasting.

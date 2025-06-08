@@ -8,7 +8,7 @@ use core::ptr::NonNull;
 use dynamic_type::{Instance, InstanceBox};
 use i_slint_compiler::expression_tree::{Expression, NamedReference};
 use i_slint_compiler::langtype::Type;
-use i_slint_compiler::object_tree::ElementRc;
+use i_slint_compiler::object_tree::{ElementRc, TransitionDirection};
 use i_slint_compiler::{diagnostics::BuildDiagnostics, object_tree::PropertyDeclaration};
 use i_slint_compiler::{generator, object_tree, parser, CompilerConfiguration};
 use i_slint_core::accessibility::{
@@ -57,7 +57,7 @@ pub struct ItemTreeBox<'id> {
 
 impl<'id> ItemTreeBox<'id> {
     /// Borrow this instance as a `Pin<ItemTreeRef>`
-    pub fn borrow(&self) -> ItemTreeRefPin {
+    pub fn borrow(&self) -> ItemTreeRefPin<'_> {
         self.borrow_instance().borrow()
     }
 
@@ -94,7 +94,7 @@ impl ItemWithinItemTree {
     pub(crate) unsafe fn item_from_item_tree(
         &self,
         mem: *const u8,
-    ) -> Pin<vtable::VRef<ItemVTable>> {
+    ) -> Pin<vtable::VRef<'_, ItemVTable>> {
         Pin::new_unchecked(vtable::VRef::from_raw(
             NonNull::from(self.rtti.vtable),
             NonNull::new(mem.add(self.offset) as _).unwrap(),
@@ -187,11 +187,11 @@ impl ItemTree for ErasedItemTreeBox {
         self.borrow().as_ref().layout_info(orientation)
     }
 
-    fn get_item_tree(self: Pin<&Self>) -> Slice<ItemTreeNode> {
+    fn get_item_tree(self: Pin<&Self>) -> Slice<'_, ItemTreeNode> {
         get_item_tree(self.get_ref().borrow())
     }
 
-    fn get_item_ref(self: Pin<&Self>, index: u32) -> Pin<ItemRef> {
+    fn get_item_ref(self: Pin<&Self>, index: u32) -> Pin<ItemRef<'_>> {
         // We're having difficulties transferring the lifetime to a pinned reference
         // to the other ItemTreeVTable with the same life time. So skip the vtable
         // indirection and call our implementation directly.
@@ -414,6 +414,10 @@ pub struct ItemTreeDescription<'id> {
     #[cfg(feature = "internal-highlight")]
     pub(crate) raw_type_loader:
         std::cell::OnceCell<Option<std::rc::Rc<i_slint_compiler::typeloader::TypeLoader>>>,
+
+    pub(crate) debug_handler: std::cell::RefCell<
+        Box<dyn Fn(&Option<i_slint_compiler::diagnostics::SourceLocation>, &str)>,
+    >,
 }
 
 #[derive(Clone, derive_more::From)]
@@ -510,7 +514,7 @@ impl ItemTreeDescription<'_> {
     > {
         let g = self.compiled_globals.as_ref().expect("Root component should have globals");
         g.exported_globals_by_name
-            .get(crate::normalize_identifier(name).as_ref())
+            .get(&crate::normalize_identifier(name))
             .and_then(|global_idx| g.compiled_globals.get(*global_idx))
             .map(|global| internal_properties_to_public(global.public_properties()))
     }
@@ -701,7 +705,8 @@ impl ItemTreeDescription<'_> {
     }
 }
 
-extern "C" fn visit_children_item(
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn visit_children_item(
     component: ItemTreeRefPin,
     index: isize,
     order: TraversalOrder,
@@ -1068,18 +1073,6 @@ pub(crate) fn generate_item_tree<'id>(
             );
         }
 
-        fn push_component_placeholder_item(
-            &mut self,
-            item: &i_slint_compiler::object_tree::ElementRc,
-            container_count: u32,
-            parent_index: u32,
-            _component_state: &Self::SubComponentState,
-        ) {
-            self.tree_array
-                .push(ItemTreeNode::DynamicTree { index: container_count, parent_index });
-            self.original_elements.push(item.clone());
-        }
-
         fn push_native_item(
             &mut self,
             rc_item: &ElementRc,
@@ -1379,6 +1372,9 @@ pub(crate) fn generate_item_tree<'id>(
         type_loader: std::cell::OnceCell::new(),
         #[cfg(feature = "internal-highlight")]
         raw_type_loader: std::cell::OnceCell::new(),
+        debug_handler: std::cell::RefCell::new(Box::new(|_, text| {
+            i_slint_core::debug_log!("{text}")
+        })),
     };
 
     Rc::new(t)
@@ -1420,16 +1416,22 @@ pub fn animation_for_property(
                     let state = eval::eval_expression(&state_ref, &mut context);
                     let state_info: i_slint_core::properties::StateInfo = state.try_into().unwrap();
                     for a in &animations {
-                        if (a.is_out && a.state_id == state_info.previous_state)
-                            || (!a.is_out && a.state_id == state_info.current_state)
-                        {
-                            return (
-                                eval::new_struct_with_bindings(
-                                    &a.animation.borrow().bindings,
-                                    &mut context,
-                                ),
-                                state_info.change_time,
-                            );
+                        let is_previous_state = a.state_id == state_info.previous_state;
+                        let is_current_state = a.state_id == state_info.current_state;
+                        match (a.direction, is_previous_state, is_current_state) {
+                            (TransitionDirection::In, false, true)
+                            | (TransitionDirection::Out, true, false)
+                            | (TransitionDirection::InOut, false, true)
+                            | (TransitionDirection::InOut, true, false) => {
+                                return (
+                                    eval::new_struct_with_bindings(
+                                        &a.animation.borrow().bindings,
+                                        &mut context,
+                                    ),
+                                    state_info.change_time,
+                                );
+                            }
+                            _ => {}
                         }
                     }
                     Default::default()
@@ -1764,7 +1766,7 @@ impl ErasedItemTreeBox {
         )
     }
 
-    pub fn borrow(&self) -> ItemTreeRefPin {
+    pub fn borrow(&self) -> ItemTreeRefPin<'_> {
         // Safety: it is safe to access self.0 here because the 'id lifetime does not leak
         self.0.borrow()
     }
@@ -1844,7 +1846,11 @@ pub fn get_repeater_by_name<'a, 'id>(
     (rep_in_comp.offset.apply_pin(instance_ref.instance), rep_in_comp.item_tree_to_repeat.clone())
 }
 
-extern "C" fn layout_info(component: ItemTreeRefPin, orientation: Orientation) -> LayoutInfo {
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn layout_info(
+    component: ItemTreeRefPin,
+    orientation: Orientation,
+) -> LayoutInfo {
     generativity::make_guard!(guard);
     // This is fine since we can only be called with a component that with our vtable which is a ItemTreeDescription
     let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
@@ -1874,7 +1880,8 @@ extern "C" fn layout_info(component: ItemTreeRefPin, orientation: Orientation) -
     result
 }
 
-unsafe extern "C" fn get_item_ref(component: ItemTreeRefPin, index: u32) -> Pin<ItemRef> {
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+unsafe extern "C-unwind" fn get_item_ref(component: ItemTreeRefPin, index: u32) -> Pin<ItemRef> {
     let tree = get_item_tree(component);
     match &tree[index as usize] {
         ItemTreeNode::Item { item_array_index, .. } => {
@@ -1889,7 +1896,8 @@ unsafe extern "C" fn get_item_ref(component: ItemTreeRefPin, index: u32) -> Pin<
     }
 }
 
-extern "C" fn get_subtree_range(component: ItemTreeRefPin, index: u32) -> IndexRange {
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn get_subtree_range(component: ItemTreeRefPin, index: u32) -> IndexRange {
     generativity::make_guard!(guard);
     let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
     if index as usize >= instance_ref.description.repeater.len() {
@@ -1918,7 +1926,8 @@ extern "C" fn get_subtree_range(component: ItemTreeRefPin, index: u32) -> IndexR
     }
 }
 
-extern "C" fn get_subtree(
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn get_subtree(
     component: ItemTreeRefPin,
     index: u32,
     subtree_index: usize,
@@ -1956,14 +1965,16 @@ extern "C" fn get_subtree(
     }
 }
 
-extern "C" fn get_item_tree(component: ItemTreeRefPin) -> Slice<ItemTreeNode> {
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn get_item_tree(component: ItemTreeRefPin) -> Slice<ItemTreeNode> {
     generativity::make_guard!(guard);
     let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
     let tree = instance_ref.description.item_tree.as_slice();
     unsafe { core::mem::transmute::<&[ItemTreeNode], &[ItemTreeNode]>(tree) }.into()
 }
 
-extern "C" fn subtree_index(component: ItemTreeRefPin) -> usize {
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn subtree_index(component: ItemTreeRefPin) -> usize {
     generativity::make_guard!(guard);
     let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
     if let Ok(value) = instance_ref.description.get_property(component, SPECIAL_PROPERTY_INDEX) {
@@ -1973,7 +1984,8 @@ extern "C" fn subtree_index(component: ItemTreeRefPin) -> usize {
     }
 }
 
-unsafe extern "C" fn parent_node(component: ItemTreeRefPin, result: &mut ItemWeak) {
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+unsafe extern "C-unwind" fn parent_node(component: ItemTreeRefPin, result: &mut ItemWeak) {
     generativity::make_guard!(guard);
     let instance_ref = InstanceRef::from_pin_ref(component, guard);
 
@@ -2012,7 +2024,8 @@ unsafe extern "C" fn parent_node(component: ItemTreeRefPin, result: &mut ItemWea
     }
 }
 
-unsafe extern "C" fn embed_component(
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+unsafe extern "C-unwind" fn embed_component(
     component: ItemTreeRefPin,
     parent_component: &ItemTreeWeak,
     parent_item_tree_index: u32,
@@ -2042,7 +2055,8 @@ unsafe extern "C" fn embed_component(
     extra_data.embedding_position.set((parent_component.clone(), parent_item_tree_index)).is_ok()
 }
 
-extern "C" fn item_geometry(component: ItemTreeRefPin, item_index: u32) -> LogicalRect {
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn item_geometry(component: ItemTreeRefPin, item_index: u32) -> LogicalRect {
     generativity::make_guard!(guard);
     let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
 
@@ -2064,7 +2078,8 @@ extern "C" fn item_geometry(component: ItemTreeRefPin, item_index: u32) -> Logic
 
 // silence the warning despite `AccessibleRole` is a `#[non_exhaustive]` enum from another crate.
 #[allow(improper_ctypes_definitions)]
-extern "C" fn accessible_role(component: ItemTreeRefPin, item_index: u32) -> AccessibleRole {
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn accessible_role(component: ItemTreeRefPin, item_index: u32) -> AccessibleRole {
     generativity::make_guard!(guard);
     let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
     let nr = instance_ref.description.original_elements[item_index as usize]
@@ -2082,7 +2097,8 @@ extern "C" fn accessible_role(component: ItemTreeRefPin, item_index: u32) -> Acc
     }
 }
 
-extern "C" fn accessible_string_property(
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn accessible_string_property(
     component: ItemTreeRefPin,
     item_index: u32,
     what: AccessibleStringProperty,
@@ -2111,7 +2127,8 @@ extern "C" fn accessible_string_property(
     }
 }
 
-extern "C" fn accessibility_action(
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn accessibility_action(
     component: ItemTreeRefPin,
     item_index: u32,
     action: &AccessibilityAction,
@@ -2146,7 +2163,8 @@ extern "C" fn accessibility_action(
     };
 }
 
-extern "C" fn supported_accessibility_actions(
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn supported_accessibility_actions(
     component: ItemTreeRefPin,
     item_index: u32,
 ) -> SupportedAccessibilityAction {
@@ -2168,7 +2186,8 @@ extern "C" fn supported_accessibility_actions(
     val
 }
 
-extern "C" fn item_element_infos(
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn item_element_infos(
     component: ItemTreeRefPin,
     item_index: u32,
     result: &mut SharedString,
@@ -2182,7 +2201,8 @@ extern "C" fn item_element_infos(
     true
 }
 
-extern "C" fn window_adapter(
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+extern "C-unwind" fn window_adapter(
     component: ItemTreeRefPin,
     do_create: bool,
     result: &mut Option<WindowAdapterRc>,
@@ -2196,14 +2216,22 @@ extern "C" fn window_adapter(
     }
 }
 
-unsafe extern "C" fn drop_in_place(component: vtable::VRefMut<ItemTreeVTable>) -> vtable::Layout {
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+unsafe extern "C-unwind" fn drop_in_place(
+    component: vtable::VRefMut<ItemTreeVTable>,
+) -> vtable::Layout {
     let instance_ptr = component.as_ptr() as *mut Instance<'static>;
     let layout = (*instance_ptr).type_info().layout();
     dynamic_type::TypeInfo::drop_in_place(instance_ptr);
     layout.into()
 }
 
-unsafe extern "C" fn dealloc(_vtable: &ItemTreeVTable, ptr: *mut u8, layout: vtable::Layout) {
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
+unsafe extern "C-unwind" fn dealloc(
+    _vtable: &ItemTreeVTable,
+    ptr: *mut u8,
+    layout: vtable::Layout,
+) {
     std::alloc::dealloc(ptr, layout.try_into().unwrap());
 }
 

@@ -50,7 +50,7 @@ namespace platform {
 /// Internal interface for a renderer for use with the WindowAdapter.
 ///
 /// This class is not intended to be re-implemented. In places where this class is required, use
-/// of one the existing implementations such as SoftwareRenderer or SkiaRenderer.
+/// one of the existing implementations such as SoftwareRenderer or SkiaRenderer.
 class AbstractRenderer
 {
 private:
@@ -201,7 +201,7 @@ public:
     ///
     /// The default implementation does nothing
     ///
-    /// This function should sent the size to the Windowing system. If the window size actually
+    /// This function should send the size to the Windowing system. If the window size actually
     /// changes, you should call slint::Window::dispatch_resize_event to propagate the new size
     /// to the slint view.
     virtual void set_size(slint::PhysicalSize) { }
@@ -282,7 +282,7 @@ public:
             /// should not be able to be resized larger than this size. If it is left unset, there
             /// is no maximum size.
             std::optional<LogicalSize> max;
-            /// This represents the preferred size of the window. This is the size the window
+            /// This represents the preferred size of the window. This is the size of the window
             /// should have by default
             LogicalSize preferred;
         };
@@ -403,7 +403,7 @@ public:
     /// or re-enter from the event loop
     virtual void quit_event_loop() { }
 
-    /// An task that is passed to the Platform::run_in_event_loop function and needs to be
+    /// A task that is passed to the Platform::run_in_event_loop function and needs to be
     /// run in the event loop and not in any other thread.
     class Task
     {
@@ -449,7 +449,7 @@ public:
     /// This function is called by slint::invoke_from_event_loop().
     /// It can be called from any thread, but the passed function must only be called
     /// from the event loop.
-    /// Reimplements this function and move the event to the event loop before calling
+    /// Reimplements this function and moves the event to the event loop before calling
     /// Task::run()
     virtual void run_in_event_loop(Task) { }
 };
@@ -537,75 +537,6 @@ struct Rgb565Pixel
     /// Returns true if \a lhs \a rhs are pixels with identical colors.
     friend bool operator==(const Rgb565Pixel &lhs, const Rgb565Pixel &rhs) = default;
 };
-
-#    ifdef SLINT_FEATURE_EXPERIMENTAL
-
-using cbindgen_private::CompositionMode;
-using cbindgen_private::types::TexturePixelFormat;
-
-/// This structure describes the properties of a texture for blending with
-/// TargetPixelBuffer::draw_texture().
-///
-/// **Note**: This class is still experimental - it's API is subject to changes and not stabilized
-/// yet. To use the class, you must enable the `SLINT_FEATURE_EXPERIMENTAL=ON` CMake option.
-struct Texture
-{
-    /// A reference to the pixel bytes of the texture. These bytes are in the format specified by
-    /// `pixel_format`.
-    std::span<const uint8_t> bytes;
-    /// The pixel format of the texture.
-    TexturePixelFormat pixel_format;
-    /// The number of pixels per line.
-    uint16_t pixel_stride;
-    /// The width of the texture in pixels.
-    uint16_t width;
-    /// The height of the texture in pixels.
-    uint16_t height;
-    /// The delta to apply to the source x coordinate between pixels when drawing the texture.
-    /// This is used when scaling the texture. The delta is specified in 8:8 fixed point format.
-    uint16_t delta_x;
-    /// The delta to apply to the source y coordinate between pixels when drawing the texture.
-    /// This is used when scaling the texture. The delta is specified in 8:8 fixed point format.
-    uint16_t delta_y;
-    /// The offset within the texture to start reading pixels from in the x direction. The
-    /// offset is specified in 12:4 fixed point format.
-    uint16_t source_offset_x;
-    /// The offset within the texture to start reading pixels from in the y direction. The
-    /// offset is specified in 12:4 fixed point format.
-    uint16_t source_offset_y;
-};
-
-/// Abstract base class for a target pixel buffer where certain drawing operations can be delegated.
-/// Use this to implement support for hardware accelerators such as DMA2D, PPA, or PXP on
-/// Microcontrollers.
-///
-/// **Note**: This class is still experimental - it's API is subject to changes and not stabilized
-/// yet. To use the class, you must enable the `SLINT_FEATURE_EXPERIMENTAL=ON` CMake option.
-template<typename PixelType>
-struct TargetPixelBuffer
-{
-    virtual ~TargetPixelBuffer() { }
-
-    /// Returns a span of pixels for the specified line number.
-    virtual std::span<PixelType> line_slice(std::size_t line_number) = 0;
-    /// Returns the number of lines in the buffer. This is the height of the buffer in pixels.
-    virtual std::size_t num_lines() = 0;
-
-    /// Fill a rectangle at the specified pixel coordinates with the given color. Return true
-    /// if the operation succeeded; false otherwise;
-    virtual bool fill_rectangle(int16_t x, int16_t y, int16_t width, int16_t height,
-                                const RgbaColor<uint8_t> &premultiplied_color,
-                                CompositionMode composition_mode) = 0;
-
-    /// Draw a portion of provided texture to the specified pixel coordinates.
-    /// Each pixel of the texture is to be blended with the given colorize color as well as the
-    /// alpha value.
-    virtual bool draw_texture(int16_t x, int16_t y, int16_t width, int16_t height,
-                              const Texture &texture, const RgbaColor<uint8_t> &colorize,
-                              uint8_t alpha, int screen_rotation_degrees,
-                              CompositionMode composition_mode) = 0;
-};
-#    endif
 
 /// Slint's software renderer.
 ///
@@ -726,6 +657,88 @@ public:
         SwappedBuffers = 2,
     };
 
+#    ifdef SLINT_FEATURE_EXPERIMENTAL
+    /// Representation of a texture to blend in the destination buffer.
+    // (FIXME: this is currently opaque, but should be exposed)
+    using DrawTextureArgs = cbindgen_private::DrawTextureArgs;
+    /// Arguments for draw_rectagle
+    using DrawRectangleArgs = cbindgen_private::DrawRectangleArgs;
+
+    /// Abstract base class for a target pixel buffer where certain drawing operations can be
+    /// delegated. Use this to implement support for hardware accelerators such as DMA2D, PPA, or
+    /// PXP on Microcontrollers.
+    ///
+    /// **Note**: This class is still experimental - its API is subject to changes and not
+    /// stabilized yet. To use the class, you must enable the `SLINT_FEATURE_EXPERIMENTAL=ON` CMake
+    /// option.
+    template<typename PixelType>
+    struct TargetPixelBuffer
+    {
+        virtual ~TargetPixelBuffer() { }
+
+        /// Returns a span of pixels for the specified line number.
+        virtual std::span<PixelType> line_slice(std::size_t line_number) = 0;
+        /// Returns the number of lines in the buffer. This is the height of the buffer in pixels.
+        virtual std::size_t num_lines() = 0;
+
+        /// Draw a portion of provided texture to the specified pixel coordinates.
+        /// Each pixel of the texture is to be blended with the given colorize color as well as the
+        /// alpha value.
+        // FIXME: Texture is currently opaque, but should be exposed
+        virtual bool draw_texture(const DrawTextureArgs &texture, const PhysicalRegion &clip) = 0;
+
+        /// Fill the background of the buffer with the given brush.
+        virtual bool fill_background(const Brush &brush, const PhysicalRegion &clip) = 0;
+
+        /// Draw a rectangle specified by the DrawRectangleArgs. That rectangle must be clipped to
+        /// the given region.
+        virtual bool draw_rectangle(const DrawRectangleArgs &args, const PhysicalRegion &clip) = 0;
+
+    private:
+        friend class SoftwareRenderer;
+        cbindgen_private::CppTargetPixelBuffer<PixelType> wrap()
+        {
+            return cbindgen_private::CppTargetPixelBuffer<PixelType> {
+                .user_data = this,
+                .line_slice =
+                        [](void *self, uintptr_t line_number, PixelType **slice_ptr,
+                           uintptr_t *slice_len) {
+                            auto *buffer = reinterpret_cast<TargetPixelBuffer<PixelType> *>(self);
+                            auto slice = buffer->line_slice(line_number);
+                            *slice_ptr = slice.data();
+                            *slice_len = slice.size();
+                        },
+                .num_lines =
+                        [](void *self) {
+                            auto *buffer = reinterpret_cast<TargetPixelBuffer<PixelType> *>(self);
+                            return buffer->num_lines();
+                        },
+                .fill_background =
+                        [](void *self, const Brush *brush,
+                           const cbindgen_private::PhysicalRegion *clip) {
+                            auto *buffer = reinterpret_cast<TargetPixelBuffer<PixelType> *>(self);
+                            auto clip_region = PhysicalRegion { *clip };
+                            return buffer->fill_background(*brush, clip_region);
+                        },
+                .draw_rectangle =
+                        [](void *self, const cbindgen_private::DrawRectangleArgs *args,
+                           const cbindgen_private::PhysicalRegion *clip) {
+                            auto *buffer = reinterpret_cast<TargetPixelBuffer<PixelType> *>(self);
+                            auto clip_region = PhysicalRegion { *clip };
+                            return buffer->draw_rectangle(*args, clip_region);
+                        },
+                .draw_texture =
+                        [](void *self, const cbindgen_private::DrawTextureArgs *texture,
+                           const cbindgen_private::PhysicalRegion *clip) {
+                            auto *buffer = reinterpret_cast<TargetPixelBuffer<PixelType> *>(self);
+                            auto clip_region = PhysicalRegion { *clip };
+                            return buffer->draw_texture(*texture, clip_region);
+                        }
+            };
+        }
+    };
+#    endif
+
     virtual ~SoftwareRenderer() { cbindgen_private::slint_software_renderer_drop(inner); };
     SoftwareRenderer(const SoftwareRenderer &) = delete;
     SoftwareRenderer &operator=(const SoftwareRenderer &) = delete;
@@ -812,119 +825,25 @@ public:
 #    ifdef SLINT_FEATURE_EXPERIMENTAL
     /// Renders into the given TargetPixelBuffer.
     ///
-    /// **Note**: This class is still experimental - it's API is subject to changes and not
+    /// **Note**: This class is still experimental - its API is subject to changes and not
     /// stabilized yet. To use the class, you must enable the `SLINT_FEATURE_EXPERIMENTAL=ON` CMake
     /// option.
     PhysicalRegion render(TargetPixelBuffer<Rgb8Pixel> *buffer) const
     {
-        cbindgen_private::CppRgb8TargetPixelBuffer buffer_wrapper {
-            .user_data = buffer,
-            .line_slice =
-                    [](void *self, uintptr_t line_number, Rgb8Pixel **slice_ptr,
-                       uintptr_t *slice_len) {
-                        auto *buffer = reinterpret_cast<TargetPixelBuffer<Rgb8Pixel> *>(self);
-                        auto slice = buffer->line_slice(line_number);
-                        *slice_ptr = slice.data();
-                        *slice_len = slice.size();
-                    },
-            .num_lines =
-                    [](void *self) {
-                        auto *buffer = reinterpret_cast<TargetPixelBuffer<Rgb8Pixel> *>(self);
-                        return buffer->num_lines();
-                    },
-            .fill_rectangle =
-                    [](void *self, int16_t x, int16_t y, int16_t width, int16_t height, uint8_t red,
-                       uint8_t green, uint8_t blue, uint8_t alpha,
-                       CompositionMode composition_mode) {
-                        auto *buffer = reinterpret_cast<TargetPixelBuffer<Rgb8Pixel> *>(self);
-                        return buffer->fill_rectangle(
-                                x, y, width, height,
-                                Color::from_argb_uint8(alpha, red, green, blue), composition_mode);
-                    },
-            .draw_texture =
-                    [](void *self, int16_t x, int16_t y, int16_t width, int16_t height,
-                       const cbindgen_private::CppInternalTexture *internal_texture,
-                       uint32_t colorize, uint8_t alpha, int32_t screen_rotation_degrees,
-                       CompositionMode composition_mode) {
-                        auto *buffer = reinterpret_cast<TargetPixelBuffer<Rgb8Pixel> *>(self);
-                        Texture texture {
-                            .bytes = std::span<const uint8_t> { internal_texture->bytes,
-                                                                internal_texture->bytes_len },
-                            .pixel_format = internal_texture->pixel_format,
-                            .pixel_stride = internal_texture->pixel_stride,
-                            .width = internal_texture->width,
-                            .height = internal_texture->height,
-                            .delta_x = internal_texture->delta_x,
-                            .delta_y = internal_texture->delta_y,
-                            .source_offset_x = internal_texture->source_offset_x,
-                            .source_offset_y = internal_texture->source_offset_y,
-                        };
-                        return buffer->draw_texture(x, y, width, height, texture,
-                                                    Color::from_argb_encoded(colorize), alpha,
-                                                    screen_rotation_degrees, composition_mode);
-                    }
-        };
-        auto r =
-                cbindgen_private::slint_software_renderer_render_accel_rgb8(inner, &buffer_wrapper);
+        auto wrapper = buffer->wrap();
+        auto r = cbindgen_private::slint_software_renderer_render_accel_rgb8(inner, &wrapper);
         return PhysicalRegion { r };
     }
 
     /// Renders into the given TargetPixelBuffer.
     ///
-    /// **Note**: This class is still experimental - it's API is subject to changes and not
+    /// **Note**: This class is still experimental - its API is subject to changes and not
     /// stabilized yet. To use the class, you must enable the `SLINT_FEATURE_EXPERIMENTAL=ON` CMake
     /// option.
     PhysicalRegion render(TargetPixelBuffer<Rgb565Pixel> *buffer) const
     {
-        cbindgen_private::CppRgb565TargetPixelBuffer buffer_wrapper {
-            .user_data = buffer,
-            .line_slice =
-                    [](void *self, uintptr_t line_number, uint16_t **slice_ptr,
-                       uintptr_t *slice_len) {
-                        auto *buffer = reinterpret_cast<TargetPixelBuffer<Rgb565Pixel> *>(self);
-                        auto slice = buffer->line_slice(line_number);
-                        *slice_ptr = reinterpret_cast<uint16_t *>(slice.data());
-                        *slice_len = slice.size();
-                    },
-            .num_lines =
-                    [](void *self) {
-                        auto *buffer = reinterpret_cast<TargetPixelBuffer<Rgb565Pixel> *>(self);
-                        return buffer->num_lines();
-                    },
-            .fill_rectangle =
-                    [](void *self, int16_t x, int16_t y, int16_t width, int16_t height, uint8_t red,
-                       uint8_t green, uint8_t blue, uint8_t alpha,
-                       CompositionMode composition_mode) {
-                        auto *buffer = reinterpret_cast<TargetPixelBuffer<Rgb565Pixel> *>(self);
-                        return buffer->fill_rectangle(
-                                x, y, width, height,
-                                Color::from_argb_uint8(alpha, red, green, blue), composition_mode);
-                    },
-            .draw_texture =
-                    [](void *self, int16_t x, int16_t y, int16_t width, int16_t height,
-                       const cbindgen_private::CppInternalTexture *internal_texture,
-                       uint32_t colorize, uint8_t alpha, int32_t screen_rotation_degrees,
-                       CompositionMode composition_mode) {
-                        auto *buffer = reinterpret_cast<TargetPixelBuffer<Rgb565Pixel> *>(self);
-                        Texture texture {
-                            .bytes = std::span<const uint8_t> { internal_texture->bytes,
-                                                                internal_texture->bytes_len },
-                            .pixel_format = internal_texture->pixel_format,
-                            .pixel_stride = internal_texture->pixel_stride,
-                            .width = internal_texture->width,
-                            .height = internal_texture->height,
-                            .delta_x = internal_texture->delta_x,
-                            .delta_y = internal_texture->delta_y,
-                            .source_offset_x = internal_texture->source_offset_x,
-                            .source_offset_y = internal_texture->source_offset_y,
-                        };
-                        return buffer->draw_texture(x, y, width, height, texture,
-                                                    Color::from_argb_encoded(colorize), alpha,
-                                                    screen_rotation_degrees, composition_mode);
-                    }
-        };
-        auto r = cbindgen_private::slint_software_renderer_render_accel_rgb565(inner,
-                                                                               &buffer_wrapper);
+        auto wrapper = buffer->wrap();
+        auto r = cbindgen_private::slint_software_renderer_render_accel_rgb565(inner, &wrapper);
         return PhysicalRegion { r };
     }
 #    endif
@@ -942,7 +861,7 @@ public:
         Rotate270 = 270,
     };
 
-    /// Set how the window need to be rotated in the buffer.
+    /// Set how the window needs to be rotated in the buffer.
     ///
     /// This is typically used to implement screen rotation in software
     void set_rendering_rotation(RenderingRotation rotation)

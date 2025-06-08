@@ -23,7 +23,7 @@ jobs:
             # Allow deprecated warning because we are using nightly and some things might be deprecated in nightly
             # for which the stable alternative is not yet available.
             RUSTFLAGS: -D warnings -W deprecated
-            RUSTDOCFLAGS: --html-in-header=/home/runner/work/slint/slint/docs/astro/src/utils/slint-docs-highlight.html -D warnings -W deprecated --cfg docsrs
+            RUSTDOCFLAGS: --html-in-header=/home/runner/work/slint/slint/docs/astro/src/utils/slint-docs-highlight.html -D warnings -W deprecated --cfg docsrs -Zunstable-options --generate-link-to-definition
             SLINT_NO_QT: 1
             CARGO_INCREMENTAL: false
             RELEASE_INPUT: ${{ inputs.release }}
@@ -31,7 +31,7 @@ jobs:
             - uses: actions/checkout@v4
             - uses: pnpm/action-setup@v4.1.0
               with:
-                version: 10.9.0
+                version: 10.11.0
             - name: Set up rgb crate rustdoc link
               run: |
                   rgb_version=`grep 'rgb = '  internal/core/Cargo.toml | sed 's/^.*"\(.*\)"/\1/'`

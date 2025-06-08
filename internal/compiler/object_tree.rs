@@ -317,7 +317,12 @@ pub struct Timer {
     pub running: NamedReference,
 }
 
-type ChildrenInsertionPoint = (ElementRc, usize, syntax_nodes::ChildrenPlaceholder);
+#[derive(Clone, Debug)]
+pub struct ChildrenInsertionPoint {
+    pub parent: ElementRc,
+    pub insertion_index: usize,
+    pub node: syntax_nodes::ChildrenPlaceholder,
+}
 
 /// Used sub types for a root component
 #[derive(Debug, Default)]
@@ -543,12 +548,19 @@ impl From<Type> for PropertyDeclaration {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransitionDirection {
+    In,
+    Out,
+    InOut,
+}
+
 #[derive(Debug, Clone)]
 pub struct TransitionPropertyAnimation {
     /// The state id as computed in lower_state
     pub state_id: i32,
-    /// false for 'to', true for 'out'
-    pub is_out: bool,
+    /// The direction of the transition
+    pub direction: TransitionDirection,
     /// The content of the `animation` object
     pub animation: ElementRc,
 }
@@ -557,13 +569,42 @@ impl TransitionPropertyAnimation {
     /// Return an expression which returns a boolean which is true if the transition is active.
     /// The state argument is an expression referencing the state property of type StateInfo
     pub fn condition(&self, state: Expression) -> Expression {
-        Expression::BinaryExpression {
-            lhs: Box::new(Expression::StructFieldAccess {
-                base: Box::new(state),
-                name: (if self.is_out { "previous-state" } else { "current-state" }).into(),
-            }),
-            rhs: Box::new(Expression::NumberLiteral(self.state_id as _, Unit::None)),
-            op: '=',
+        match self.direction {
+            TransitionDirection::In => Expression::BinaryExpression {
+                lhs: Box::new(Expression::StructFieldAccess {
+                    base: Box::new(state),
+                    name: "current-state".into(),
+                }),
+                rhs: Box::new(Expression::NumberLiteral(self.state_id as _, Unit::None)),
+                op: '=',
+            },
+            TransitionDirection::Out => Expression::BinaryExpression {
+                lhs: Box::new(Expression::StructFieldAccess {
+                    base: Box::new(state),
+                    name: "previous-state".into(),
+                }),
+                rhs: Box::new(Expression::NumberLiteral(self.state_id as _, Unit::None)),
+                op: '=',
+            },
+            TransitionDirection::InOut => Expression::BinaryExpression {
+                lhs: Box::new(Expression::BinaryExpression {
+                    lhs: Box::new(Expression::StructFieldAccess {
+                        base: Box::new(state.clone()),
+                        name: "current-state".into(),
+                    }),
+                    rhs: Box::new(Expression::NumberLiteral(self.state_id as _, Unit::None)),
+                    op: '=',
+                }),
+                rhs: Box::new(Expression::BinaryExpression {
+                    lhs: Box::new(Expression::StructFieldAccess {
+                        base: Box::new(state),
+                        name: "previous-state".into(),
+                    }),
+                    rhs: Box::new(Expression::NumberLiteral(self.state_id as _, Unit::None)),
+                    op: '=',
+                }),
+                op: '|',
+            },
         }
     }
 }
@@ -601,7 +642,7 @@ impl Clone for PropertyAnimation {
                         .iter()
                         .map(|t| TransitionPropertyAnimation {
                             state_id: t.state_id,
-                            is_out: t.is_out,
+                            direction: t.direction,
                             animation: deep_clone(&t.animation),
                         })
                         .collect(),
@@ -1481,7 +1522,7 @@ impl Element {
                     diag,
                     tr,
                 );
-                if let Some((_, _, se)) = sub_child_insertion_point {
+                if let Some(ChildrenInsertionPoint { node: se, .. }) = sub_child_insertion_point {
                     diag.push_error(
                         "The @children placeholder cannot appear in a repeated element".into(),
                         &se,
@@ -1498,7 +1539,7 @@ impl Element {
                     diag,
                     tr,
                 );
-                if let Some((_, _, se)) = sub_child_insertion_point {
+                if let Some(ChildrenInsertionPoint { node: se, .. }) = sub_child_insertion_point {
                     diag.push_error(
                         "The @children placeholder cannot appear in a conditional element".into(),
                         &se,
@@ -1524,7 +1565,11 @@ impl Element {
                     &children_placeholder,
                 )
             } else {
-                *component_child_insertion_point = Some((r.clone(), index, children_placeholder));
+                *component_child_insertion_point = Some(ChildrenInsertionPoint {
+                    parent: r.clone(),
+                    insertion_index: index,
+                    node: children_placeholder,
+                });
             }
         }
 
@@ -1870,7 +1915,7 @@ impl Element {
     }
 
     pub fn sub_component(&self) -> Option<&Rc<Component>> {
-        if self.repeated.is_some() || self.is_component_placeholder {
+        if self.repeated.is_some() {
             None
         } else if let ElementType::Component(sub_component) = &self.base_type {
             Some(sub_component)
@@ -2420,6 +2465,11 @@ pub fn visit_all_named_references(
                     vis(&mut t.triggered);
                     vis(&mut t.running);
                 });
+                for o in compo.optimized_elements.borrow().iter() {
+                    visit_element_expressions(o, |expr, _, _| {
+                        visit_named_references_in_expression(expr, vis)
+                    });
+                }
             }
             compo
         },
@@ -2433,8 +2483,16 @@ pub fn visit_all_expressions(
     component: &Component,
     mut vis: impl FnMut(&mut Expression, &dyn Fn() -> Type),
 ) {
-    recurse_elem_including_sub_components(component, &(), &mut |elem, _| {
+    recurse_elem_including_sub_components(component, &Weak::new(), &mut |elem, parent_compo| {
         visit_element_expressions(elem, |expr, _, ty| vis(expr, ty));
+        let compo = elem.borrow().enclosing_component.clone();
+        if !Weak::ptr_eq(parent_compo, &compo) {
+            let compo = compo.upgrade().unwrap();
+            for o in compo.optimized_elements.borrow().iter() {
+                visit_element_expressions(o, |expr, _, ty| vis(expr, ty));
+            }
+        }
+        compo
     })
 }
 
@@ -2447,8 +2505,7 @@ pub struct State {
 
 #[derive(Debug, Clone)]
 pub struct Transition {
-    /// false for 'to', true for 'out'
-    pub is_out: bool,
+    pub direction: TransitionDirection,
     pub state_id: SmolStr,
     pub property_animations: Vec<(NamedReference, SourceLocation, ElementRc)>,
     pub node: syntax_nodes::Transition,
@@ -2464,8 +2521,21 @@ impl Transition {
         if let Some(star) = trs.child_token(SyntaxKind::Star) {
             diag.push_error("catch-all not yet implemented".into(), &star);
         };
+        let direction_text = trs
+            .first_child_or_token()
+            .and_then(|t| t.as_token().map(|tok| tok.text().to_string()))
+            .unwrap_or_default();
+
         Transition {
-            is_out: parser::identifier_text(&trs).unwrap_or_default() == "out",
+            direction: match direction_text.as_str() {
+                "in" => TransitionDirection::In,
+                "out" => TransitionDirection::Out,
+                "in-out" => TransitionDirection::InOut,
+                "in_out" => TransitionDirection::InOut,
+                _ => {
+                    unreachable!("Unknown transition direction: '{}'", direction_text);
+                }
+            },
             state_id: trs
                 .DeclaredIdentifier()
                 .and_then(|x| parser::identifier_text(&x))

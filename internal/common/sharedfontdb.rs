@@ -14,10 +14,10 @@ pub struct FontDatabase {
     db: Arc<fontdb::Database>,
     #[cfg(not(any(
         target_family = "windows",
-        target_os = "macos",
-        target_os = "ios",
+        target_vendor = "apple",
         target_arch = "wasm32",
         target_os = "android",
+        target_os = "nto",
     )))]
     pub fontconfig_fallback_families: Vec<String>,
     // Default font families to use instead of SansSerif when SLINT_DEFAULT_FONT env var is set.
@@ -62,10 +62,10 @@ thread_local! {
 
 #[cfg(not(any(
     target_family = "windows",
-    target_os = "macos",
-    target_os = "ios",
+    target_vendor = "apple",
     target_arch = "wasm32",
     target_os = "android",
+    target_os = "nto",
 )))]
 mod fontconfig;
 
@@ -116,23 +116,33 @@ fn init_fontdb() -> FontDatabase {
 
     #[cfg(not(any(
         target_family = "windows",
-        target_os = "macos",
-        target_os = "ios",
+        target_vendor = "apple",
         target_arch = "wasm32",
         target_os = "android",
+        target_os = "nto",
     )))]
     let mut fontconfig_fallback_families = Vec::new();
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", target_os = "nto"))]
     {
         let data = include_bytes!("sharedfontdb/DejaVuSans.ttf");
         font_db.load_font_data(data.to_vec());
         font_db.set_sans_serif_family("DejaVu Sans");
     }
+    #[cfg(target_os = "nto")]
+    {
+        font_db.set_sans_serif_family("Noto Sans");
+    }
     #[cfg(target_os = "android")]
     {
         font_db.load_fonts_dir("/system/fonts");
         font_db.set_sans_serif_family("Roboto");
+    }
+    #[cfg(all(target_vendor = "apple", not(target_os = "macos")))]
+    {
+        font_db.load_fonts_dir("/System/Library/Fonts");
+        font_db.load_fonts_dir("/System/Library/Cache");
+        font_db.set_sans_serif_family("Arial");
     }
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     {
@@ -140,10 +150,10 @@ fn init_fontdb() -> FontDatabase {
         cfg_if::cfg_if! {
             if #[cfg(not(any(
                 target_family = "windows",
-                target_os = "macos",
-                target_os = "ios",
+                target_vendor = "apple",
                 target_arch = "wasm32",
                 target_os = "android",
+                target_os = "nto",
             )))] {
                 match fontconfig::find_families("sans-serif") {
                     Ok(mut fallback_families) => {
@@ -174,10 +184,10 @@ fn init_fontdb() -> FontDatabase {
         db: Arc::new(font_db),
         #[cfg(not(any(
             target_family = "windows",
-            target_os = "macos",
-            target_os = "ios",
+            target_vendor = "apple",
             target_arch = "wasm32",
             target_os = "android",
+            target_os = "nto",
         )))]
         fontconfig_fallback_families,
         default_font_family_ids,
@@ -202,7 +212,13 @@ pub fn register_font_from_path(path: &std::path::Path) -> Result<(), Box<dyn std
         for face_info in db.faces() {
             match &face_info.source {
                 fontdb::Source::Binary(_) => {}
-                fontdb::Source::File(loaded_path) | fontdb::Source::SharedFile(loaded_path, ..) => {
+                fontdb::Source::File(loaded_path) => {
+                    if *loaded_path == requested_path {
+                        return Ok(());
+                    }
+                }
+                #[cfg(not(target_os = "nto"))]
+                fontdb::Source::SharedFile(loaded_path, ..) => {
                     if *loaded_path == requested_path {
                         return Ok(());
                     }

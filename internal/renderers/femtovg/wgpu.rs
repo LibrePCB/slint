@@ -10,6 +10,7 @@ use crate::{FemtoVGRenderer, GraphicsBackend, WindowSurface};
 use wgpu_24 as wgpu;
 
 pub struct WGPUBackend {
+    instance: RefCell<Option<wgpu::Instance>>,
     device: RefCell<Option<wgpu::Device>>,
     queue: RefCell<Option<wgpu::Queue>>,
     surface_config: RefCell<Option<wgpu::SurfaceConfiguration>>,
@@ -33,6 +34,7 @@ impl GraphicsBackend for WGPUBackend {
 
     fn new_suspended() -> Self {
         Self {
+            instance: Default::default(),
             device: Default::default(),
             queue: Default::default(),
             surface_config: Default::default(),
@@ -71,6 +73,22 @@ impl GraphicsBackend for WGPUBackend {
         Ok(())
     }
 
+    #[cfg(feature = "unstable-wgpu-24")]
+    fn with_graphics_api<R>(
+        &self,
+        callback: impl FnOnce(Option<i_slint_core::api::GraphicsAPI<'_>>) -> R,
+    ) -> Result<R, i_slint_core::platform::PlatformError> {
+        let instance = self.instance.borrow().clone();
+        let device = self.device.borrow().clone();
+        let queue = self.queue.borrow().clone();
+        if let (Some(instance), Some(device), Some(queue)) = (instance, device, queue) {
+            Ok(callback(Some(i_slint_core::api::GraphicsAPI::WGPU24 { instance, device, queue })))
+        } else {
+            Ok(callback(None))
+        }
+    }
+
+    #[cfg(not(feature = "unstable-wgpu-24"))]
     fn with_graphics_api<R>(
         &self,
         callback: impl FnOnce(Option<i_slint_core::api::GraphicsAPI<'_>>) -> R,
@@ -84,7 +102,10 @@ impl GraphicsBackend for WGPUBackend {
         height: std::num::NonZeroU32,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut surface_config = self.surface_config.borrow_mut();
-        let surface_config = surface_config.as_mut().unwrap();
+        let Some(surface_config) = surface_config.as_mut() else {
+            // When the backend dispatches a resize event while the renderer is suspended, ignore resize requests.
+            return Ok(());
+        };
 
         surface_config.width = width.get();
         surface_config.height = height.get();
@@ -104,60 +125,136 @@ impl FemtoVGRenderer<WGPUBackend> {
         size: PhysicalWindowSize,
         requested_graphics_api: Option<RequestedGraphicsAPI>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if requested_graphics_api.is_some() {
-            return Err(
-                "The FemtoVG WGPU renderer does not implement renderer selection by graphics API"
-                    .into(),
-            );
-        }
-
-        let backends = wgpu::Backends::from_env().unwrap_or_default();
-        let dx12_shader_compiler = wgpu::Dx12Compiler::from_env().unwrap_or_default();
-        let gles_minor_version = wgpu::Gles3MinorVersion::from_env().unwrap_or_default();
-
-        // wgpu uses async here, but the returned future is ready on first poll on all platforms except WASM,
-        // which we don't supoprt right now.
-        let instance = poll_once(async {
-            wgpu::util::new_instance_with_webgpu_detection(&wgpu::InstanceDescriptor {
-                backends,
-                flags: wgpu::InstanceFlags::from_build_config().with_env(),
-                backend_options: wgpu::BackendOptions {
-                    dx12: wgpu::Dx12BackendOptions { shader_compiler: dx12_shader_compiler },
-                    gl: wgpu::GlBackendOptions { gles_minor_version },
+        let (instance, adapter, device, queue, surface) = match requested_graphics_api {
+            #[cfg(feature = "unstable-wgpu-24")]
+            Some(RequestedGraphicsAPI::WGPU24(
+                i_slint_core::graphics::wgpu_24::WGPUConfiguration::Manual {
+                    instance,
+                    adapter,
+                    device,
+                    queue,
                 },
-            })
-            .await
-        })
-        .expect("internal error: wgpu instance creation is not expected to be async");
+            )) => {
+                let surface = instance.create_surface(window_handle).unwrap();
+                (instance, adapter, device, queue, surface)
+            }
+            #[cfg(feature = "unstable-wgpu-24")]
+            Some(RequestedGraphicsAPI::WGPU24(
+                i_slint_core::graphics::wgpu_24::WGPUConfiguration::Automatic(wgpu24_settings),
+            )) => {
+                // wgpu uses async here, but the returned future is ready on first poll on all platforms except WASM,
+                // which we don't supoprt right now.
+                let instance = poll_once(async {
+                    wgpu::util::new_instance_with_webgpu_detection(&wgpu::InstanceDescriptor {
+                        backends: wgpu24_settings.backends,
+                        flags: wgpu24_settings.instance_flags,
+                        backend_options: wgpu24_settings.backend_options,
+                    })
+                    .await
+                })
+                .expect("internal error: wgpu instance creation is not expected to be async");
 
-        let surface = instance.create_surface(window_handle).unwrap();
+                let surface = instance.create_surface(window_handle).unwrap();
 
-        // wgpu uses async here, but the returned future is ready on first poll on all platforms except WASM,
-        // which we don't supoprt right now.
-        let adapter = poll_once(async {
-            wgpu::util::initialize_adapter_from_env_or_default(&instance, Some(&surface))
-                .await
-                .expect("Failed to find an appropriate adapter")
-        })
-        .expect("internal error: wgpu adapter creation is not expected to be async");
+                // wgpu uses async here, but the returned future is ready on first poll on all platforms except WASM,
+                // which we don't supoprt right now.
+                let adapter = poll_once(async {
+                    match wgpu::util::initialize_adapter_from_env(&instance, Some(&surface)) {
+                        Some(adapter) => Some(adapter),
+                        None => {
+                            instance
+                                .request_adapter(&wgpu::RequestAdapterOptions {
+                                    power_preference: wgpu24_settings.power_preference,
+                                    force_fallback_adapter: false,
+                                    compatible_surface: Some(&surface),
+                                })
+                                .await
+                        }
+                    }
+                    .expect("Failed to find an appropriate adapter")
+                })
+                .expect("internal error: wgpu adapter creation is not expected to be async");
 
-        let (device, queue) = poll_once(async {
-            adapter
-                .request_device(
-                    &wgpu::DeviceDescriptor {
-                        label: None,
-                        required_features: wgpu::Features::empty(),
-                        // Make sure we use the texture resolution limits from the adapter, so we can support images the size of the swapchain.
-                        required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                            .using_resolution(adapter.limits()),
-                        memory_hints: wgpu::MemoryHints::MemoryUsage,
-                    },
-                    None,
-                )
-                .await
-                .expect("Failed to create device")
-        })
-        .expect("internal error: wgpu device creation is not expected to be async");
+                let (device, queue) = poll_once(async {
+                    adapter
+                        .request_device(
+                            &wgpu::DeviceDescriptor {
+                                label: wgpu24_settings.device_label.as_deref(),
+                                required_features: wgpu24_settings.device_required_features,
+                                // Make sure we use the texture resolution limits from the adapter, so we can support images the size of the swapchain.
+                                required_limits: wgpu24_settings
+                                    .device_required_limits
+                                    .using_resolution(adapter.limits()),
+                                memory_hints: wgpu24_settings.device_memory_hints,
+                            },
+                            None,
+                        )
+                        .await
+                        .expect("Failed to create device")
+                })
+                .expect("internal error: wgpu device creation is not expected to be async");
+
+                (instance, adapter, device, queue, surface)
+            }
+            None => {
+                let backends = wgpu::Backends::from_env().unwrap_or_default();
+                let dx12_shader_compiler = wgpu::Dx12Compiler::from_env().unwrap_or_default();
+                let gles_minor_version = wgpu::Gles3MinorVersion::from_env().unwrap_or_default();
+
+                // wgpu uses async here, but the returned future is ready on first poll on all platforms except WASM,
+                // which we don't supoprt right now.
+                let instance = poll_once(async {
+                    wgpu::util::new_instance_with_webgpu_detection(&wgpu::InstanceDescriptor {
+                        backends,
+                        flags: wgpu::InstanceFlags::from_build_config().with_env(),
+                        backend_options: wgpu::BackendOptions {
+                            dx12: wgpu::Dx12BackendOptions {
+                                shader_compiler: dx12_shader_compiler,
+                            },
+                            gl: wgpu::GlBackendOptions { gles_minor_version },
+                        },
+                    })
+                    .await
+                })
+                .expect("internal error: wgpu instance creation is not expected to be async");
+
+                let surface = instance.create_surface(window_handle).unwrap();
+
+                // wgpu uses async here, but the returned future is ready on first poll on all platforms except WASM,
+                // which we don't supoprt right now.
+                let adapter = poll_once(async {
+                    wgpu::util::initialize_adapter_from_env_or_default(&instance, Some(&surface))
+                        .await
+                        .expect("Failed to find an appropriate adapter")
+                })
+                .expect("internal error: wgpu adapter creation is not expected to be async");
+
+                let (device, queue) = poll_once(async {
+                    adapter
+                        .request_device(
+                            &wgpu::DeviceDescriptor {
+                                label: None,
+                                required_features: wgpu::Features::empty(),
+                                // Make sure we use the texture resolution limits from the adapter, so we can support images the size of the swapchain.
+                                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                                    .using_resolution(adapter.limits()),
+                                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                            },
+                            None,
+                        )
+                        .await
+                        .expect("Failed to create device")
+                })
+                .expect("internal error: wgpu device creation is not expected to be async");
+                (instance, adapter, device, queue, surface)
+            }
+            Some(_) => {
+                return Err(
+                    "The FemtoVG WGPU renderer does not implement renderer selection by graphics API"
+                        .into(),
+                );
+            }
+        };
 
         let mut surface_config =
             surface.get_default_config(&adapter, size.width, size.height).unwrap();
@@ -172,8 +269,7 @@ impl FemtoVGRenderer<WGPUBackend> {
         surface_config.format = swapchain_format;
         surface.configure(&device, &surface_config);
 
-        let device = device;
-
+        *self.graphics_backend.instance.borrow_mut() = Some(instance.clone());
         *self.graphics_backend.device.borrow_mut() = Some(device.clone());
         *self.graphics_backend.queue.borrow_mut() = Some(queue.clone());
         *self.graphics_backend.surface_config.borrow_mut() = Some(surface_config);

@@ -232,7 +232,7 @@ impl FontCache {
         // replacing files. Unlinking OTOH is safe and doesn't destroy the file mapping,
         // the backing file becomes an orphan in a special area of the file system. That works
         // on Unixy platforms and on Windows the default file flags prevent the deletion.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "nto")))]
         let (shared_data, face_index) = unsafe {
             sharedfontdb::FONT_DB.with_borrow_mut(|db| {
                 db.make_mut().make_shared_face_data(fontdb_face_id).expect("unable to mmap font")
@@ -246,6 +246,25 @@ impl FontCache {
                         match source {
                             fontdb::Source::Binary(data) => data.clone(),
                             // We feed only Source::Binary into fontdb on wasm
+                            #[allow(unreachable_patterns)]
+                            _ => unreachable!(),
+                        },
+                        face_index,
+                    )
+                })
+                .expect("invalid fontdb face id")
+        });
+        #[cfg(target_os = "nto")]
+        let (shared_data, face_index) = crate::sharedfontdb::FONT_DB.with_borrow(|db| {
+            db.face_source(fontdb_face_id)
+                .map(|(source, face_index)| {
+                    (
+                        match source {
+                            fontdb::Source::Binary(data) => data.clone(),
+                            fontdb::Source::File(ref path) => std::sync::Arc::new(
+                                std::fs::read(path).ok().expect("unable to read font file"),
+                            )
+                                as std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>,
                             #[allow(unreachable_patterns)]
                             _ => unreachable!(),
                         },
@@ -349,7 +368,7 @@ impl FontCache {
         Font { fonts, text_context: self.text_context.clone(), pixel_size }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     fn font_fallbacks_for_request(
         &self,
         _family: Option<&SharedString>,
@@ -453,10 +472,10 @@ impl FontCache {
 
     #[cfg(not(any(
         target_family = "windows",
-        target_os = "macos",
-        target_os = "ios",
+        target_vendor = "apple",
         target_arch = "wasm32",
         target_os = "android",
+        target_os = "nto",
     )))]
     fn font_fallbacks_for_request(
         &self,
@@ -484,6 +503,21 @@ impl FontCache {
         _reference_text: &str,
     ) -> Vec<SharedString> {
         [SharedString::from("DejaVu Sans")]
+            .iter()
+            .filter(|family_name| self.is_known_family(&family_name))
+            .cloned()
+            .collect()
+    }
+
+    #[cfg(target_os = "nto")]
+    fn font_fallbacks_for_request(
+        &self,
+        _family: Option<&SharedString>,
+        _pixel_size: PhysicalLength,
+        _primary_font: &LoadedFont,
+        _reference_text: &str,
+    ) -> Vec<SharedString> {
+        [SharedString::from("Noto Sans")]
             .iter()
             .filter(|family_name| self.is_known_family(&family_name))
             .cloned()
@@ -641,13 +675,8 @@ pub(crate) fn layout_text_lines(
             layout_line(text_span, line_pos, start, line_metrics);
 
             if let Some(cursor_byte_offset) = cursor_byte_offset {
-                let text_span_range = start..(start + text_span.len());
-
-                if text_span_range.contains(&cursor_byte_offset)
-                    || (cursor_byte_offset == text_span_range.end
-                        && cursor_byte_offset == string.len()
-                        && !string.ends_with('\n'))
-                {
+                let text_span_range = start..=(start + text_span.len());
+                if text_span_range.contains(&cursor_byte_offset) {
                     let cursor_x = PhysicalLength::new(
                         line_metrics
                             .glyphs
@@ -687,7 +716,7 @@ pub(crate) fn layout_text_lines(
                 break;
             }
             let index = start + index;
-            let line = &string[start..index];
+            let line = string[start..index].trim_end_matches('\n');
             let text_metrics = text_context.measure_text(0., 0., line, paint).unwrap();
             process_line(line, y, start, &text_metrics);
             y += font_height;
@@ -696,7 +725,7 @@ pub(crate) fn layout_text_lines(
             let index = if single_line {
                 string.len()
             } else {
-                string[start..].find('\n').map_or(string.len(), |i| start + i + 1)
+                string[start..].find('\n').map_or(string.len(), |i| start + i)
             };
             let line = &string[start..index];
             let text_metrics = text_context.measure_text(0., 0., line, paint).unwrap();
@@ -723,7 +752,7 @@ pub(crate) fn layout_text_lines(
                             process_line(txt, y, start, &text_metrics);
                         }
                         y += font_height;
-                        start = index;
+                        start = index + 1;
                         continue 'lines;
                     }
                 }
@@ -731,13 +760,13 @@ pub(crate) fn layout_text_lines(
                     let elided = format!("{}…", line.strip_suffix('\n').unwrap_or(line));
                     process_line(&elided, y, start, &text_metrics);
                     y += font_height;
-                    start = index;
+                    start = index + 1;
                     continue 'lines;
                 }
             }
             process_line(line, y, start, &text_metrics);
             y += font_height;
-            start = index;
+            start = index + 1;
         }
     }
 

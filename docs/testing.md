@@ -24,8 +24,15 @@ Ideally, each error message must be tested like so.
 The syntax test can be run alone with
 
 ```sh
-cargo test --test syntax_tests
+cargo test -p i-slint-compiler --features display-diagnostics --test syntax_tests
 ```
+
+In order to update the failing tests, set the `SLINT_SYNTAX_TEST_UPDATE` environment variable to `1`.
+```sh
+SLINT_SYNTAX_TEST_UPDATE=1 cargo test -p i-slint-compiler --test syntax_tests
+```
+This will change the comments to add the error of the expected messages
+
 
 ## Driver tests
 
@@ -71,7 +78,7 @@ SLINT_TEST_FILTER=layout cargo test -p test-driver-rust
 ```
 
 Instead of putting everything in a slint! macro, it's possible to tell the driver to do the
-compilation in the build.rs, with the builod-time feature:
+compilation in the build.rs, with the build-time feature:
 
 ```
 SLINT_TEST_FILTER=layout cargo test -p test-driver-rust --features build-time

@@ -1,14 +1,11 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: MIT
 import { DoorState, Doors } from "../general/doors.slint";
-import { ViewButton } from "../mainView/viewButton.slint";
-import { Sidebar } from "sidebar.slint";
 import { WidgetLoader } from "widgetLoader.slint";
 import { WidgetLoaderSoftwareRenderer } from "widgetLoaderSoftwareRenderer.slint";
-import { Switch, Palette as StdPalette } from "std-widgets.slint";
-import { InnerShadowRectangle } from "../general/innerShadowRectangle.slint";
-import { Measurements, Palette, Animation, Style } from "../../common.slint";
-import { AppState, ComponentData, Orientation } from "../../appState.slint";
+import { Palette as StdPalette } from "std-widgets.slint";
+import { Palette, Animation, Style } from "../../common.slint";
+import { AppState, Orientation } from "../../appState.slint";
 import { FullScreenView } from "fullScreenView.slint";
 import { Page } from "../../../../printerdemo/ui/common.slint";
 import { HaText } from "../general/haText.slint";
@@ -49,6 +46,15 @@ export component PageButton inherits Rectangle {
             AppState.first-run = false;
             AppState.end-kiosk-mode();
         }
+    }
+}
+
+component PageButtonHighlighter {
+    Rectangle {
+        y: parent.height - parent.height * 15%;
+        width: parent.width * 50%;
+        height: 1px;
+        background: white;
     }
 }
 
@@ -103,11 +109,16 @@ export component MainScreen inherits Rectangle {
         x: 30px;
         y: AppState.orientation == Orientation.landscape ? 35px : 36px;
         source: @image-url("../../images/slint-logo.png");
-        opacity: 50%;
-        colorize: white;
+        animate opacity { duration: Animation.transition-duration; }
+        states [
+            kiosk-mode when AppState.kiosk-mode : {
+                opacity: 50%;
+                colorize: white;
+            }
+        ]
     }
 
-    Rectangle {
+    if AppState.orientation == Orientation.landscape: Rectangle {
         property <bool> showing-time: true;
         property <length> margin: AppState.graphics-accelerator-available ? 5px : 20px;
         width: 200px;
@@ -126,6 +137,7 @@ export component MainScreen inherits Rectangle {
             spacing: 10px;
             HaText {
                 text: Api.return-month();
+                color: Palette.info-foreground;
                 font-size: Style.H1-font-size;
                 font-weight: 100;
             }
@@ -140,7 +152,7 @@ export component MainScreen inherits Rectangle {
         if showing-time: HorizontalLayout {
             alignment: center;
             HaText {
-                text: Api.current-time.hour.mod(12);
+                text: Api.current-time.hour.mod(12) == 0 ? 12 : Api.current-time.hour.mod(12);
                 horizontal-alignment: center;
                 vertical-alignment: center;
                 color: Palette.info-foreground;
@@ -164,7 +176,7 @@ export component MainScreen inherits Rectangle {
             }
 
             HaText {
-                text: Api.current-time.hour > 12 ? " PM" : " AM";
+                text: Api.current-time.hour >= 12 ? " PM" : " AM";
                 horizontal-alignment: center;
                 vertical-alignment: center;
                 color: Palette.info-foreground;
@@ -172,7 +184,7 @@ export component MainScreen inherits Rectangle {
             }
         }
     }
-    if AppState.orientation == Orientation.portrait:  HorizontalLayout {
+    if AppState.orientation == Orientation.portrait: HorizontalLayout {
         y: root.height - self.height - 10px;
         alignment: center;
         spacing: 30px;
@@ -196,7 +208,7 @@ export component MainScreen inherits Rectangle {
         }
         HorizontalLayout {
             HaText {
-                text: Api.current-time.hour.mod(12);
+                text: Api.current-time.hour.mod(12) == 0 ? 12 : Api.current-time.hour.mod(12);
                 horizontal-alignment: center;
                 vertical-alignment: center;
                 color: Palette.info-foreground;
@@ -270,11 +282,28 @@ export component MainScreen inherits Rectangle {
                     }
                 }
 
-                HorizontalLayout {
+                // We need to have two different highlighter because of #7999
+                if AppState.graphics-accelerator-available: PageButtonHighlighter {
+                    x: home.x + (tabs.spacing + self.width) * AppState.target-page;
+                    animate x {
+                        duration: Animation.transition-duration;
+                        easing: ease-in-out-sine;
+                    }
+                    width: AppState.orientation == Orientation.landscape ? 120px : 140px;
+                    height: 100%;
+                }
+
+                if !AppState.graphics-accelerator-available : PageButtonHighlighter {
+                    x: home.x + (tabs.spacing + self.width) * AppState.target-page;
+                    width: AppState.orientation == Orientation.landscape ? 120px : 140px;
+                    height: 100%;
+                }
+
+                tabs := HorizontalLayout {
                     alignment: center;
                     spacing: 0px;
                     y: AppState.graphics-accelerator-available ? 0 : -5px;
-                    PageButton {
+                    home := PageButton {
                         label: "Home";
                         target-page: 0;
                     }

@@ -25,6 +25,8 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObjectEx, INFINITE};
 
+use crate::SkiaSharedContext;
+
 trait MapToPlatformError<T> {
     fn map_platform_error(self, msg: &str) -> std::result::Result<T, PlatformError>;
 }
@@ -255,12 +257,15 @@ pub struct D3DSurface {
 
 impl super::Surface for D3DSurface {
     fn new(
+        _shared_context: &SkiaSharedContext,
         window_handle: Arc<dyn raw_window_handle::HasWindowHandle>,
         _display_handle: Arc<dyn raw_window_handle::HasDisplayHandle>,
         size: PhysicalWindowSize,
         requested_graphics_api: Option<RequestedGraphicsAPI>,
     ) -> Result<Self, i_slint_core::platform::PlatformError> {
-        if requested_graphics_api.map_or(false, |api| api != RequestedGraphicsAPI::Direct3D) {
+        if requested_graphics_api
+            .map_or(false, |api| !matches!(api, RequestedGraphicsAPI::Direct3D))
+        {
             return Err(format!("Requested non-Direct3D rendering with Direct3D renderer").into());
         }
 

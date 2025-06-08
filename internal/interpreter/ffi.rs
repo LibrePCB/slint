@@ -12,48 +12,48 @@ use std::ffi::c_void;
 use vtable::VRef;
 
 /// Construct a new Value in the given memory location
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_new() -> Box<Value> {
     Box::new(Value::default())
 }
 
 /// Construct a new Value in the given memory location
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_clone(other: &Value) -> Box<Value> {
     Box::new(other.clone())
 }
 
 /// Destruct the value in that memory location
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_destructor(val: Box<Value>) {
     drop(val);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_value_eq(a: &Value, b: &Value) -> bool {
     a == b
 }
 
 /// Construct a new Value in the given memory location as string
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_new_string(str: &SharedString) -> Box<Value> {
     Box::new(Value::String(str.clone()))
 }
 
 /// Construct a new Value in the given memory location as double
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_new_double(double: f64) -> Box<Value> {
     Box::new(Value::Number(double))
 }
 
 /// Construct a new Value in the given memory location as bool
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_new_bool(b: bool) -> Box<Value> {
     Box::new(Value::Bool(b))
 }
 
 /// Construct a new Value in the given memory location as array model
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_new_array_model(
     a: &SharedVector<Box<Value>>,
 ) -> Box<Value> {
@@ -62,25 +62,25 @@ pub unsafe extern "C" fn slint_interpreter_value_new_array_model(
 }
 
 /// Construct a new Value in the given memory location as Brush
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_new_brush(brush: &Brush) -> Box<Value> {
     Box::new(Value::Brush(brush.clone()))
 }
 
 /// Construct a new Value in the given memory location as Struct
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_new_struct(struc: &StructOpaque) -> Box<Value> {
     Box::new(Value::Struct(struc.as_struct().clone()))
 }
 
 /// Construct a new Value in the given memory location as image
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_new_image(img: &Image) -> Box<Value> {
     Box::new(Value::Image(img.clone()))
 }
 
 /// Construct a new Value containing a model in the given memory location
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_new_model(
     model: NonNull<u8>,
     vtable: &ModelAdaptorVTable,
@@ -91,12 +91,12 @@ pub unsafe extern "C" fn slint_interpreter_value_new_model(
     )))))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_value_type(val: &Value) -> ValueType {
     val.value_type()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_value_to_string(val: &Value) -> Option<&SharedString> {
     match val {
         Value::String(v) => Some(v),
@@ -104,7 +104,7 @@ pub extern "C" fn slint_interpreter_value_to_string(val: &Value) -> Option<&Shar
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_value_to_number(val: &Value) -> Option<&f64> {
     match val {
         Value::Number(v) => Some(v),
@@ -112,7 +112,7 @@ pub extern "C" fn slint_interpreter_value_to_number(val: &Value) -> Option<&f64>
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_value_to_bool(val: &Value) -> Option<&bool> {
     match val {
         Value::Bool(v) => Some(v),
@@ -123,7 +123,7 @@ pub extern "C" fn slint_interpreter_value_to_bool(val: &Value) -> Option<&bool> 
 /// Extracts a `SharedVector<ValueOpaque>` out of the given value `val`, writes that into the
 /// `out` parameter and returns true; returns false if the value does not hold an extractable
 /// array.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_value_to_array(
     val: &Box<Value>,
     out: *mut SharedVector<Box<Value>>,
@@ -141,7 +141,7 @@ pub extern "C" fn slint_interpreter_value_to_array(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_value_to_brush(val: &Value) -> Option<&Brush> {
     match val {
         Value::Brush(b) => Some(b),
@@ -149,7 +149,7 @@ pub extern "C" fn slint_interpreter_value_to_brush(val: &Value) -> Option<&Brush
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_value_to_struct(val: &Value) -> *const StructOpaque {
     match val {
         Value::Struct(s) => s as *const Struct as *const StructOpaque,
@@ -157,7 +157,7 @@ pub extern "C" fn slint_interpreter_value_to_struct(val: &Value) -> *const Struc
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_value_to_image(val: &Value) -> Option<&Image> {
     match val {
         Value::Image(img) => Some(img),
@@ -186,13 +186,13 @@ impl StructOpaque {
 }
 
 /// Construct a new Struct in the given memory location
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_struct_new(val: *mut StructOpaque) {
     std::ptr::write(val as *mut Struct, Struct::default())
 }
 
 /// Construct a new Struct in the given memory location
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_struct_clone(
     other: &StructOpaque,
     val: *mut StructOpaque,
@@ -201,12 +201,12 @@ pub unsafe extern "C" fn slint_interpreter_struct_clone(
 }
 
 /// Destruct the struct in that memory location
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_struct_destructor(val: *mut StructOpaque) {
     drop(std::ptr::read(val as *mut Struct))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_struct_get_field(
     stru: &StructOpaque,
     name: Slice<u8>,
@@ -218,7 +218,7 @@ pub extern "C" fn slint_interpreter_struct_get_field(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_struct_set_field<'a>(
     stru: &'a mut StructOpaque,
     name: Slice<u8>,
@@ -227,7 +227,7 @@ pub extern "C" fn slint_interpreter_struct_set_field<'a>(
     stru.as_struct_mut().set_field(std::str::from_utf8(&name).unwrap().into(), value.clone())
 }
 
-type StructIterator<'a> = std::collections::hash_map::Iter<'a, String, Value>;
+type StructIterator<'a> = std::collections::hash_map::Iter<'a, SmolStr, Value>;
 #[repr(C)]
 pub struct StructIteratorOpaque<'a>([usize; 5], std::marker::PhantomData<StructIterator<'a>>);
 const _: [(); std::mem::size_of::<StructIteratorOpaque>()] =
@@ -235,7 +235,7 @@ const _: [(); std::mem::size_of::<StructIteratorOpaque>()] =
 const _: [(); std::mem::align_of::<StructIteratorOpaque>()] =
     [(); std::mem::align_of::<StructIterator>()];
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_struct_iterator_destructor(
     val: *mut StructIteratorOpaque,
 ) {
@@ -243,7 +243,7 @@ pub unsafe extern "C" fn slint_interpreter_struct_iterator_destructor(
 }
 
 /// Advance the iterator and return the next value, or a null pointer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_struct_iterator_next<'a>(
     iter: &'a mut StructIteratorOpaque,
     k: &mut Slice<'a, u8>,
@@ -257,8 +257,10 @@ pub unsafe extern "C" fn slint_interpreter_struct_iterator_next<'a>(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn slint_interpreter_struct_make_iter(stru: &StructOpaque) -> StructIteratorOpaque {
+#[unsafe(no_mangle)]
+pub extern "C" fn slint_interpreter_struct_make_iter(
+    stru: &StructOpaque,
+) -> StructIteratorOpaque<'_> {
     let ret_it: StructIterator = stru.as_struct().0.iter();
     unsafe {
         let mut r = std::mem::MaybeUninit::<StructIteratorOpaque>::uninit();
@@ -268,7 +270,7 @@ pub extern "C" fn slint_interpreter_struct_make_iter(stru: &StructOpaque) -> Str
 }
 
 /// Get a property. Returns a null pointer if the property does not exist.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_instance_get_property(
     inst: &ErasedItemTreeBox,
     name: Slice<u8>,
@@ -284,7 +286,7 @@ pub unsafe extern "C" fn slint_interpreter_component_instance_get_property(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_component_instance_set_property(
     inst: &ErasedItemTreeBox,
     name: Slice<u8>,
@@ -302,7 +304,7 @@ pub extern "C" fn slint_interpreter_component_instance_set_property(
 }
 
 /// Invoke a callback or function. Returns raw boxed value on success and null ptr on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_instance_invoke(
     inst: &ErasedItemTreeBox,
     name: Slice<u8>,
@@ -313,7 +315,7 @@ pub unsafe extern "C" fn slint_interpreter_component_instance_invoke(
     let comp = inst.unerase(guard);
     match comp.description().invoke(
         comp.borrow(),
-        &normalize_identifier_smolstr(std::str::from_utf8(&name).unwrap()),
+        &normalize_identifier(std::str::from_utf8(&name).unwrap()),
         args.as_slice(),
     ) {
         Ok(val) => Box::into_raw(Box::new(val)),
@@ -348,7 +350,7 @@ impl CallbackUserData {
 
 /// Set a handler for the callback.
 /// The `callback` function must initialize the `ret` (the `ret` passed to the callback is initialized and is assumed initialized after the function)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_instance_set_callback(
     inst: &ErasedItemTreeBox,
     name: Slice<u8>,
@@ -370,7 +372,7 @@ pub unsafe extern "C" fn slint_interpreter_component_instance_set_callback(
 }
 
 /// Get a global property. Returns a raw boxed value on success; nullptr otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_instance_get_global_property(
     inst: &ErasedItemTreeBox,
     global: Slice<u8>,
@@ -390,7 +392,7 @@ pub unsafe extern "C" fn slint_interpreter_component_instance_get_global_propert
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_component_instance_set_global_property(
     inst: &ErasedItemTreeBox,
     global: Slice<u8>,
@@ -413,7 +415,7 @@ pub extern "C" fn slint_interpreter_component_instance_set_global_property(
 }
 
 /// The `callback` function must initialize the `ret` (the `ret` passed to the callback is initialized and is assumed initialized after the function)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_instance_set_global_callback(
     inst: &ErasedItemTreeBox,
     global: Slice<u8>,
@@ -438,7 +440,7 @@ pub unsafe extern "C" fn slint_interpreter_component_instance_set_global_callbac
 }
 
 /// Invoke a global callback or function. Returns raw boxed value on success; nullptr otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_instance_invoke_global(
     inst: &ErasedItemTreeBox,
     global: Slice<u8>,
@@ -467,8 +469,7 @@ pub unsafe extern "C" fn slint_interpreter_component_instance_invoke_global(
                     args.as_slice().iter().cloned().collect(),
                 )
             } else {
-                g.as_ref()
-                    .invoke_callback(&normalize_identifier_smolstr(callable_name), args.as_slice())
+                g.as_ref().invoke_callback(&normalize_identifier(callable_name), args.as_slice())
             }
         }) {
         Ok(val) => Box::into_raw(Box::new(val)),
@@ -477,7 +478,7 @@ pub unsafe extern "C" fn slint_interpreter_component_instance_invoke_global(
 }
 
 /// Show or hide
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn slint_interpreter_component_instance_show(
     inst: &ErasedItemTreeBox,
     is_visible: bool,
@@ -494,7 +495,7 @@ pub extern "C" fn slint_interpreter_component_instance_show(
 ///
 /// The out pointer must be uninitialized and must be destroyed with
 /// slint_windowrc_drop after usage
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_instance_window(
     inst: &ErasedItemTreeBox,
     out: *mut *const i_slint_core::window::ffi::WindowAdapterRcOpaque,
@@ -513,7 +514,7 @@ pub unsafe extern "C" fn slint_interpreter_component_instance_window(
 ///
 /// The `out` must be uninitialized and is going to be initialized after the call
 /// and need to be destroyed with slint_interpreter_component_instance_destructor
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_instance_create(
     def: &ComponentDefinitionOpaque,
     out: *mut ComponentInstance,
@@ -521,7 +522,7 @@ pub unsafe extern "C" fn slint_interpreter_component_instance_create(
     std::ptr::write(out, def.as_component_definition().create().unwrap())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_instance_component_definition(
     inst: &ErasedItemTreeBox,
     component_definition_ptr: *mut ComponentDefinitionOpaque,
@@ -537,7 +538,7 @@ pub struct ModelAdaptorVTable {
     pub row_count: extern "C" fn(VRef<ModelAdaptorVTable>) -> usize,
     pub row_data: unsafe extern "C" fn(VRef<ModelAdaptorVTable>, row: usize) -> *mut Value,
     pub set_row_data: extern "C" fn(VRef<ModelAdaptorVTable>, row: usize, value: Box<Value>),
-    pub get_notify: extern "C" fn(VRef<ModelAdaptorVTable>) -> &ModelNotifyOpaque,
+    pub get_notify: extern "C" fn(VRef<'_, ModelAdaptorVTable>) -> &ModelNotifyOpaque,
     pub drop: extern "C" fn(VRefMut<ModelAdaptorVTable>),
 }
 
@@ -586,18 +587,18 @@ impl ModelNotifyOpaque {
 }
 
 /// Construct a new ModelNotifyNotify in the given memory region
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_model_notify_new(val: *mut ModelNotifyOpaque) {
     std::ptr::write(val as *mut ModelNotify, ModelNotify::default());
 }
 
 /// Destruct the value in that memory location
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_model_notify_destructor(val: *mut ModelNotifyOpaque) {
     drop(std::ptr::read(val as *mut ModelNotify))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_model_notify_row_changed(
     notify: &ModelNotifyOpaque,
     row: usize,
@@ -605,7 +606,7 @@ pub unsafe extern "C" fn slint_interpreter_model_notify_row_changed(
     notify.as_model_notify().row_changed(row);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_model_notify_row_added(
     notify: &ModelNotifyOpaque,
     row: usize,
@@ -614,12 +615,12 @@ pub unsafe extern "C" fn slint_interpreter_model_notify_row_added(
     notify.as_model_notify().row_added(row, count);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_model_notify_reset(notify: &ModelNotifyOpaque) {
     notify.as_model_notify().reset();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_model_notify_row_removed(
     notify: &ModelNotifyOpaque,
     row: usize,
@@ -672,7 +673,7 @@ impl ComponentCompilerOpaque {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(deprecated)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_new(
     compiler: *mut ComponentCompilerOpaque,
@@ -682,14 +683,14 @@ pub unsafe extern "C" fn slint_interpreter_component_compiler_new(
     ))));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_destructor(
     compiler: *mut ComponentCompilerOpaque,
 ) {
     drop(Box::from_raw((*compiler).0.as_ptr()))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_set_include_paths(
     compiler: &mut ComponentCompilerOpaque,
     paths: &SharedVector<SharedString>,
@@ -699,7 +700,7 @@ pub unsafe extern "C" fn slint_interpreter_component_compiler_set_include_paths(
         .set_include_paths(paths.iter().map(|path| path.as_str().into()).collect())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_set_style(
     compiler: &mut ComponentCompilerOpaque,
     style: Slice<u8>,
@@ -707,7 +708,7 @@ pub unsafe extern "C" fn slint_interpreter_component_compiler_set_style(
     compiler.as_component_compiler_mut().set_style(std::str::from_utf8(&style).unwrap().to_string())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_set_translation_domain(
     compiler: &mut ComponentCompilerOpaque,
     translation_domain: Slice<u8>,
@@ -717,7 +718,7 @@ pub unsafe extern "C" fn slint_interpreter_component_compiler_set_translation_do
         .set_translation_domain(std::str::from_utf8(&translation_domain).unwrap().to_string())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_get_style(
     compiler: &ComponentCompilerOpaque,
     style_out: &mut SharedString,
@@ -726,7 +727,7 @@ pub unsafe extern "C" fn slint_interpreter_component_compiler_get_style(
         compiler.as_component_compiler().style().map_or(SharedString::default(), |s| s.into());
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_get_include_paths(
     compiler: &ComponentCompilerOpaque,
     paths: &mut SharedVector<SharedString>,
@@ -740,7 +741,7 @@ pub unsafe extern "C" fn slint_interpreter_component_compiler_get_include_paths(
     );
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_get_diagnostics(
     compiler: &ComponentCompilerOpaque,
     out_diags: &mut SharedVector<Diagnostic>,
@@ -765,7 +766,7 @@ pub unsafe extern "C" fn slint_interpreter_component_compiler_get_diagnostics(
     }));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_build_from_source(
     compiler: &mut ComponentCompilerOpaque,
     source_code: Slice<u8>,
@@ -784,7 +785,7 @@ pub unsafe extern "C" fn slint_interpreter_component_compiler_build_from_source(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_build_from_path(
     compiler: &mut ComponentCompilerOpaque,
     path: Slice<u8>,
@@ -834,7 +835,7 @@ impl ComponentDefinitionOpaque {
 }
 
 /// Construct a new Value in the given memory location
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_definition_clone(
     other: &ComponentDefinitionOpaque,
     def: *mut ComponentDefinitionOpaque,
@@ -843,7 +844,7 @@ pub unsafe extern "C" fn slint_interpreter_component_definition_clone(
 }
 
 /// Destruct the component definition in that memory location
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_definition_destructor(
     val: *mut ComponentDefinitionOpaque,
 ) {
@@ -851,7 +852,7 @@ pub unsafe extern "C" fn slint_interpreter_component_definition_destructor(
 }
 
 /// Returns the list of properties of the component the component definition describes
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_definition_properties(
     def: &ComponentDefinitionOpaque,
     props: &mut SharedVector<PropertyDescriptor>,
@@ -865,7 +866,7 @@ pub unsafe extern "C" fn slint_interpreter_component_definition_properties(
 }
 
 /// Returns the list of callback names of the component the component definition describes
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_definition_callbacks(
     def: &ComponentDefinitionOpaque,
     callbacks: &mut SharedVector<SharedString>,
@@ -874,7 +875,7 @@ pub unsafe extern "C" fn slint_interpreter_component_definition_callbacks(
 }
 
 /// Returns the list of function names of the component the component definition describes
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_definition_functions(
     def: &ComponentDefinitionOpaque,
     functions: &mut SharedVector<SharedString>,
@@ -883,7 +884,7 @@ pub unsafe extern "C" fn slint_interpreter_component_definition_functions(
 }
 
 /// Return the name of the component definition
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_definition_name(
     def: &ComponentDefinitionOpaque,
     name: &mut SharedString,
@@ -892,7 +893,7 @@ pub unsafe extern "C" fn slint_interpreter_component_definition_name(
 }
 
 /// Returns a vector of strings with the names of all exported global singletons.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_definition_globals(
     def: &ComponentDefinitionOpaque,
     names: &mut SharedVector<SharedString>,
@@ -902,7 +903,7 @@ pub unsafe extern "C" fn slint_interpreter_component_definition_globals(
 
 /// Returns a vector of the property descriptors of the properties of the specified publicly exported global
 /// singleton. Returns true if a global exists under the specified name; false otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_definition_global_properties(
     def: &ComponentDefinitionOpaque,
     global_name: Slice<u8>,
@@ -924,7 +925,7 @@ pub unsafe extern "C" fn slint_interpreter_component_definition_global_propertie
 
 /// Returns a vector of the names of the callbacks of the specified publicly exported global
 /// singleton. Returns true if a global exists under the specified name; false otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_definition_global_callbacks(
     def: &ComponentDefinitionOpaque,
     global_name: Slice<u8>,
@@ -943,7 +944,7 @@ pub unsafe extern "C" fn slint_interpreter_component_definition_global_callbacks
 
 /// Returns a vector of the names of the functions of the specified publicly exported global
 /// singleton. Returns true if a global exists under the specified name; false otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_definition_global_functions(
     def: &ComponentDefinitionOpaque,
     global_name: Slice<u8>,

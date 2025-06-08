@@ -23,7 +23,7 @@ use i_slint_core::platform::PlatformError;
 use i_slint_core::renderer::RendererSealed;
 use i_slint_core::window::{WindowAdapter, WindowInner};
 use i_slint_core::Brush;
-use images::OpenGLTextureImporter;
+use images::TextureImporter;
 
 type PhysicalLength = euclid::Length<f32, PhysicalPx>;
 type PhysicalRect = euclid::Rect<f32, PhysicalPx>;
@@ -45,7 +45,7 @@ pub trait WindowSurface<R: femtovg::Renderer> {
 }
 
 pub trait GraphicsBackend {
-    type Renderer: femtovg::Renderer + OpenGLTextureImporter;
+    type Renderer: femtovg::Renderer + TextureImporter;
     type WindowSurface: WindowSurface<Self::Renderer>;
     const NAME: &'static str;
     fn new_suspended() -> Self;
@@ -547,9 +547,9 @@ impl<B: GraphicsBackend> FemtoVGRendererExt for FemtoVGRenderer<B> {
 
     fn clear_graphics_context(&self) -> Result<(), i_slint_core::platform::PlatformError> {
         // Ensure the context is current before the renderer is destroyed
-        self.graphics_backend.with_graphics_api(|_| {
+        self.graphics_backend.with_graphics_api(|api| {
             // If we've rendered a frame before, then we need to invoke the RenderingTearDown notifier.
-            if !self.rendering_first_time.get() {
+            if !self.rendering_first_time.get() && api.is_some() {
                 if let Some(callback) = self.rendering_notifier.borrow_mut().as_mut() {
                     self.with_graphics_api(|api| {
                         callback.notify(RenderingState::RenderingTeardown, &api)

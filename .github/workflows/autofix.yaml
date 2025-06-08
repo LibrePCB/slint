@@ -17,15 +17,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: true
 
+env:
+    CARGO_INCREMENTAL: false
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
     format_fix:
         runs-on: ubuntu-24.04
         timeout-minutes: 15
-        env:
-            CARGO_INCREMENTAL: false
         steps:
             - uses: actions/checkout@v4
             - uses: jdx/mise-action@v2
+              with:
+                log_level: debug
             - name: Run fixes
               run: mise run --force --jobs=1 'ci:autofix:fix'
             - name: Suggest format changes
@@ -34,10 +38,10 @@ jobs:
     lint_typecheck:
         runs-on: ubuntu-24.04
         timeout-minutes: 15
-        env:
-            CARGO_INCREMENTAL: false
         steps:
             - uses: actions/checkout@v4
             - uses: jdx/mise-action@v2
+              with:
+                log_level: debug
             - name: Run lints
               run: mise run --force --jobs=1 'ci:autofix:lint'

@@ -174,7 +174,7 @@ cpp! {{
             //       This confuses Slint, so eat this event.
             //
             //       One example is a popup is shown in the close event that
-            //       then ignores the the close request to ask the user what to
+            //       then ignores the close request to ask the user what to
             //       do. The stray release event will then close the popup
             //       straight away
             //
@@ -183,7 +183,7 @@ cpp! {{
             if (!isMouseButtonDown && rust_window == this->rust_window) {
                 return;
             }
-            isMouseButtonDown = false;
+            isMouseButtonDown = event->button() != Qt::NoButton;
 
             int button = event->button();
             rust!(Slint_mouseReleaseEvent [rust_window: &QtWindow as "void*", pos: qttypes::QPoint as "QPoint", button: u32 as "int" ] {
@@ -2282,7 +2282,7 @@ impl i_slint_core::renderer::RendererSealed for QtWindow {
                 return string.toUtf8().size();
             QTextLine textLine = layout.lineAt(line);
             int cur;
-            if (pos.x() > textLine.naturalTextWidth()) {
+            if (pos.x() >= textLine.naturalTextWidth()) {
                 cur = textLine.textStart() + textLine.textLength();
                 // cur is one past the last character of the line (eg, the \n or space).
                 // Go one back to get back on this line.
@@ -2674,7 +2674,7 @@ pub(crate) mod ffi {
 
     use super::QtWindow;
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn slint_qt_get_widget(
         window_adapter: &i_slint_core::window::WindowAdapterRc,
     ) -> *mut c_void {

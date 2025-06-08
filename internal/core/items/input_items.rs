@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use super::{
-    EventResult, Item, ItemConsts, ItemRc, ItemRendererRef, KeyEventArg, MouseCursor, PointerEvent,
-    PointerEventArg, PointerEventButton, PointerEventKind, PointerScrollEvent,
-    PointerScrollEventArg, RenderingResult, VoidArg,
+    EventResult, FocusReasonArg, Item, ItemConsts, ItemRc, ItemRendererRef, KeyEventArg,
+    MouseCursor, PointerEvent, PointerEventArg, PointerEventButton, PointerEventKind,
+    PointerScrollEvent, PointerScrollEventArg, RenderingResult, VoidArg,
 };
 use crate::api::LogicalPosition;
 use crate::input::{
-    FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, KeyEvent,
+    FocusEvent, FocusEventResult, FocusReason, InputEventFilterResult, InputEventResult, KeyEvent,
     KeyEventResult, KeyEventType, MouseEvent,
 };
 use crate::item_rendering::CachedRenderingData;
@@ -261,7 +261,9 @@ pub struct FocusScope {
     pub has_focus: Property<bool>,
     pub key_pressed: Callback<KeyEventArg, EventResult>,
     pub key_released: Callback<KeyEventArg, EventResult>,
-    pub focus_changed_event: Callback<VoidArg>,
+    pub focus_changed_event: Callback<FocusReasonArg>,
+    pub focus_gained: Callback<FocusReasonArg>,
+    pub focus_lost: Callback<FocusReasonArg>,
     /// FIXME: remove this
     pub cached_rendering_data: CachedRenderingData,
 }
@@ -294,7 +296,11 @@ impl Item for FocusScope {
         self_rc: &ItemRc,
     ) -> InputEventResult {
         if self.enabled() && matches!(event, MouseEvent::Pressed { .. }) && !self.has_focus() {
-            WindowInner::from_pub(window_adapter.window()).set_focus_item(self_rc, true);
+            WindowInner::from_pub(window_adapter.window()).set_focus_item(
+                self_rc,
+                true,
+                FocusReason::PointerClick,
+            );
             InputEventResult::EventAccepted
         } else {
             InputEventResult::EventIgnored
@@ -335,13 +341,15 @@ impl Item for FocusScope {
         }
 
         match event {
-            FocusEvent::FocusIn | FocusEvent::WindowReceivedFocus => {
+            FocusEvent::FocusIn(reason) => {
                 self.has_focus.set(true);
-                Self::FIELD_OFFSETS.focus_changed_event.apply_pin(self).call(&());
+                Self::FIELD_OFFSETS.focus_changed_event.apply_pin(self).call(&((*reason,)));
+                Self::FIELD_OFFSETS.focus_gained.apply_pin(self).call(&((*reason,)));
             }
-            FocusEvent::FocusOut | FocusEvent::WindowLostFocus => {
+            FocusEvent::FocusOut(reason) => {
                 self.has_focus.set(false);
-                Self::FIELD_OFFSETS.focus_changed_event.apply_pin(self).call(&());
+                Self::FIELD_OFFSETS.focus_changed_event.apply_pin(self).call(&((*reason,)));
+                Self::FIELD_OFFSETS.focus_lost.apply_pin(self).call(&((*reason,)));
             }
         }
         FocusEventResult::FocusAccepted
@@ -597,7 +605,7 @@ impl SwipeGestureHandler {
 }
 
 #[cfg(feature = "ffi")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_swipegesturehandler_cancel(
     s: Pin<&SwipeGestureHandler>,
     window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,

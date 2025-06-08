@@ -13,7 +13,7 @@ This module has different sub modules with the actual parser functions
 */
 
 use crate::diagnostics::{BuildDiagnostics, SourceFile, Spanned};
-use smol_str::{SmolStr, StrExt};
+use smol_str::SmolStr;
 use std::fmt::Display;
 
 mod document;
@@ -414,7 +414,7 @@ declare_syntax! {
         StatePropertyChange -> [ QualifiedName, BindingExpression ],
         /// `transitions: [...]`
         Transitions -> [*Transition],
-        /// There is an identifier "in" or "out", the DeclaredIdentifier is the state name
+        /// There is an identifier "in", "out", "in-out", the DeclaredIdentifier is the state name
         Transition -> [?DeclaredIdentifier, *PropertyAnimation],
         /// Export a set of declared components by name
         ExportsList -> [ *ExportSpecifier, ?Component, *StructDeclaration, ?ExportModule, *EnumDeclaration ],
@@ -501,7 +501,7 @@ mod parser_trait {
         /// (do not re-implement this function, re-implement
         /// start_node_impl and finish_node_impl)
         #[must_use = "The node will be finished when it is dropped"]
-        fn start_node(&mut self, kind: SyntaxKind) -> Node<Self> {
+        fn start_node(&mut self, kind: SyntaxKind) -> Node<'_, Self> {
             self.start_node_impl(kind, None, NodeToken(()));
             Node(self)
         }
@@ -512,7 +512,7 @@ mod parser_trait {
             &mut self,
             checkpoint: impl Into<Option<Self::Checkpoint>>,
             kind: SyntaxKind,
-        ) -> Node<Self> {
+        ) -> Node<'_, Self> {
             self.start_node_impl(kind, checkpoint.into(), NodeToken(()));
             Node(self)
         }
@@ -1013,7 +1013,29 @@ pub fn identifier_text(node: &SyntaxNode) -> Option<SmolStr> {
 }
 
 pub fn normalize_identifier(ident: &str) -> SmolStr {
-    ident.replace_smolstr("_", "-")
+    let mut builder = smol_str::SmolStrBuilder::default();
+    for (pos, c) in ident.chars().enumerate() {
+        match (pos, c) {
+            (0, '-') | (0, '_') => builder.push('_'),
+            (_, '_') => builder.push('-'),
+            (_, c) => builder.push(c),
+        }
+    }
+    builder.finish()
+}
+
+#[test]
+fn test_normalize_identifier() {
+    assert_eq!(normalize_identifier("true"), SmolStr::new("true"));
+    assert_eq!(normalize_identifier("foo_bar"), SmolStr::new("foo-bar"));
+    assert_eq!(normalize_identifier("-foo_bar"), SmolStr::new("_foo-bar"));
+    assert_eq!(normalize_identifier("-foo-bar"), SmolStr::new("_foo-bar"));
+    assert_eq!(normalize_identifier("foo_bar_"), SmolStr::new("foo-bar-"));
+    assert_eq!(normalize_identifier("foo_bar-"), SmolStr::new("foo-bar-"));
+    assert_eq!(normalize_identifier("_foo_bar_"), SmolStr::new("_foo-bar-"));
+    assert_eq!(normalize_identifier("__1"), SmolStr::new("_-1"));
+    assert_eq!(normalize_identifier("--1"), SmolStr::new("_-1"));
+    assert_eq!(normalize_identifier("--1--"), SmolStr::new("_-1--"));
 }
 
 // Actual parser

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::{collections::HashMap, iter::once, rc::Rc};
 
 use i_slint_compiler::parser::TextRange;
-use i_slint_compiler::{expression_tree, langtype, literals};
+use i_slint_compiler::{expression_tree, langtype};
 
 use itertools::Itertools;
 use slint::{Model, ModelRc, SharedString, ToSharedString, VecModel};
@@ -19,8 +19,11 @@ use crate::preview::{self, preview_data, properties, SelectionNotification};
 #[cfg(target_arch = "wasm32")]
 use crate::wasm_prelude::*;
 
-mod gradient;
+mod brushes;
+pub mod log_messages;
+pub mod palette;
 mod property_view;
+mod recent_colors;
 
 slint::include_modules!();
 
@@ -110,37 +113,11 @@ pub fn create_ui(style: String, experimental: bool) -> Result<PreviewUi, Platfor
     api.on_set_json_preview_data(set_json_preview_data);
 
     api.on_string_to_code(string_to_code);
-    api.on_string_to_color(|s| string_to_color(s.as_ref()).unwrap_or_default());
-    api.on_string_is_color(|s| string_to_color(s.as_ref()).is_some());
-    api.on_color_to_data(|c| ColorData {
-        a: c.alpha() as i32,
-        r: c.red() as i32,
-        g: c.green() as i32,
-        b: c.blue() as i32,
-        text: color_to_string(c),
-        short_text: color_to_short_string(c).into(),
-    });
-    api.on_rgba_to_color(|r, g, b, a| {
-        if (0..256).contains(&r)
-            && (0..256).contains(&g)
-            && (0..256).contains(&b)
-            && (0..256).contains(&a)
-        {
-            slint::Color::from_argb_u8(a as u8, r as u8, g as u8, b as u8)
-        } else {
-            slint::Color::default()
-        }
-    });
 
-    api.on_as_json_brush(as_json_brush);
-    api.on_as_slint_brush(as_slint_brush);
-    api.on_create_brush(create_brush);
-    api.on_add_gradient_stop(gradient::add_gradient_stop);
-    api.on_remove_gradient_stop(gradient::remove_gradient_stop);
-    api.on_move_gradient_stop(gradient::move_gradient_stop);
-    api.on_suggest_gradient_stop_at_row(gradient::suggest_gradient_stop_at_row);
-    api.on_suggest_gradient_stop_at_position(gradient::suggest_gradient_stop_at_position);
-    api.on_clone_gradient_stops(gradient::clone_gradient_stops);
+    brushes::setup(&ui);
+    log_messages::setup(&ui);
+    palette::setup(&ui);
+    recent_colors::setup(&ui);
 
     #[cfg(target_vendor = "apple")]
     api.set_control_key_name("command".into());
@@ -173,15 +150,31 @@ pub fn ui_set_uses_widgets(ui: &PreviewUi, uses_widgets: bool) {
 }
 
 pub fn set_diagnostics(ui: &PreviewUi, diagnostics: &[slint_interpreter::Diagnostic]) {
-    let summary = diagnostics.iter().fold(DiagnosticSummary::NothingDetected, |acc, d| {
-        match (acc, d.level()) {
-            (_, DiagnosticLevel::Error) => DiagnosticSummary::Errors,
-            (DiagnosticSummary::Errors, DiagnosticLevel::Warning) => DiagnosticSummary::Errors,
-            (_, DiagnosticLevel::Warning) => DiagnosticSummary::Warnings,
-            // DiagnosticLevel is non-exhaustive:
-            (acc, _) => acc,
-        }
-    });
+    let summary = diagnostics
+        .iter()
+        .inspect(|d| {
+            let location = d.source_file().map(|p| {
+                let (line, column) = d.line_column();
+                (p.to_string_lossy().to_string().into(), line, column)
+            });
+
+            let level = match d.level() {
+                DiagnosticLevel::Error => LogMessageLevel::Error,
+                DiagnosticLevel::Warning => LogMessageLevel::Warning,
+                _ => LogMessageLevel::Debug,
+            };
+
+            log_messages::append_log_message(ui, level, location, d.message());
+        })
+        .fold(DiagnosticSummary::NothingDetected, |acc, d| {
+            match (acc, d.level()) {
+                (_, DiagnosticLevel::Error) => DiagnosticSummary::Errors,
+                (DiagnosticSummary::Errors, DiagnosticLevel::Warning) => DiagnosticSummary::Errors,
+                (_, DiagnosticLevel::Warning) => DiagnosticSummary::Warnings,
+                // DiagnosticLevel is non-exhaustive:
+                (acc, _) => acc,
+            }
+        });
 
     let api = ui.global::<Api>();
     api.set_diagnostic_summary(summary);
@@ -324,27 +317,6 @@ fn string_to_code(
     }
 }
 
-fn color_to_string(color: slint::Color) -> SharedString {
-    let a = color.alpha();
-    let r = color.red();
-    let g = color.green();
-    let b = color.blue();
-
-    slint::format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
-}
-
-fn color_to_short_string(color: slint::Color) -> String {
-    let r = color.red();
-    let g = color.green();
-    let b = color.blue();
-
-    format!("{r:02x}{g:02x}{b:02x}")
-}
-
-fn string_to_color(text: &str) -> Option<slint::Color> {
-    literals::parse_color_literal(text).map(slint::Color::from_argb_encoded)
-}
-
 fn unit_model(units: &[expression_tree::Unit]) -> ModelRc<SharedString> {
     Rc::new(VecModel::from(
         units.iter().map(|u| u.to_string().into()).collect::<Vec<SharedString>>(),
@@ -481,15 +453,12 @@ fn map_value_and_type(
         kind: PropertyValueKind,
         code: SharedString,
     ) {
-        let color_string = color_to_string(color);
+        let color_string = brushes::color_to_string(color);
         mapping.headers.push(mapping.name_prefix.clone());
         mapping.current_values.push(PropertyValue {
+            value_kind: kind,
             kind,
-            display_string: if kind == PropertyValueKind::Color {
-                color_string
-            } else {
-                SharedString::from("Solid Color")
-            },
+            display_string: color_string.clone(),
             brush_kind: BrushKind::Solid,
             value_brush: slint::Brush::SolidColor(color),
             gradient_stops: Rc::new(VecModel::from(vec![GradientStop { color, position: 0.5 }]))
@@ -520,6 +489,7 @@ fn map_value_and_type(
             mapping.current_values.push(PropertyValue {
                 display_string: get_value::<i32>(value).to_shared_string(),
                 kind: PropertyValueKind::Integer,
+                value_kind: PropertyValueKind::Integer,
                 value_int: get_value::<i32>(value),
                 code: get_code(value),
                 accessor_path: mapping.name_prefix.clone(),
@@ -531,9 +501,10 @@ fn map_value_and_type(
             mapping.current_values.push(PropertyValue {
                 display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Ms),
                 kind: PropertyValueKind::Float,
+                value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
-                visual_items: unit_model(&[Unit::Ms]),
-                value_int: 0,
+                visual_items: unit_model(&[Unit::S, Unit::Ms]),
+                value_int: 1,
                 code: get_code(value),
                 default_selection: 1,
                 accessor_path: mapping.name_prefix.clone(),
@@ -545,11 +516,20 @@ fn map_value_and_type(
             mapping.current_values.push(PropertyValue {
                 display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Phx),
                 kind: PropertyValueKind::Float,
+                value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
-                visual_items: unit_model(&[Unit::Phx]),
-                value_int: 0,
+                visual_items: unit_model(&[
+                    Unit::Px,
+                    Unit::Cm,
+                    Unit::Mm,
+                    Unit::In,
+                    Unit::Pt,
+                    Unit::Phx,
+                    Unit::Rem,
+                ]),
+                value_int: 5,
                 code: get_code(value),
-                default_selection: 0,
+                default_selection: 5,
                 accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
@@ -559,8 +539,17 @@ fn map_value_and_type(
             mapping.current_values.push(PropertyValue {
                 display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Px),
                 kind: PropertyValueKind::Float,
+                value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
-                visual_items: unit_model(&[Unit::Px]),
+                visual_items: unit_model(&[
+                    Unit::Px,
+                    Unit::Cm,
+                    Unit::Mm,
+                    Unit::In,
+                    Unit::Pt,
+                    Unit::Phx,
+                    Unit::Rem,
+                ]),
                 value_int: 0,
                 code: get_code(value),
                 default_selection: 0,
@@ -573,11 +562,20 @@ fn map_value_and_type(
             mapping.current_values.push(PropertyValue {
                 display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Rem),
                 kind: PropertyValueKind::Float,
+                value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
-                visual_items: unit_model(&[Unit::Rem]),
-                value_int: 0,
+                visual_items: unit_model(&[
+                    Unit::Px,
+                    Unit::Cm,
+                    Unit::Mm,
+                    Unit::In,
+                    Unit::Pt,
+                    Unit::Phx,
+                    Unit::Rem,
+                ]),
+                value_int: 6,
                 code: get_code(value),
-                default_selection: 0,
+                default_selection: 6,
                 accessor_path: mapping.name_prefix.clone(),
                 ..Default::default()
             });
@@ -587,8 +585,9 @@ fn map_value_and_type(
             mapping.current_values.push(PropertyValue {
                 display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Deg),
                 kind: PropertyValueKind::Float,
+                value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
-                visual_items: unit_model(&[Unit::Deg]),
+                visual_items: unit_model(&[Unit::Deg, Unit::Grad, Unit::Turn, Unit::Rad]),
                 value_int: 0,
                 code: get_code(value),
                 default_selection: 0,
@@ -601,6 +600,7 @@ fn map_value_and_type(
             mapping.current_values.push(PropertyValue {
                 display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Percent),
                 kind: PropertyValueKind::Float,
+                value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
                 visual_items: unit_model(&[Unit::Percent]),
                 value_int: 0,
@@ -615,6 +615,7 @@ fn map_value_and_type(
             mapping.current_values.push(PropertyValue {
                 display_string: slint::format!("\"{}\"", get_value::<SharedString>(value)),
                 kind: PropertyValueKind::String,
+                value_kind: PropertyValueKind::String,
                 value_string: get_value::<SharedString>(value),
                 code: get_code(value),
                 accessor_path: mapping.name_prefix.clone(),
@@ -640,6 +641,7 @@ fn map_value_and_type(
                     mapping.current_values.push(PropertyValue {
                         display_string: SharedString::from("Linear Gradient"),
                         kind: PropertyValueKind::Brush,
+                        value_kind: PropertyValueKind::Brush,
                         brush_kind: BrushKind::Linear,
                         value_float: lg.angle(),
                         value_brush: slint::Brush::LinearGradient(lg.clone()),
@@ -659,6 +661,7 @@ fn map_value_and_type(
                     mapping.current_values.push(PropertyValue {
                         display_string: SharedString::from("Radial Gradient"),
                         kind: PropertyValueKind::Brush,
+                        value_kind: PropertyValueKind::Brush,
                         brush_kind: BrushKind::Radial,
                         value_brush: slint::Brush::RadialGradient(rg.clone()),
                         gradient_stops: Rc::new(VecModel::from(
@@ -677,6 +680,7 @@ fn map_value_and_type(
                     mapping.current_values.push(PropertyValue {
                         display_string: SharedString::from("Unknown Brush"),
                         kind: PropertyValueKind::Code,
+                        value_kind: PropertyValueKind::Code,
                         value_string: SharedString::from("???"),
                         accessor_path: mapping.name_prefix.clone(),
                         code: get_code(value),
@@ -690,6 +694,7 @@ fn map_value_and_type(
             mapping.current_values.push(PropertyValue {
                 display_string: get_value::<bool>(value).to_shared_string(),
                 kind: PropertyValueKind::Boolean,
+                value_kind: PropertyValueKind::Boolean,
                 value_bool: get_value::<bool>(value),
                 accessor_path: mapping.name_prefix.clone(),
                 code: get_code(value),
@@ -714,6 +719,7 @@ fn map_value_and_type(
                     enumeration.values[selected_value]
                 ),
                 kind: PropertyValueKind::Enum,
+                value_kind: PropertyValueKind::Enum,
                 value_string: enumeration.name.as_str().into(),
                 default_selection: i32::try_from(enumeration.default_value).unwrap_or_default(),
                 value_int: i32::try_from(selected_value).unwrap_or_default(),
@@ -798,6 +804,7 @@ fn map_value_and_type(
             mapping.current_values.push(PropertyValue {
                 display_string: "Unsupported type".into(),
                 kind: PropertyValueKind::Code,
+                value_kind: PropertyValueKind::Code,
                 value_string: "???".into(),
                 accessor_path: mapping.name_prefix.clone(),
                 code: get_code(value),
@@ -812,25 +819,39 @@ fn map_value_and_type(
 
     mapping.code_value = PropertyValue {
         kind: PropertyValueKind::Code,
+        value_kind: PropertyValueKind::Code,
         code: get_code(value),
         ..Default::default()
     };
 }
 
-fn map_preview_data_to_property_value(
-    preview_data: &preview_data::PreviewData,
-) -> Option<PropertyValue> {
-    let mut mapping = ValueMapping::default();
-    map_value_and_type(&preview_data.ty, &preview_data.value, &mut mapping);
+pub fn map_value_and_type_to_property_value(
+    ty: &langtype::Type,
+    value: &Option<slint_interpreter::Value>,
+    name_prefix: &str,
+) -> PropertyValue {
+    let mut mapping =
+        ValueMapping { name_prefix: SharedString::from(name_prefix), ..Default::default() };
+
+    map_value_and_type(ty, value, &mut mapping);
 
     if mapping.is_too_complex
         || mapping.array_values.len() != 1
         || mapping.array_values[0].len() != 1
     {
-        Some(mapping.code_value)
+        mapping.code_value
     } else {
-        mapping.array_values.first().and_then(|av| av.first()).cloned()
+        mapping
+            .array_values
+            .first()
+            .and_then(|av| av.first())
+            .cloned()
+            .unwrap_or_else(|| mapping.code_value.clone())
     }
+}
+
+fn map_preview_data_to_property_value(preview_data: &preview_data::PreviewData) -> PropertyValue {
+    map_value_and_type_to_property_value(&preview_data.ty, &preview_data.value, "")
 }
 
 fn map_preview_data_property(
@@ -929,7 +950,7 @@ fn get_property_value(container: SharedString, property_name: SharedString) -> P
                 property_name.as_str(),
             )
         })
-        .and_then(|pd| map_preview_data_to_property_value(&pd))
+        .map(|pd| map_preview_data_to_property_value(&pd))
         .unwrap_or_default()
 }
 
@@ -1094,7 +1115,7 @@ fn set_property_value_table(
         return "Could not process input values".into();
     };
 
-    set_json_preview_data(container, property_name, json_string.into())
+    set_json_preview_data(container, property_name, json_string.into(), false)
 }
 
 fn default_property_value(source: &PropertyValue) -> PropertyValue {
@@ -1109,7 +1130,7 @@ fn default_property_value(source: &PropertyValue) -> PropertyValue {
             pv.code = "false".into();
         }
         PropertyValueKind::Brush => {
-            pv.display_string = "Solid Color".into();
+            pv.display_string = "#00000000".into();
             pv.brush_kind = BrushKind::Solid;
             pv.value_brush = slint::Color::default().into();
             pv.code = "#00000000".into();
@@ -1206,7 +1227,15 @@ fn set_json_preview_data(
     container: SharedString,
     property_name: SharedString,
     json_string: SharedString,
+    send_telemetry: bool,
 ) -> SharedString {
+    if send_telemetry {
+        crate::preview::send_telemetry(&mut [(
+            "type".to_string(),
+            serde_json::to_value("data_json_changed").unwrap(),
+        )]);
+    }
+
     let property_name = (!property_name.is_empty()).then_some(property_name.to_string());
 
     let json = match serde_json::from_str::<serde_json::Value>(json_string.as_ref()) {
@@ -1288,71 +1317,6 @@ pub fn ui_set_properties(
     api.set_current_element(next_element);
 
     declarations
-}
-
-fn sorted_gradient_stops(
-    stops: ModelRc<GradientStop>,
-) -> Vec<i_slint_core::graphics::GradientStop> {
-    let mut result = stops
-        .iter()
-        .map(|gs| i_slint_core::graphics::GradientStop { position: gs.position, color: gs.color })
-        .collect::<Vec<_>>();
-    result.sort_by(|left, right| left.position.total_cmp(&right.position));
-
-    result
-}
-
-fn as_json_brush(
-    kind: BrushKind,
-    angle: f32,
-    color: slint::Color,
-    stops: ModelRc<GradientStop>,
-) -> SharedString {
-    format!("\"{}\"", as_slint_brush(kind, angle, color, stops)).into()
-}
-
-fn as_slint_brush(
-    kind: BrushKind,
-    angle: f32,
-    color: slint::Color,
-    stops: ModelRc<GradientStop>,
-) -> SharedString {
-    fn stops_as_string(stops: ModelRc<GradientStop>) -> String {
-        let stops = sorted_gradient_stops(stops);
-
-        let mut result = String::new();
-        for s in stops {
-            result += &format!(", {} {:.2}%", color_to_string(s.color), s.position * 100.0);
-        }
-        result
-    }
-
-    match kind {
-        BrushKind::Solid => color_to_string(color),
-        BrushKind::Linear => {
-            format!("@linear-gradient({angle}deg{})", stops_as_string(stops)).into()
-        }
-        BrushKind::Radial => format!("@radial-gradient(circle{})", stops_as_string(stops)).into(),
-    }
-}
-
-fn create_brush(
-    kind: BrushKind,
-    angle: f32,
-    color: slint::Color,
-    stops: ModelRc<GradientStop>,
-) -> slint::Brush {
-    let mut stops = sorted_gradient_stops(stops);
-
-    match kind {
-        BrushKind::Solid => slint::Brush::SolidColor(color),
-        BrushKind::Linear => slint::Brush::LinearGradient(
-            i_slint_core::graphics::LinearGradientBrush::new(angle, stops.drain(..)),
-        ),
-        BrushKind::Radial => slint::Brush::RadialGradient(
-            i_slint_core::graphics::RadialGradientBrush::new_circle(stops.drain(..)),
-        ),
-    }
 }
 
 #[cfg(test)]
@@ -1500,7 +1464,7 @@ export component Tester {{
     ) {
         let (_, value) = validate_rp_impl(visibility, type_def, type_name, code, expected_data);
 
-        let pv = super::map_preview_data_to_property_value(&value).unwrap();
+        let pv = super::map_preview_data_to_property_value(&value);
         compare_pv(&pv, &expected_value);
 
         let (is_array, headers, values) = super::map_preview_data_to_property_value_table(&value);
@@ -1524,7 +1488,7 @@ export component Tester {{
     ) {
         let (_, value) = validate_rp_impl(visibility, type_def, type_name, code, expected_data);
 
-        let pv = super::map_preview_data_to_property_value(&value).unwrap();
+        let pv = super::map_preview_data_to_property_value(&value);
         compare_pv(
             &pv,
             &super::PropertyValue {
@@ -1593,7 +1557,16 @@ export component Tester {{
                 code: "100".into(),
                 kind: super::PropertyValueKind::Float,
                 value_float: 100.0,
-                visual_items: std::rc::Rc::new(VecModel::from(vec!["px".into()])).into(),
+                visual_items: std::rc::Rc::new(VecModel::from(vec![
+                    "px".into(),
+                    "cm".into(),
+                    "mm".into(),
+                    "in".into(),
+                    "pt".into(),
+                    "phx".into(),
+                    "rem".into(),
+                ]))
+                .into(),
                 ..Default::default()
             },
         );
@@ -1617,7 +1590,16 @@ export component Tester {{
                 code: "378".into(),
                 kind: super::PropertyValueKind::Float,
                 value_float: 378.0,
-                visual_items: std::rc::Rc::new(VecModel::from(vec!["px".into()])).into(),
+                visual_items: std::rc::Rc::new(VecModel::from(vec![
+                    "px".into(),
+                    "cm".into(),
+                    "mm".into(),
+                    "in".into(),
+                    "pt".into(),
+                    "phx".into(),
+                    "rem".into(),
+                ]))
+                .into(),
                 ..Default::default()
             },
         );
@@ -1641,8 +1623,10 @@ export component Tester {{
                 code: "100000".into(),
                 kind: super::PropertyValueKind::Float,
                 value_float: 100000.0,
-                visual_items: std::rc::Rc::new(VecModel::from(vec!["ms".into()])).into(),
+                visual_items: std::rc::Rc::new(VecModel::from(vec!["s".into(), "ms".into()]))
+                    .into(),
                 default_selection: 1,
+                value_int: 1,
                 ..Default::default()
             },
         );
@@ -1666,7 +1650,13 @@ export component Tester {{
                 code: "36000".into(),
                 kind: super::PropertyValueKind::Float,
                 value_float: 36000.0,
-                visual_items: std::rc::Rc::new(VecModel::from(vec!["deg".into()])).into(),
+                visual_items: std::rc::Rc::new(VecModel::from(vec![
+                    "deg".into(),
+                    "grad".into(),
+                    "turn".into(),
+                    "rad".into(),
+                ]))
+                .into(),
                 ..Default::default()
             },
         );

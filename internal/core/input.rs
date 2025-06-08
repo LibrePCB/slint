@@ -8,8 +8,8 @@
 use crate::item_tree::ItemTreeRc;
 use crate::item_tree::{ItemRc, ItemWeak, VisitChildrenResult};
 pub use crate::items::PointerEventButton;
+pub use crate::items::{FocusReason, KeyEvent, KeyboardModifiers};
 use crate::items::{ItemRef, TextCursorDirection};
-pub use crate::items::{KeyEvent, KeyboardModifiers};
 use crate::lengths::{LogicalPoint, LogicalVector};
 use crate::timers::Timer;
 use crate::window::{WindowAdapter, WindowInner};
@@ -461,13 +461,9 @@ pub enum FocusEventResult {
 #[repr(u8)]
 pub enum FocusEvent {
     /// This event is sent when an item receives the focus.
-    FocusIn,
+    FocusIn(FocusReason),
     /// This event is sent when an item looses the focus.
-    FocusOut,
-    /// This event is sent when the window receives the keyboard focus.
-    WindowReceivedFocus,
-    /// This event is sent when the window looses the keyboard focus. (including if this is because of a popup)
-    WindowLostFocus,
+    FocusOut(FocusReason),
 }
 
 /// This state is used to count the clicks separated by [`crate::platform::Platform::click_interval`]
@@ -505,7 +501,7 @@ impl ClickState {
                         && button == self.click_button.get()
                         && (position - self.click_position.get()).square_length() < 100 as _
                     {
-                        self.click_count.set(self.click_count.get() + 1);
+                        self.click_count.set(self.click_count.get().wrapping_add(1));
                         self.click_count_time_stamp.set(Some(instant_now));
                     } else {
                         self.restart(position, button);

@@ -87,6 +87,7 @@ path = [
   "docs/astro/src/assets/**.svg",
   "docs/astro/src/assets/**.webp",
   "docs/astro/src/assets/getting-started/**.webp",
+  "docs/astro/src/assets/guide/tooling/**.webp",
   "docs/astro/src/content/docs/reference/elements/mini-banner.png",
   "docs/astro/src/misc/**.json",
   "docs/astro/src/misc/**.jsonc",
@@ -164,6 +165,8 @@ path = [
   "tools/lsp/ui/assets/black-square.png",
   "tools/lsp/ui/assets/close.svg",
   "tools/lsp/ui/assets/plus.svg",
+  "tools/lsp/ui/assets/info.svg",
+  "tools/lsp/ui/assets/clear.svg",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Codicon Icons <https://github.com/microsoft/vscode-codicons/>"

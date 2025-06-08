@@ -5,7 +5,7 @@ import {
     getBorderRadius,
     rgbToHex,
     indentation,
-    generateSlintSnippet,
+    generatePathNodeSnippet,
     getBorderWidthAndColor,
     generateTextSnippet,
 } from "../backend/utils/property-parsing";
@@ -13,15 +13,7 @@ import { expect, test } from "vitest";
 
 const testJson = require("./figma_output.json");
 
-// Json node ID for various tests.
-const testBorderRadius55px = "163:266";
-const testBorderRadiusMultiValue = "163:267";
-const testFrameNode = "156:3609";
-const testNoBorderRadius = "201:272";
-const testBorderWidthColor = "212:279";
-const testText = "156:3612";
-
-function findNodeById(obj: any, targetId: string): any {
+export function findNodeById(obj: any, targetId: string): any {
     if (Array.isArray(obj)) {
         for (const item of obj) {
             const result = findNodeById(item, targetId);
@@ -36,6 +28,29 @@ function findNodeById(obj: any, targetId: string): any {
 
         for (const key in obj) {
             const result = findNodeById(obj[key], targetId);
+            if (result) {
+                return result;
+            }
+        }
+    }
+    return null;
+}
+
+function findNodeByName(obj: any, targetName: string): any {
+    if (Array.isArray(obj)) {
+        for (const item of obj) {
+            const result = findNodeByName(item, targetName);
+            if (result) {
+                return result;
+            }
+        }
+    } else if (typeof obj === "object" && obj !== null) {
+        if (obj.name === targetName) {
+            return obj;
+        }
+
+        for (const key in obj) {
+            const result = findNodeByName(obj[key], targetName);
             if (result) {
                 return result;
             }
@@ -68,7 +83,19 @@ function processCornerRadii(json: any): any {
 
     return json;
 }
-
+function processVectorNode(json: any): any {
+    // You can expand this as needed for your test expectations
+    if (json.type === "VECTOR") {
+        return {
+            ...json,
+            vectorPaths: json.vectorPaths || [],
+            strokes: json.strokes || [],
+            strokeWeight: json.strokeWeight ?? 1,
+            exportAsync: async () => `<svg><path d="M10 10L90 90"/></svg>`,
+        };
+    }
+    return json;
+}
 // Convert test JSON to match the API object.
 function processTextNode(json: any): any {
     if (json.type === "TEXT" && json.style) {
@@ -107,21 +134,24 @@ test("converts rgb to hex floating #000000", () => {
 });
 
 test(" No border radius", async () => {
-    const jsonNode = findNodeById(testJson, testNoBorderRadius);
+    const jsonNode = findNodeByName(
+        testJson,
+        "rectangle no corner radius test",
+    );
     expect(jsonNode).not.toBeNull();
     const snippet = await getBorderRadius(jsonNode, false);
     expect(snippet).toBe(null);
 });
 
 test("Single border radius", async () => {
-    const jsonNode = findNodeById(testJson, testBorderRadius55px);
+    const jsonNode = findNodeByName(testJson, "border-test 1");
     expect(jsonNode).not.toBeNull();
     const snippet = await getBorderRadius(jsonNode, false);
     expect(snippet).toBe(`${indentation}border-radius: 55px;`);
 });
 
 test("Multiple border radius", async () => {
-    const jsonNode = findNodeById(testJson, testBorderRadiusMultiValue);
+    const jsonNode = findNodeByName(testJson, "border-test 2");
     expect(jsonNode).not.toBeNull();
     const convertToApiJson = processCornerRadii(jsonNode);
     const snippet = await getBorderRadius(convertToApiJson, false);
@@ -130,7 +160,7 @@ test("Multiple border radius", async () => {
 });
 
 test("Border width and color", async () => {
-    const jsonNode = findNodeById(testJson, testBorderWidthColor);
+    const jsonNode = findNodeByName(testJson, "stroke test 2");
     expect(jsonNode).not.toBeNull();
     const snippet = await getBorderWidthAndColor(jsonNode, false);
     const expectedSnippet = [
@@ -141,10 +171,24 @@ test("Border width and color", async () => {
 });
 
 test("Text node", async () => {
-    const jsonNode = findNodeById(testJson, testText);
+    const jsonNode = findNodeByName(testJson, "Monthly");
     expect(jsonNode).not.toBeNull();
     const convertToApiJson = processTextNode(jsonNode);
     const snippet = await generateTextSnippet(convertToApiJson, false);
-    const expectedSnippet = `Text {\n${indentation}text: "Monthly";\n${indentation}color: #896fff;\n${indentation}font-family: "Roboto";\n${indentation}font-size: 12px;\n${indentation}font-weight: 400;\n}`;
+    const expectedSnippet = `monthly := Text {\n${indentation}text: "Monthly";\n${indentation}color: #896fff;\n${indentation}font-family: "Roboto";\n${indentation}font-size: 12px;\n${indentation}font-weight: 400;\n}`;
+    expect(snippet).toBe(expectedSnippet);
+});
+
+test("Vector node", async () => {
+    const jsonNode = findNodeByName(testJson, "vector test");
+    expect(jsonNode).not.toBeNull();
+    const convertToApiJson = processVectorNode(jsonNode);
+    const snippet = await generatePathNodeSnippet(convertToApiJson, false);
+    const expectedSnippet = `vector-test := Path {
+${indentation}commands: "M10 10L90 90";
+${indentation}fill: #2e5adf;
+${indentation}stroke: #000000;
+${indentation}stroke-width: 2.5px;
+}`;
     expect(snippet).toBe(expectedSnippet);
 });

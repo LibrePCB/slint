@@ -215,6 +215,7 @@ fn default_config() -> cbindgen::Config {
         rename: [
             ("Callback".into(), "private_api::CallbackHelper".into()),
             ("VoidArg".into(), "void".into()),
+            ("FocusReasonArg".into(), "FocusReason".into()),
             ("KeyEventArg".into(), "KeyEvent".into()),
             ("PointerEventArg".into(), "PointerEvent".into()),
             ("PointerScrollEventArg".into(), "PointerScrollEvent".into()),
@@ -238,6 +239,8 @@ fn default_config() -> cbindgen::Config {
         // Disable any wasm guarded code in C++, too - so that there are no gaps in enums.
         ("target_arch = wasm32".into(), "SLINT_TARGET_WASM".into()),
         ("target_os = android".into(), "__ANDROID__".into()),
+        // Disable Rust WGPU specific API feature
+        ("feature = unstable-wgpu-24".into(), "SLINT_DISABLED_CODE".into()),
     ]
     .iter()
     .cloned()
@@ -321,6 +324,7 @@ fn gen_corelib(
         "InputType",
         "StandardButtonKind",
         "DialogButtonRole",
+        "FocusReason",
         "PointerEventKind",
         "PointerEventButton",
         "PointerEvent",
@@ -329,7 +333,6 @@ fn gen_corelib(
         "SortOrder",
         "BitmapFont",
         "PhysicalRegion",
-        "CompositionMode",
     ]
     .iter()
     .chain(items.iter())
@@ -374,6 +377,7 @@ fn gen_corelib(
         "CallbackOpaque",
         "WindowAdapterRc",
         "VoidArg",
+        "FocusReasonArg",
         "KeyEventArg",
         "PointerEventArg",
         "PointerScrollEventArg",
@@ -467,7 +471,7 @@ fn gen_corelib(
     // slint_timer_internal.h:
     let timer_config = {
         let mut tmp = config.clone();
-        tmp.export.include = vec![
+        tmp.export.include = [
             "TimerMode",
             "slint_timer_start",
             "slint_timer_singleshot",
@@ -900,7 +904,12 @@ fn gen_platform(
         .with_after_include(
             r"
 namespace slint::platform { struct Rgb565Pixel; }
-namespace slint::cbindgen_private { struct WindowProperties; using slint::platform::Rgb565Pixel; using slint::cbindgen_private::types::TexturePixelFormat; }
+namespace slint::cbindgen_private {
+    struct WindowProperties; using slint::platform::Rgb565Pixel;
+    using slint::cbindgen_private::types::TexturePixelFormat;
+    struct DrawTextureArgs;
+    struct DrawRectangleArgs;
+}
 ",
         )
         .generate()

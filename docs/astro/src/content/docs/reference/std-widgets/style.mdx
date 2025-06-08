@@ -56,6 +56,28 @@ let main = new ui.Main();
 main.greeting = "Hello friends";
 ```
 </TabItem>
+<TabItem label="Python">
+
+You can specify the style by setting the `SLINT_STYLE` environment variable in the beginning of your Python script:
+
+```python
+import slint
+import os
+
+
+os.environ["SLINT_STYLE"] = "material"
+# or
+# os.environ.setdefault("SLINT_STYLE", "material")
+
+
+class MainWindow(slint.loader.ui.app.AppWindow): ...
+
+
+main_window = MainWindow()
+main_window.show()
+main_window.run()
+```
+</TabItem>
 </Tabs>
 
 ## Using Style Properties In Your Own Components
@@ -69,6 +91,21 @@ export component Example inherits Window {
     Rectangle {
         border-radius: StyleMetrics.layout-padding;
         border-width: 2px;
+        border-color: Palette.border;
+        background: Palette.background;
+    }
+}
+```
+
+In situations where the specific property is not available you can detect the style via `Platform.style-name`.
+
+```slint playground
+import { Palette } from "std-widgets.slint";
+
+export component Example inherits Window {
+    Rectangle {
+        border-radius: Platform.style-name == "fluent" ? 4px : 2px;
+        border-width: Platform.style-name == "fluent" ? 2px : 1px;
         border-color: Palette.border;
         background: Palette.background;
     }

@@ -31,7 +31,7 @@ use crate::lengths::{
 use crate::renderer::RendererSealed;
 use crate::textlayout::{AbstractFont, FontMetrics, TextParagraphLayout};
 use crate::window::{WindowAdapter, WindowInner};
-use crate::{Brush, Color, Coord, ImageInner, StaticTextures};
+use crate::{Brush, Color, ImageInner, StaticTextures};
 use alloc::rc::{Rc, Weak};
 use alloc::{vec, vec::Vec};
 use core::cell::{Cell, RefCell};
@@ -90,7 +90,7 @@ impl RenderingRotation {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct RotationInfo {
     orientation: RenderingRotation,
     screen_size: PhysicalSize,
@@ -264,6 +264,20 @@ impl PhysicalRegion {
             }
         })
     }
+
+    fn intersection(&self, clip: &PhysicalRect) -> PhysicalRegion {
+        let mut res = Self::default();
+        let clip = clip.to_box2d();
+        let mut count = 0;
+        for i in 0..self.count {
+            if let Some(r) = self.rectangles[i].intersection(&clip) {
+                res.rectangles[count] = r;
+                count += 1;
+            }
+        }
+        res.count = count;
+        res
+    }
 }
 
 #[test]
@@ -366,10 +380,12 @@ fn region_line_ranges(
 mod target_pixel_buffer;
 
 #[cfg(feature = "experimental")]
-pub use target_pixel_buffer::{CompositionMode, TargetPixelBuffer, Texture, TexturePixelFormat};
+pub use target_pixel_buffer::{
+    DrawRectangleArgs, DrawTextureArgs, TargetPixelBuffer, TexturePixelFormat,
+};
 
 #[cfg(not(feature = "experimental"))]
-use target_pixel_buffer::{CompositionMode, TexturePixelFormat};
+use target_pixel_buffer::TexturePixelFormat;
 
 struct TargetPixelSlice<'a, T> {
     data: &'a mut [T],
@@ -589,12 +605,22 @@ impl SoftwareRenderer {
                 drop(i);
 
                 renderer.actual_renderer.processor.dirty_region = dirty_region.clone();
-                renderer.actual_renderer.processor.process_rectangle_impl(
-                    screen_rect.transformed(rotation),
+                if !renderer
+                    .actual_renderer
+                    .processor
+                    .buffer
+                    .fill_background(&background, &dirty_region)
+                {
+                    let mut bg = TargetPixel::background();
                     // TODO: gradient background
-                    background.color().into(),
-                    CompositionMode::Source,
-                );
+                    TargetPixel::blend(&mut bg, background.color().into());
+                    renderer.actual_renderer.processor.foreach_ranges(
+                        &dirty_region.bounding_rect(),
+                        |_, buffer, _, _| {
+                            buffer.fill(bg);
+                        },
+                    );
+                }
 
                 for (component, origin) in components {
                     crate::item_rendering::render_component_items(
@@ -1109,11 +1135,195 @@ fn prepare_scene(
 }
 
 trait ProcessScene {
-    fn process_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>);
-    fn process_rectangle(&mut self, geometry: PhysicalRect, color: PremultipliedRgbaColor);
+    fn process_scene_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>);
+    fn process_target_texture(
+        &mut self,
+        texture: &target_pixel_buffer::DrawTextureArgs,
+        clip: PhysicalRect,
+    );
+    fn process_rectangle(&mut self, _: &target_pixel_buffer::DrawRectangleArgs, clip: PhysicalRect);
+
+    fn process_simple_rectangle(&mut self, geometry: PhysicalRect, color: PremultipliedRgbaColor);
     fn process_rounded_rectangle(&mut self, geometry: PhysicalRect, data: RoundedRectangle);
-    fn process_shared_image_buffer(&mut self, geometry: PhysicalRect, buffer: SharedBufferCommand);
     fn process_gradient(&mut self, geometry: PhysicalRect, gradient: GradientCommand);
+}
+
+fn process_rectangle_impl(
+    processor: &mut dyn ProcessScene,
+    args: &target_pixel_buffer::DrawRectangleArgs,
+    clip: &PhysicalRect,
+) {
+    let geom = args.geometry();
+    let Some(clipped) = geom.intersection(&clip.cast()) else { return };
+
+    let color = if let Brush::LinearGradient(g) = &args.background {
+        let angle = g.angle() + args.rotation.angle();
+        let tan = angle.to_radians().tan().abs();
+        let start = if !tan.is_finite() {
+            255.
+        } else {
+            let h = tan * geom.width();
+            255. * h / (h + geom.height())
+        } as u8;
+        let mut angle = angle as i32 % 360;
+        if angle < 0 {
+            angle += 360;
+        }
+        let mut stops = g
+            .stops()
+            .copied()
+            .map(|mut s| {
+                s.color = alpha_color(s.color, args.alpha);
+                s
+            })
+            .peekable();
+        let mut idx = 0;
+        let stop_count = g.stops().count();
+        while let (Some(mut s1), Some(mut s2)) = (stops.next(), stops.peek().copied()) {
+            let mut flags = 0;
+            if (angle % 180) > 90 {
+                flags |= 0b1;
+            }
+            if angle <= 90 || angle > 270 {
+                core::mem::swap(&mut s1, &mut s2);
+                s1.position = 1. - s1.position;
+                s2.position = 1. - s2.position;
+                if idx == 0 {
+                    flags |= 0b100;
+                }
+                if idx == stop_count - 2 {
+                    flags |= 0b010;
+                }
+            } else {
+                if idx == 0 {
+                    flags |= 0b010;
+                }
+                if idx == stop_count - 2 {
+                    flags |= 0b100;
+                }
+            }
+
+            idx += 1;
+
+            let (adjust_left, adjust_right) = if (angle % 180) > 90 {
+                (
+                    (geom.width() * s1.position).floor() as i16,
+                    (geom.width() * (1. - s2.position)).ceil() as i16,
+                )
+            } else {
+                (
+                    (geom.width() * (1. - s2.position)).ceil() as i16,
+                    (geom.width() * s1.position).floor() as i16,
+                )
+            };
+
+            let gr = GradientCommand {
+                color1: s1.color.into(),
+                color2: s2.color.into(),
+                start,
+                flags,
+                top_clip: Length::new(
+                    (clipped.min_y() - geom.min_y() - (geom.height() * s1.position).floor()) as i16,
+                ),
+                bottom_clip: Length::new(
+                    (geom.max_y() - clipped.max_y() - (geom.height() * (1. - s2.position)).ceil())
+                        as i16,
+                ),
+                left_clip: Length::new((clipped.min_x() - geom.min_x()) as i16 - adjust_left),
+                right_clip: Length::new((geom.max_x() - clipped.max_x()) as i16 - adjust_right),
+            };
+
+            let act_rect = clipped.round().cast();
+            let size_y = act_rect.height_length() + gr.top_clip + gr.bottom_clip;
+            let size_x = act_rect.width_length() + gr.left_clip + gr.right_clip;
+            if size_x.get() == 0 || size_y.get() == 0 {
+                // the position are too close to each other
+                // FIXME: For the first or the last, we should draw a plain color to the end
+                continue;
+            }
+
+            processor.process_gradient(act_rect, gr);
+        }
+        Color::default()
+    } else {
+        alpha_color(args.background.color(), args.alpha)
+    };
+
+    let mut border_color =
+        PremultipliedRgbaColor::from(alpha_color(args.border.color(), args.alpha));
+    let color = PremultipliedRgbaColor::from(color);
+    let mut border = PhysicalLength::new(args.border_width as _);
+    if border_color.alpha == 0 {
+        border = PhysicalLength::new(0);
+    } else if border_color.alpha < 255 {
+        // Find a color for the border which is an equivalent to blend the background and then the border.
+        // In the end, the resulting of blending the background and the color is
+        // (A + B) + C, where A is the buffer color, B is the background, and C is the border.
+        // which expands to (A*(1-Bα) + B*Bα)*(1-Cα) + C*Cα = A*(1-(Bα+Cα-Bα*Cα)) + B*Bα*(1-Cα) + C*Cα
+        // so let the new alpha be: Nα = Bα+Cα-Bα*Cα, then this is A*(1-Nα) + N*Nα
+        // with N = (B*Bα*(1-Cα) + C*Cα)/Nα
+        // N being the equivalent color of the border that mixes the background and the border
+        // In pre-multiplied space, the formula simplifies further N' = B'*(1-Cα) + C'
+        let b = border_color;
+        let b_alpha_16 = b.alpha as u16;
+        border_color = PremultipliedRgbaColor {
+            red: ((color.red as u16 * (255 - b_alpha_16)) / 255) as u8 + b.red,
+            green: ((color.green as u16 * (255 - b_alpha_16)) / 255) as u8 + b.green,
+            blue: ((color.blue as u16 * (255 - b_alpha_16)) / 255) as u8 + b.blue,
+            alpha: (color.alpha as u16 + b_alpha_16 - (color.alpha as u16 * b_alpha_16) / 255)
+                as u8,
+        }
+    }
+
+    let radius = PhysicalBorderRadius {
+        top_left: args.top_left_radius as _,
+        top_right: args.top_right_radius as _,
+        bottom_right: args.bottom_right_radius as _,
+        bottom_left: args.bottom_left_radius as _,
+        _unit: Default::default(),
+    };
+
+    if !radius.is_zero() {
+        // Add a small value to make sure that the clip is always positive despite floating point shenanigans
+        const E: f32 = 0.00001;
+
+        processor.process_rounded_rectangle(
+            clipped.round().cast(),
+            RoundedRectangle {
+                radius,
+                width: border,
+                border_color,
+                inner_color: color,
+                top_clip: PhysicalLength::new((clipped.min_y() - geom.min_y() + E) as _),
+                bottom_clip: PhysicalLength::new((geom.max_y() - clipped.max_y() + E) as _),
+                left_clip: PhysicalLength::new((clipped.min_x() - geom.min_x() + E) as _),
+                right_clip: PhysicalLength::new((geom.max_x() - clipped.max_x() + E) as _),
+            },
+        );
+        return;
+    }
+
+    if color.alpha > 0 {
+        if let Some(r) =
+            geom.round().cast().inflate(-border.get(), -border.get()).intersection(clip)
+        {
+            processor.process_simple_rectangle(r, color);
+        }
+    }
+
+    if border_color.alpha > 0 {
+        let mut add_border = |r: PhysicalRect| {
+            if let Some(r) = r.intersection(clip) {
+                processor.process_simple_rectangle(r, border_color);
+            }
+        };
+        let b = border.get();
+        let g = geom.round().cast();
+        add_border(euclid::rect(g.min_x(), g.min_y(), g.width(), b));
+        add_border(euclid::rect(g.min_x(), g.min_y() + g.height() - b, g.width(), b));
+        add_border(euclid::rect(g.min_x(), g.min_y() + b, b, g.height() - b - b));
+        add_border(euclid::rect(g.min_x() + g.width() - b, g.min_y() + b, b, g.height() - b - b));
+    }
 }
 
 struct RenderToBuffer<'a, TargetPixelBuffer> {
@@ -1178,104 +1388,50 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> RenderToBuffer<'_, B> {
     }
 
     fn process_texture_impl(&mut self, geometry: PhysicalRect, texture: SceneTexture<'_>) {
-        self.foreach_region(&geometry, |buffer, rect, extra_left_clip, extra_right_clip| {
-            let tex_src_off_x = (texture.extra.off_x + Fixed::from_integer(extra_left_clip as u16))
-                * Fixed::from_fixed(texture.extra.dx);
-            let tex_src_off_y = (texture.extra.off_y
-                + Fixed::from_integer((rect.origin.y - geometry.origin.y) as u16))
-                * Fixed::from_fixed(texture.extra.dy);
-            if !buffer.draw_texture(
-                rect.origin.x,
-                rect.origin.y,
-                rect.size.width,
-                rect.size.height,
-                target_pixel_buffer::Texture {
-                    bytes: texture.data,
-                    pixel_format: texture.format,
-                    pixel_stride: texture.pixel_stride,
-                    width: texture.source_size().width as u16,
-                    height: texture.source_size().height as u16,
-                    delta_x: texture.extra.dx.0,
-                    delta_y: texture.extra.dy.0,
-                    source_offset_x: tex_src_off_x.0,
-                    source_offset_y: tex_src_off_y.0,
-                },
-                texture.extra.colorize.as_argb_encoded(),
-                texture.extra.alpha,
-                texture.extra.rotation,
-                CompositionMode::default(),
-            ) {
-                let begin = rect.min_x();
-                let end = rect.max_x();
-                for l in rect.y_range() {
-                    draw_functions::draw_texture_line(
-                        &geometry,
-                        PhysicalLength::new(l),
-                        &texture,
-                        &mut buffer.line_slice(l as usize)[begin as usize..end as usize],
-                        extra_left_clip,
-                        extra_right_clip,
-                    );
-                }
-            }
+        self.foreach_ranges(&geometry, |line, buffer, extra_left_clip, extra_right_clip| {
+            draw_functions::draw_texture_line(
+                &geometry,
+                PhysicalLength::new(line),
+                &texture,
+                buffer,
+                extra_left_clip,
+                extra_right_clip,
+            );
         });
-    }
-
-    fn process_rectangle_impl(
-        &mut self,
-        geometry: PhysicalRect,
-        color: PremultipliedRgbaColor,
-        composition_mode: CompositionMode,
-    ) {
-        self.foreach_region(&geometry, |buffer, rect, _extra_left_clip, _extra_right_clip| {
-            if !buffer.fill_rectangle(
-                rect.origin.x,
-                rect.origin.y,
-                rect.size.width,
-                rect.size.height,
-                color,
-                composition_mode,
-            ) {
-                let begin = rect.min_x();
-                let end = rect.max_x();
-
-                match composition_mode {
-                    CompositionMode::Source => {
-                        let mut fill_col = B::TargetPixel::background();
-                        B::TargetPixel::blend(&mut fill_col, color);
-                        for l in rect.y_range() {
-                            buffer.line_slice(l as usize)[begin as usize..end as usize]
-                                .fill(fill_col)
-                        }
-                    }
-                    CompositionMode::SourceOver => {
-                        for l in rect.y_range() {
-                            <B::TargetPixel>::blend_slice(
-                                &mut buffer.line_slice(l as usize)[begin as usize..end as usize],
-                                color,
-                            )
-                        }
-                    }
-                }
-            }
-        })
     }
 }
 
-impl<T: TargetPixel, B: target_pixel_buffer::TargetPixelBuffer<TargetPixel = T>> ProcessScene
-    for RenderToBuffer<'_, B>
-{
-    fn process_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>) {
-        self.process_texture_impl(geometry, texture)
-    }
-
-    fn process_shared_image_buffer(&mut self, geometry: PhysicalRect, buffer: SharedBufferCommand) {
-        let texture = buffer.as_texture();
+impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<'_, B> {
+    fn process_scene_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>) {
         self.process_texture_impl(geometry, texture);
     }
 
-    fn process_rectangle(&mut self, geometry: PhysicalRect, color: PremultipliedRgbaColor) {
-        self.process_rectangle_impl(geometry, color, CompositionMode::default());
+    fn process_target_texture(
+        &mut self,
+        texture: &target_pixel_buffer::DrawTextureArgs,
+        clip: PhysicalRect,
+    ) {
+        if self.buffer.draw_texture(texture, &self.dirty_region.intersection(&clip)) {
+            return;
+        }
+
+        let Some((texture, geometry)) = SceneTexture::from_target_texture(texture, &clip) else {
+            return;
+        };
+
+        self.process_texture_impl(geometry, texture);
+    }
+
+    fn process_rectangle(
+        &mut self,
+        args: &target_pixel_buffer::DrawRectangleArgs,
+        clip: PhysicalRect,
+    ) {
+        if self.buffer.draw_rectangle(args, &self.dirty_region.intersection(&clip)) {
+            return;
+        }
+
+        process_rectangle_impl(self, args, &clip);
     }
 
     fn process_rounded_rectangle(&mut self, geometry: PhysicalRect, rr: RoundedRectangle) {
@@ -1288,6 +1444,12 @@ impl<T: TargetPixel, B: target_pixel_buffer::TargetPixelBuffer<TargetPixel = T>>
                 extra_left_clip,
                 extra_right_clip,
             );
+        });
+    }
+
+    fn process_simple_rectangle(&mut self, geometry: PhysicalRect, color: PremultipliedRgbaColor) {
+        self.foreach_ranges(&geometry, |_line, buffer, _extra_left_clip, _extra_right_clip| {
+            <B::TargetPixel>::blend_slice(buffer, color)
         });
     }
 
@@ -1311,35 +1473,69 @@ struct PrepareScene {
 }
 
 impl ProcessScene for PrepareScene {
-    fn process_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>) {
-        let size = geometry.size;
-        if !size.is_empty() {
-            let texture_index = self.vectors.textures.len() as u16;
-            self.vectors.textures.push(texture);
-            self.items.push(SceneItem {
-                pos: geometry.origin,
-                size,
-                z: self.items.len() as u16,
-                command: SceneCommand::Texture { texture_index },
-            });
+    fn process_scene_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>) {
+        let texture_index = self.vectors.textures.len() as u16;
+        self.vectors.textures.push(texture);
+        self.items.push(SceneItem {
+            pos: geometry.origin,
+            size: geometry.size,
+            z: self.items.len() as u16,
+            command: SceneCommand::Texture { texture_index },
+        });
+    }
+
+    fn process_target_texture(
+        &mut self,
+        texture: &target_pixel_buffer::DrawTextureArgs,
+        clip: PhysicalRect,
+    ) {
+        let Some((extra, geometry)) = SceneTextureExtra::from_target_texture(texture, &clip) else {
+            return;
+        };
+        match &texture.data {
+            target_pixel_buffer::TextureDataContainer::Static(texture_data) => {
+                let texture_index = self.vectors.textures.len() as u16;
+                let pixel_stride =
+                    (texture_data.byte_stride / texture_data.pixel_format.bpp()) as u16;
+                self.vectors.textures.push(SceneTexture {
+                    data: texture_data.data,
+                    format: texture_data.pixel_format,
+                    pixel_stride,
+                    extra,
+                });
+                self.items.push(SceneItem {
+                    pos: geometry.origin,
+                    size: geometry.size,
+                    z: self.items.len() as u16,
+                    command: SceneCommand::Texture { texture_index },
+                });
+            }
+            target_pixel_buffer::TextureDataContainer::Shared { buffer, source_rect } => {
+                let shared_buffer_index = self.vectors.shared_buffers.len() as u16;
+                self.vectors.shared_buffers.push(SharedBufferCommand {
+                    buffer: buffer.clone(),
+                    source_rect: *source_rect,
+                    extra,
+                });
+                self.items.push(SceneItem {
+                    pos: geometry.origin,
+                    size: geometry.size,
+                    z: self.items.len() as u16,
+                    command: SceneCommand::SharedBuffer { shared_buffer_index },
+                });
+            }
         }
     }
 
-    fn process_shared_image_buffer(&mut self, geometry: PhysicalRect, buffer: SharedBufferCommand) {
-        let size = geometry.size;
-        if !size.is_empty() {
-            let shared_buffer_index = self.vectors.shared_buffers.len() as u16;
-            self.vectors.shared_buffers.push(buffer);
-            self.items.push(SceneItem {
-                pos: geometry.origin,
-                size,
-                z: self.items.len() as u16,
-                command: SceneCommand::SharedBuffer { shared_buffer_index },
-            });
-        }
+    fn process_rectangle(
+        &mut self,
+        args: &target_pixel_buffer::DrawRectangleArgs,
+        clip: PhysicalRect,
+    ) {
+        process_rectangle_impl(self, args, &clip);
     }
 
-    fn process_rectangle(&mut self, geometry: PhysicalRect, color: PremultipliedRgbaColor) {
+    fn process_simple_rectangle(&mut self, geometry: PhysicalRect, color: PremultipliedRgbaColor) {
         let size = geometry.size;
         if !size.is_empty() {
             let z = self.items.len() as u16;
@@ -1438,9 +1634,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             (self.current_state.clip.translate(self.current_state.offset.to_vector()).cast()
                 * self.scale_factor)
                 .round()
-                .cast();
-
-        let tiled_off = tiled.unwrap_or_default();
+                .cast()
+                .transformed(self.rotation);
 
         match image_inner {
             ImageInner::None => (),
@@ -1456,45 +1651,37 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                 let source_to_target_x = source_to_target_x / adjust_x;
                 let source_to_target_y = source_to_target_y / adjust_y;
                 let source_rect =
-                    source_rect.cast::<f32>().scale(adjust_x, adjust_y).round().cast();
-                let Some(dx) = Fixed::from_f32(1. / source_to_target_x) else { return };
-                let Some(dy) = Fixed::from_f32(1. / source_to_target_y) else { return };
+                    source_rect.cast::<f32>().scale(adjust_x, adjust_y).round().to_box2d().cast();
 
                 for t in textures.as_slice() {
+                    let t_rect = t.rect.to_box2d();
                     // That's the source rect in the whole image coordinate
-                    let Some(src_rect) = t.rect.intersection(&source_rect) else { continue };
+                    let Some(src_rect) = t_rect.intersection(&source_rect) else { continue };
 
                     let target_rect = if tiled.is_some() {
-                        // FIXME! there could be gaps between the tiles
                         euclid::Rect::new(offset, fit_size).round().cast::<i32>()
                     } else {
                         // map t.rect to to the target
                         euclid::Rect::<f32, PhysicalPx>::from_untyped(
-                            &src_rect.translate(-source_rect.origin.to_vector()).cast(),
+                            &src_rect.to_rect().translate(-source_rect.min.to_vector()).cast(),
                         )
                         .scale(source_to_target_x, source_to_target_y)
                         .translate(offset.to_vector())
                         .round()
                         .cast::<i32>()
                     };
+                    let target_rect = target_rect.transformed(self.rotation).round();
 
                     let Some(clipped_target) = physical_clip.intersection(&target_rect) else {
                         continue;
                     };
 
-                    let off_x = Fixed::from_integer(tiled_off.x as i32)
-                        + (Fixed::<i32, 8>::from_fixed(dx))
-                            * (clipped_target.origin.x - target_rect.origin.x) as i32;
-                    let off_y = Fixed::from_integer(tiled_off.y as i32)
-                        + (Fixed::<i32, 8>::from_fixed(dy))
-                            * (clipped_target.origin.y - target_rect.origin.y) as i32;
-
-                    let pixel_stride = t.rect.width() as u16;
+                    let pixel_stride = t.rect.width() as usize;
                     let core::ops::Range { start, end } = compute_range_in_buffer(
                         &PhysicalRect::from_untyped(
-                            &src_rect.translate(-t.rect.origin.to_vector()).cast(),
+                            &src_rect.to_rect().translate(-t.rect.origin.to_vector()).cast(),
                         ),
-                        pixel_stride as usize,
+                        pixel_stride,
                     );
                     let bpp = t.format.bpp();
 
@@ -1506,54 +1693,62 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         global_alpha_u16
                     } as u8;
 
-                    self.processor.process_texture(
-                        clipped_target.cast().transformed(self.rotation),
-                        SceneTexture {
-                            data: &data.as_slice()[t.index..][start * bpp..end * bpp],
-                            pixel_stride,
-                            format: t.format,
-                            extra: SceneTextureExtra {
-                                colorize: color,
-                                alpha,
-                                rotation: self.rotation.orientation,
-                                dx,
-                                dy,
-                                off_x: Fixed::try_from_fixed(off_x).unwrap(),
-                                off_y: Fixed::try_from_fixed(off_y).unwrap(),
-                            },
-                        },
-                    );
+                    let tiling = tiled.map(|tile_o| {
+                        let src_o = src_rect.min - source_rect.min;
+                        let gap = (src_o) + (source_rect.max - src_rect.max);
+                        target_pixel_buffer::TilingInfo {
+                            offset_x: ((src_o.x as f32 - tile_o.x as f32) * source_to_target_x)
+                                .round() as _,
+                            offset_y: ((src_o.y as f32 - tile_o.y as f32) * source_to_target_y)
+                                .round() as _,
+                            scale_x: 1. / source_to_target_x,
+                            scale_y: 1. / source_to_target_y,
+                            gap_x: (gap.x as f32 * source_to_target_x).round() as _,
+                            gap_y: (gap.y as f32 * source_to_target_y).round() as _,
+                        }
+                    });
+
+                    let t = target_pixel_buffer::DrawTextureArgs {
+                        data: target_pixel_buffer::TextureDataContainer::Static(
+                            target_pixel_buffer::TextureData::new(
+                                &data.as_slice()[t.index..][start * bpp..end * bpp],
+                                t.format,
+                                pixel_stride * bpp,
+                                src_rect.size().cast(),
+                            ),
+                        ),
+                        colorize: (colorize.alpha() > 0).then_some(colorize),
+                        alpha,
+                        dst_x: target_rect.origin.x as _,
+                        dst_y: target_rect.origin.y as _,
+                        dst_width: target_rect.size.width as _,
+                        dst_height: target_rect.size.height as _,
+                        rotation: self.rotation.orientation,
+                        tiling,
+                    };
+
+                    self.processor.process_target_texture(&t, clipped_target.cast());
                 }
             }
 
             ImageInner::NineSlice(..) => unreachable!(),
             _ => {
-                let target_rect = euclid::Rect::new(offset, fit_size).round().cast();
+                let target_rect =
+                    euclid::Rect::new(offset, fit_size).round().cast().transformed(self.rotation);
                 let Some(clipped_target) = physical_clip.intersection(&target_rect) else {
                     return;
                 };
+
                 let orig = image_inner.size().cast::<f32>();
                 let svg_target_size = if tiled.is_some() {
                     euclid::size2(orig.width * source_to_target_x, orig.height * source_to_target_y)
+                        .round()
                         .cast()
                 } else {
                     target_rect.size.cast()
                 };
                 if let Some(buffer) = image_inner.render_to_buffer(Some(svg_target_size)) {
                     let buf_size = buffer.size().cast::<f32>();
-                    let dx =
-                        Fixed::from_f32(buf_size.width / orig.width / source_to_target_x).unwrap();
-                    let dy = Fixed::from_f32(buf_size.height / orig.height / source_to_target_y)
-                        .unwrap();
-
-                    let off_x = (Fixed::<i32, 8>::from_fixed(dx))
-                        * (clipped_target.origin.x - target_rect.origin.x) as i32
-                        + Fixed::from_f32(tiled_off.x as f32 * buf_size.width / orig.width)
-                            .unwrap();
-                    let off_y = (Fixed::<i32, 8>::from_fixed(dy))
-                        * (clipped_target.origin.y - target_rect.origin.y) as i32
-                        + Fixed::from_f32(tiled_off.y as f32 * buf_size.height / orig.height)
-                            .unwrap();
 
                     let alpha = if colorize.alpha() > 0 {
                         colorize.alpha() as u16 * global_alpha_u16 / 255
@@ -1561,9 +1756,17 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         global_alpha_u16
                     } as u8;
 
-                    self.processor.process_shared_image_buffer(
-                        clipped_target.cast().transformed(self.rotation),
-                        SharedBufferCommand {
+                    let tiling = tiled.map(|tile_o| target_pixel_buffer::TilingInfo {
+                        offset_x: (tile_o.x as f32 * -source_to_target_x).round() as _,
+                        offset_y: (tile_o.y as f32 * -source_to_target_y).round() as _,
+                        scale_x: 1. / source_to_target_x,
+                        scale_y: 1. / source_to_target_y,
+                        gap_x: 0,
+                        gap_y: 0,
+                    });
+
+                    let t = target_pixel_buffer::DrawTextureArgs {
+                        data: target_pixel_buffer::TextureDataContainer::Shared {
                             buffer: SharedBufferData::SharedImage(buffer),
                             source_rect: PhysicalRect::from_untyped(
                                 &source_rect
@@ -1575,18 +1778,18 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                     .round()
                                     .cast(),
                             ),
-
-                            extra: SceneTextureExtra {
-                                colorize,
-                                alpha,
-                                rotation: self.rotation.orientation,
-                                dx,
-                                dy,
-                                off_x: Fixed::try_from_fixed(off_x).unwrap(),
-                                off_y: Fixed::try_from_fixed(off_y).unwrap(),
-                            },
                         },
-                    );
+                        colorize: (colorize.alpha() > 0).then_some(colorize),
+                        alpha,
+                        dst_x: target_rect.origin.x as _,
+                        dst_y: target_rect.origin.y as _,
+                        dst_width: target_rect.size.width as _,
+                        dst_height: target_rect.size.height as _,
+                        rotation: self.rotation.orientation,
+                        tiling,
+                    };
+
+                    self.processor.process_target_texture(&t, clipped_target.cast());
                 } else {
                     unimplemented!("The image cannot be rendered")
                 }
@@ -1618,8 +1821,11 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         if let Some(clipped_src) = geometry.intersection(&physical_clip.cast()) {
                             let geometry =
                                 clipped_src.translate(offset.cast()).transformed(self.rotation);
-                            self.processor
-                                .process_rectangle(geometry, selection.selection_background.into());
+                            let args = target_pixel_buffer::DrawRectangleArgs::from_rect(
+                                geometry.cast(),
+                                selection.selection_background.into(),
+                            );
+                            self.processor.process_rectangle(&args, geometry);
                         }
                     }
                     let scale_delta = paragraph.layout.font.scale_delta();
@@ -1651,42 +1857,28 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         let Some(clipped_target) = physical_clip.intersection(&target_rect) else {
                             continue;
                         };
-                        let geometry = clipped_target.translate(offset).round();
-                        let origin = (geometry.origin - offset.round()).round().cast::<i16>();
-                        let off_x = origin.x - target_rect.origin.x as i16;
-                        let off_y = origin.y - target_rect.origin.y as i16;
-                        let pixel_stride = glyph.pixel_stride;
-                        let mut geometry = geometry.cast();
-                        if geometry.size.width > glyph.width.get() - off_x {
-                            geometry.size.width = glyph.width.get() - off_x
-                        }
-                        if geometry.size.height > glyph.height.get() - off_y {
-                            geometry.size.height = glyph.height.get() - off_y
-                        }
-                        let source_size = geometry.size;
-                        if source_size.is_empty() {
-                            continue;
-                        }
 
-                        match &glyph.alpha_map {
+                        let data = match &glyph.alpha_map {
                             fonts::GlyphAlphaMap::Static(data) => {
-                                let texture = if !glyph.sdf {
-                                    SceneTexture {
-                                        data,
-                                        pixel_stride,
-                                        format: TexturePixelFormat::AlphaMap,
-                                        extra: SceneTextureExtra {
-                                            colorize: color,
-                                            // color already is mixed with global alpha
-                                            alpha: color.alpha(),
-                                            rotation: self.rotation.orientation,
-                                            dx: Fixed::from_integer(1),
-                                            dy: Fixed::from_integer(1),
-                                            off_x: Fixed::from_integer(off_x as u16),
-                                            off_y: Fixed::from_integer(off_y as u16),
-                                        },
+                                if glyph.sdf {
+                                    let geometry = clipped_target.translate(offset).round();
+                                    let origin =
+                                        (geometry.origin - offset.round()).round().cast::<i16>();
+                                    let off_x = origin.x - target_rect.origin.x as i16;
+                                    let off_y = origin.y - target_rect.origin.y as i16;
+                                    let pixel_stride = glyph.pixel_stride;
+                                    let mut geometry = geometry.cast();
+                                    if geometry.size.width > glyph.width.get() - off_x {
+                                        geometry.size.width = glyph.width.get() - off_x
                                     }
-                                } else {
+                                    if geometry.size.height > glyph.height.get() - off_y {
+                                        geometry.size.height = glyph.height.get() - off_y
+                                    }
+                                    let source_size = geometry.size;
+                                    if source_size.is_empty() {
+                                        continue;
+                                    }
+
                                     let delta32 = Fixed::<i32, 8>::from_fixed(scale_delta);
                                     let normalize = |x: Fixed<i32, 8>| {
                                         if x < Fixed::from_integer(0) {
@@ -1702,7 +1894,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                     let fract_y =
                                         normalize(glyph.y - Fixed::from_integer(gl_y.get() as _));
                                     let off_y = delta32 * off_y as i32 + fract_y;
-                                    SceneTexture {
+                                    let texture = SceneTexture {
                                         data,
                                         pixel_stride,
                                         format: TexturePixelFormat::SignedDistanceField,
@@ -1716,35 +1908,52 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                             off_x: Fixed::try_from_fixed(off_x).unwrap(),
                                             off_y: Fixed::try_from_fixed(off_y).unwrap(),
                                         },
-                                    }
+                                    };
+                                    self.processor.process_scene_texture(
+                                        geometry.transformed(self.rotation),
+                                        texture,
+                                    );
+                                    continue;
                                 };
-                                self.processor
-                                    .process_texture(geometry.transformed(self.rotation), texture);
+
+                                target_pixel_buffer::TextureDataContainer::Static(
+                                    target_pixel_buffer::TextureData::new(
+                                        data,
+                                        TexturePixelFormat::AlphaMap,
+                                        glyph.pixel_stride as usize,
+                                        euclid::size2(glyph.width.get(), glyph.height.get()).cast(),
+                                    ),
+                                )
                             }
                             fonts::GlyphAlphaMap::Shared(data) => {
                                 let source_rect = euclid::rect(0, 0, glyph.width.0, glyph.height.0);
-                                self.processor.process_shared_image_buffer(
-                                    geometry.transformed(self.rotation),
-                                    SharedBufferCommand {
-                                        buffer: SharedBufferData::AlphaMap {
-                                            data: data.clone(),
-                                            width: pixel_stride,
-                                        },
-                                        source_rect,
-                                        extra: SceneTextureExtra {
-                                            colorize: color,
-                                            // color already is mixed with global alpha
-                                            alpha: color.alpha(),
-                                            rotation: self.rotation.orientation,
-                                            dx: Fixed::from_integer(1),
-                                            dy: Fixed::from_integer(1),
-                                            off_x: Fixed::from_integer(off_x as u16),
-                                            off_y: Fixed::from_integer(off_y as u16),
-                                        },
+                                target_pixel_buffer::TextureDataContainer::Shared {
+                                    buffer: SharedBufferData::AlphaMap {
+                                        data: data.clone(),
+                                        width: glyph.pixel_stride,
                                     },
-                                );
+                                    source_rect,
+                                }
                             }
-                        }
+                        };
+                        let clipped_target =
+                            clipped_target.translate(offset).round().transformed(self.rotation);
+                        let target_rect =
+                            target_rect.translate(offset).round().transformed(self.rotation);
+                        let t = target_pixel_buffer::DrawTextureArgs {
+                            data,
+                            colorize: Some(color),
+                            // color already is mixed with global alpha
+                            alpha: color.alpha(),
+                            dst_x: target_rect.origin.x as _,
+                            dst_y: target_rect.origin.y as _,
+                            dst_width: target_rect.size.width as _,
+                            dst_height: target_rect.size.height as _,
+                            rotation: self.rotation.orientation,
+                            tiling: None,
+                        };
+
+                        self.processor.process_target_texture(&t, clipped_target.cast());
                     }
                     core::ops::ControlFlow::Continue(())
                 },
@@ -1768,6 +1977,19 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
     }
 }
 
+fn alpha_color(color: Color, alpha: u8) -> Color {
+    if alpha < 255 {
+        Color::from_argb_u8(
+            ((color.alpha() as u32 * alpha as u32) / 255) as u8,
+            color.red(),
+            color.green(),
+            color.blue(),
+        )
+    } else {
+        color
+    }
+}
+
 struct SelectionInfo {
     selection_color: Color,
     selection_background: Color,
@@ -1782,7 +2004,6 @@ struct RenderState {
 }
 
 impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T> {
-    #[allow(clippy::unnecessary_cast)] // Coord!
     fn draw_rectangle(
         &mut self,
         rect: Pin<&dyn RenderRectangle>,
@@ -1792,124 +2013,25 @@ impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T
     ) {
         let geom = LogicalRect::from(size);
         if self.should_draw(&geom) {
-            let clipped = match geom.intersection(&self.current_state.clip) {
-                Some(geom) => geom,
-                None => return,
-            };
+            let geom = (geom.translate(self.current_state.offset.to_vector()).cast()
+                * self.scale_factor)
+                .transformed(self.rotation);
 
-            let background = rect.background();
-            if let Brush::LinearGradient(g) = background {
-                let geom2 = (geom.cast() * self.scale_factor).transformed(self.rotation);
-                let clipped2 = (clipped.cast() * self.scale_factor).transformed(self.rotation);
-                let act_rect = (clipped.translate(self.current_state.offset.to_vector()).cast()
+            let clipped =
+                (self.current_state.clip.translate(self.current_state.offset.to_vector()).cast()
                     * self.scale_factor)
                     .round()
                     .cast()
                     .transformed(self.rotation);
-                let axis_angle = (360. - self.rotation.orientation.angle()) % 360.;
-                let angle = g.angle() - axis_angle;
-                let tan = angle.to_radians().tan().abs();
-                let start = if !tan.is_finite() {
-                    255.
-                } else {
-                    let h = tan * geom2.width() as f32;
-                    255. * h / (h + geom2.height() as f32)
-                } as u8;
-                let mut angle = angle as i32 % 360;
-                if angle < 0 {
-                    angle += 360;
-                }
-                let mut stops = g.stops().copied().peekable();
-                let mut idx = 0;
-                let stop_count = g.stops().count();
-                while let (Some(mut s1), Some(mut s2)) = (stops.next(), stops.peek().copied()) {
-                    let mut flags = 0;
-                    if (angle % 180) > 90 {
-                        flags |= 0b1;
-                    }
-                    if angle <= 90 || angle > 270 {
-                        core::mem::swap(&mut s1, &mut s2);
-                        s1.position = 1. - s1.position;
-                        s2.position = 1. - s2.position;
-                        if idx == 0 {
-                            flags |= 0b100;
-                        }
-                        if idx == stop_count - 2 {
-                            flags |= 0b010;
-                        }
-                    } else {
-                        if idx == 0 {
-                            flags |= 0b010;
-                        }
-                        if idx == stop_count - 2 {
-                            flags |= 0b100;
-                        }
-                    }
 
-                    idx += 1;
-
-                    let (adjust_left, adjust_right) = if (angle % 180) > 90 {
-                        (
-                            (geom2.width() * s1.position).floor() as i16,
-                            (geom2.width() * (1. - s2.position)).ceil() as i16,
-                        )
-                    } else {
-                        (
-                            (geom2.width() * (1. - s2.position)).ceil() as i16,
-                            (geom2.width() * s1.position).floor() as i16,
-                        )
-                    };
-
-                    let gr = GradientCommand {
-                        color1: self.alpha_color(s1.color).into(),
-                        color2: self.alpha_color(s2.color).into(),
-                        start,
-                        flags,
-                        top_clip: Length::new(
-                            (clipped2.min_y() - geom2.min_y()) as i16
-                                - (geom2.height() * s1.position).floor() as i16,
-                        ),
-                        bottom_clip: Length::new(
-                            (geom2.max_y() - clipped2.max_y()) as i16
-                                - (geom2.height() * (1. - s2.position)).ceil() as i16,
-                        ),
-                        left_clip: Length::new(
-                            (clipped2.min_x() - geom2.min_x()) as i16 - adjust_left,
-                        ),
-                        right_clip: Length::new(
-                            (geom2.max_x() - clipped2.max_x()) as i16 - adjust_right,
-                        ),
-                    };
-
-                    let size_y = act_rect.height_length() + gr.top_clip + gr.bottom_clip;
-                    let size_x = act_rect.width_length() + gr.left_clip + gr.right_clip;
-                    if size_x.get() == 0 || size_y.get() == 0 {
-                        // the position are too close to each other
-                        // FIXME: For the first or the last, we should draw a plain color to the end
-                        continue;
-                    }
-
-                    self.processor.process_gradient(act_rect, gr);
-                }
-                return;
-            }
-
-            let color = self.alpha_color(background.color());
-
-            if color.alpha() == 0 {
-                return;
-            }
-            let geometry = (clipped.translate(self.current_state.offset.to_vector()).cast()
-                * self.scale_factor)
-                .round()
-                .cast()
-                .transformed(self.rotation);
-
-            self.processor.process_rectangle(geometry, color.into());
+            let mut args =
+                target_pixel_buffer::DrawRectangleArgs::from_rect(geom, rect.background());
+            args.alpha = (self.current_state.alpha * 255.) as u8;
+            args.rotation = self.rotation.orientation;
+            self.processor.process_rectangle(&args, clipped);
         }
     }
 
-    #[allow(clippy::unnecessary_cast)] // Coord
     fn draw_border_rectangle(
         &mut self,
         rect: Pin<&dyn RenderBorderRectangle>,
@@ -1919,125 +2041,43 @@ impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T
     ) {
         let geom = LogicalRect::from(size);
         if self.should_draw(&geom) {
-            let mut border = rect.border_width();
-            let radius = rect.border_radius();
-            // FIXME: gradients
-            let color = self.alpha_color(rect.background().color());
-            let border_color = if border.get() as f32 > 0.01 {
-                self.alpha_color(rect.border_color().color())
-            } else {
-                Color::default()
+            let geom = (geom.translate(self.current_state.offset.to_vector()).cast()
+                * self.scale_factor)
+                .transformed(self.rotation);
+
+            let clipped =
+                (self.current_state.clip.translate(self.current_state.offset.to_vector()).cast()
+                    * self.scale_factor)
+                    .round()
+                    .cast()
+                    .transformed(self.rotation);
+
+            let radius = (rect.border_radius().cast() * self.scale_factor)
+                .transformed(self.rotation)
+                .min(BorderRadius::from_length(geom.width_length() / 2.))
+                .min(BorderRadius::from_length(geom.height_length() / 2.));
+
+            let border = rect.border_width().cast() * self.scale_factor;
+            let border_color =
+                if border.get() > 0.01 { rect.border_color() } else { Default::default() };
+
+            let args = target_pixel_buffer::DrawRectangleArgs {
+                x: geom.origin.x,
+                y: geom.origin.y,
+                width: geom.size.width,
+                height: geom.size.height,
+                top_left_radius: radius.top_left,
+                top_right_radius: radius.top_right,
+                bottom_right_radius: radius.bottom_right,
+                bottom_left_radius: radius.bottom_left,
+                border_width: border.get(),
+                background: rect.background(),
+                border: border_color,
+                alpha: (self.current_state.alpha * 255.) as u8,
+                rotation: self.rotation.orientation,
             };
 
-            let mut border_color = PremultipliedRgbaColor::from(border_color);
-            let color = PremultipliedRgbaColor::from(color);
-            if border_color.alpha == 0 {
-                border = LogicalLength::new(0 as _);
-            } else if border_color.alpha < 255 {
-                // Find a color for the border which is an equivalent to blend the background and then the border.
-                // In the end, the resulting of blending the background and the color is
-                // (A + B) + C, where A is the buffer color, B is the background, and C is the border.
-                // which expands to (A*(1-Bα) + B*Bα)*(1-Cα) + C*Cα = A*(1-(Bα+Cα-Bα*Cα)) + B*Bα*(1-Cα) + C*Cα
-                // so let the new alpha be: Nα = Bα+Cα-Bα*Cα, then this is A*(1-Nα) + N*Nα
-                // with N = (B*Bα*(1-Cα) + C*Cα)/Nα
-                // N being the equivalent color of the border that mixes the background and the border
-                // In pre-multiplied space, the formula simplifies further N' = B'*(1-Cα) + C'
-                let b = border_color;
-                let b_alpha_16 = b.alpha as u16;
-                border_color = PremultipliedRgbaColor {
-                    red: ((color.red as u16 * (255 - b_alpha_16)) / 255) as u8 + b.red,
-                    green: ((color.green as u16 * (255 - b_alpha_16)) / 255) as u8 + b.green,
-                    blue: ((color.blue as u16 * (255 - b_alpha_16)) / 255) as u8 + b.blue,
-                    alpha: (color.alpha as u16 + b_alpha_16
-                        - (color.alpha as u16 * b_alpha_16) / 255) as u8,
-                }
-            }
-
-            if !radius.is_zero() {
-                let radius = radius
-                    .min(LogicalBorderRadius::from_length(geom.width_length() / 2 as Coord))
-                    .min(LogicalBorderRadius::from_length(geom.height_length() / 2 as Coord));
-                if let Some(clipped) = geom.intersection(&self.current_state.clip) {
-                    let geom2 = (geom.cast() * self.scale_factor).transformed(self.rotation);
-                    let clipped2 = (clipped.cast() * self.scale_factor).transformed(self.rotation);
-                    let geometry =
-                        (clipped.translate(self.current_state.offset.to_vector()).cast()
-                            * self.scale_factor)
-                            .round()
-                            .cast()
-                            .transformed(self.rotation);
-                    let radius =
-                        (radius.cast() * self.scale_factor).cast().transformed(self.rotation);
-                    // Add a small value to make sure that the clip is always positive despite floating point shenanigans
-                    const E: f32 = 0.00001;
-
-                    self.processor.process_rounded_rectangle(
-                        geometry,
-                        RoundedRectangle {
-                            radius,
-                            width: (border.cast() * self.scale_factor).cast(),
-                            border_color,
-                            inner_color: color,
-                            top_clip: PhysicalLength::new(
-                                (clipped2.min_y() - geom2.min_y() + E) as _,
-                            ),
-                            bottom_clip: PhysicalLength::new(
-                                (geom2.max_y() - clipped2.max_y() + E) as _,
-                            ),
-                            left_clip: PhysicalLength::new(
-                                (clipped2.min_x() - geom2.min_x() + E) as _,
-                            ),
-                            right_clip: PhysicalLength::new(
-                                (geom2.max_x() - clipped2.max_x() + E) as _,
-                            ),
-                        },
-                    );
-                }
-                return;
-            }
-
-            if color.alpha > 0 {
-                if let Some(r) = geom
-                    .inflate(-border.get(), -border.get())
-                    .intersection(&self.current_state.clip)
-                {
-                    let geometry = (r.translate(self.current_state.offset.to_vector()).cast()
-                        * self.scale_factor)
-                        .round()
-                        .cast()
-                        .transformed(self.rotation);
-                    self.processor.process_rectangle(geometry, color);
-                }
-            }
-
-            // FIXME: gradients
-            if border_color.alpha > 0 {
-                let mut add_border = |r: LogicalRect| {
-                    if let Some(r) = r.intersection(&self.current_state.clip) {
-                        let geometry =
-                            (r.translate(self.current_state.offset.to_vector()).try_cast()?
-                                * self.scale_factor)
-                                .round()
-                                .try_cast()?
-                                .transformed(self.rotation);
-                        self.processor.process_rectangle(geometry, border_color);
-                    }
-                    Some(())
-                };
-                let b = border.get();
-                let err = || {
-                    panic!(
-                        "invalid border rectangle {geom:?} border={b} state={:?}",
-                        self.current_state
-                    )
-                };
-                add_border(euclid::rect(0 as _, 0 as _, geom.width(), b)).unwrap_or_else(err);
-                add_border(euclid::rect(0 as _, geom.height() - b, geom.width(), b))
-                    .unwrap_or_else(err);
-                add_border(euclid::rect(0 as _, b, b, geom.height() - b - b)).unwrap_or_else(err);
-                add_border(euclid::rect(geom.width() - b, b, b, geom.height() - b - b))
-                    .unwrap_or_else(err);
-            }
+            self.processor.process_rectangle(&args, clipped);
         }
     }
 
@@ -2280,7 +2320,11 @@ impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T
                         cursor_color = color;
                     }
                 }
-                self.processor.process_rectangle(geometry, self.alpha_color(cursor_color).into());
+                let args = target_pixel_buffer::DrawRectangleArgs::from_rect(
+                    geometry.cast(),
+                    self.alpha_color(cursor_color).into(),
+                );
+                self.processor.process_rectangle(&args, geometry);
             }
         }
     }
@@ -2372,22 +2416,22 @@ impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T
                     )
                     .round_in();
 
-                self.processor.process_shared_image_buffer(
-                    geometry.cast().transformed(self.rotation),
-                    SharedBufferCommand {
+                let t = target_pixel_buffer::DrawTextureArgs {
+                    data: target_pixel_buffer::TextureDataContainer::Shared {
                         buffer: SharedBufferData::SharedImage(img),
                         source_rect,
-                        extra: SceneTextureExtra {
-                            colorize: Default::default(),
-                            alpha: (self.current_state.alpha * 255.) as u8,
-                            rotation: self.rotation.orientation,
-                            dx: Fixed::from_integer(1),
-                            dy: Fixed::from_integer(1),
-                            off_x: Fixed::from_integer(clipped_src.min_x() as _),
-                            off_y: Fixed::from_integer(clipped_src.min_y() as _),
-                        },
                     },
-                );
+                    colorize: None,
+                    alpha: (self.current_state.alpha * 255.) as u8,
+                    dst_x: self.current_state.offset.x as _,
+                    dst_y: self.current_state.offset.y as _,
+                    dst_width: width as _,
+                    dst_height: height as _,
+                    rotation: self.rotation.orientation,
+                    tiling: None,
+                };
+                self.processor
+                    .process_target_texture(&t, geometry.cast().transformed(self.rotation));
             }
         });
     }

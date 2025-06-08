@@ -67,6 +67,7 @@ pub struct PropertyInformation {
     pub name: SmolStr,
     pub priority: u32,
     pub ty: Type,
+    pub visibility: PropertyVisibility,
     pub declared_at: Option<DeclarationInformation>,
     /// Range of the binding in the element source file, if it exist
     pub defined_at: Option<DefinitionInformation>,
@@ -85,6 +86,7 @@ pub struct ElementInformation {
 
 #[derive(Clone, Debug)]
 pub struct QueryPropertyResponse {
+    pub element_rc_node: common::ElementRcNode,
     pub properties: Vec<PropertyInformation>,
     pub element: Option<ElementInformation>,
     pub source_uri: String,
@@ -105,6 +107,7 @@ fn get_reserved_properties<'a>(
             name: p.0.into(),
             priority: DEFAULT_PRIORITY,
             ty: p.1,
+            visibility: PropertyVisibility::InOut,
             declared_at: None,
             defined_at: None,
             default_value: None,
@@ -144,14 +147,22 @@ fn add_element_properties(
             return None;
         }
 
-        let declared_at = value.type_node().as_ref().map(|n| DeclarationInformation {
-            path: n.source_file.path().to_path_buf(),
-            start_position: n.text_range().start(),
+        let declared_at = value.node.as_ref().map(|n| {
+            let decl = syntax_nodes::PropertyDeclaration::new(n.clone());
+
+            let ty_node: SyntaxNode =
+                decl.as_ref().and_then(|d| d.Type()).map(|t| t.into()).unwrap_or(n.clone());
+
+            DeclarationInformation {
+                path: n.source_file.path().to_path_buf(),
+                start_position: ty_node.text_range().start(),
+            }
         });
         Some(PropertyInformation {
             name: name.clone(),
             priority: DEFAULT_PRIORITY,
             ty: value.property_type.clone(),
+            visibility: value.visibility,
             declared_at,
             defined_at: None,
             default_value: None,
@@ -401,6 +412,7 @@ pub(super) fn get_properties(
                         name: k.clone(),
                         priority,
                         ty: t.ty.clone(),
+                        visibility: t.property_visibility,
                         declared_at: None,
                         defined_at: None,
                         default_value: t.default_value.expr(&current_element),
@@ -414,6 +426,7 @@ pub(super) fn get_properties(
                         name: "clip".into(),
                         priority: DEFAULT_PRIORITY,
                         ty: Type::Bool,
+                        visibility: PropertyVisibility::InOut,
                         declared_at: None,
                         defined_at: None,
                         default_value: Some(Expression::BoolLiteral(false)),
@@ -434,6 +447,7 @@ pub(super) fn get_properties(
                     name: "opacity".into(),
                     priority: DEFAULT_PRIORITY,
                     ty: Type::Float32,
+                    visibility: PropertyVisibility::InOut,
                     declared_at: None,
                     defined_at: None,
                     default_value: Some(Expression::NumberLiteral(1.0, Unit::None)),
@@ -444,6 +458,7 @@ pub(super) fn get_properties(
                     name: "visible".into(),
                     priority: DEFAULT_PRIORITY,
                     ty: Type::Bool,
+                    visibility: PropertyVisibility::InOut,
                     declared_at: None,
                     defined_at: None,
                     default_value: Some(Expression::BoolLiteral(true)),
@@ -527,6 +542,7 @@ pub(super) fn get_properties(
             ty: Type::Enumeration(
                 i_slint_compiler::typeregister::BUILTIN.with(|e| e.enums.AccessibleRole.clone()),
             ),
+            visibility: PropertyVisibility::InOut,
             declared_at: None,
             defined_at: None,
             default_value: None,
@@ -575,6 +591,7 @@ pub(crate) fn query_properties(
     in_layout: LayoutKind,
 ) -> Result<QueryPropertyResponse> {
     Ok(QueryPropertyResponse {
+        element_rc_node: element.clone(),
         properties: get_properties(element, in_layout),
         element: Some(get_element_information(element)),
         source_uri: uri.to_string(),
@@ -812,7 +829,7 @@ pub fn remove_binding(
                             .and_then(|t| {
                                 if t.kind() == SyntaxKind::Whitespace && t.text().contains('\n') {
                                     let to_sub =
-                                        t.text().split('\n').last().unwrap_or_default().len()
+                                        t.text().split('\n').next_back().unwrap_or_default().len()
                                             as u32;
                                     start.checked_sub(to_sub.into())
                                 } else {
