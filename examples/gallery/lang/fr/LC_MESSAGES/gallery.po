@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-05-16 03:37+0000\n"
+"POT-Creation-Date: 2025-06-09 03:47+0000\n"
 "PO-Revision-Date: 2023-06-06 13:52+0000\n"
 "Last-Translator: Olivier Goffart <olivier.goffart@slint-ui.com>, 2023\n"
 "Language-Team: French (https://app.transifex.com/slint/teams/170022/fr/)\n"
@@ -41,22 +41,28 @@ msgctxt "EasingsPage"
 msgid "Duration:"
 msgstr ""
 
-#: ui/pages/page.slint:27
+#: ui/pages/page.slint:28
 msgctxt "Page"
 msgid "Widgets enabled"
 msgstr "Widgets activés"
 
-#: ui/pages/page.slint:34
+#: ui/pages/page.slint:35
+#, fuzzy
+msgctxt "Page"
+msgid "Widgets read-only"
+msgstr "Widgets activés"
+
+#: ui/pages/page.slint:42
 msgctxt "Page"
 msgid "Dark Mode"
 msgstr ""
 
-#: ui/pages/table_view_page.slint:25
+#: ui/pages/table_view_page.slint:26
 msgctxt "TableViewPage"
 msgid "TableView"
 msgstr "TableView"
 
-#: ui/pages/table_view_page.slint:27
+#: ui/pages/table_view_page.slint:28
 msgctxt "TableViewPage"
 msgid ""
 "StandardTableView can be used to display a list of text elements in columns "
@@ -65,37 +71,37 @@ msgstr ""
 "StandardTableView peut être utilisé pour afficher une liste d'éléments et "
 "colonnes"
 
-#: ui/pages/table_view_page.slint:33
+#: ui/pages/table_view_page.slint:34
 msgctxt "TableViewPage"
 msgid "StandardTableView"
 msgstr "StandardTableView"
 
-#: ui/pages/table_view_page.slint:51
+#: ui/pages/table_view_page.slint:52
 msgctxt "TableViewPage"
 msgid "Header 1"
 msgstr "En-tête 1"
 
-#: ui/pages/table_view_page.slint:52
+#: ui/pages/table_view_page.slint:53
 msgctxt "TableViewPage"
 msgid "Header 2"
 msgstr "En-tête 2"
 
-#: ui/pages/table_view_page.slint:53
+#: ui/pages/table_view_page.slint:54
 msgctxt "TableViewPage"
 msgid "Header 3"
 msgstr "En-tête 3"
 
-#: ui/pages/table_view_page.slint:54
+#: ui/pages/table_view_page.slint:55
 msgctxt "TableViewPage"
 msgid "Header 4"
 msgstr "En-tête 4"
 
-#: ui/pages/table_view_page.slint:61
+#: ui/pages/table_view_page.slint:62
 msgctxt "TableViewPage"
 msgid "Filter by Header 1:"
 msgstr ""
 
-#: ui/pages/table_view_page.slint:65
+#: ui/pages/table_view_page.slint:66
 #, fuzzy
 msgctxt "TableViewPage"
 msgid "Enter filter text"
@@ -211,7 +217,7 @@ msgctxt "ControlsPage"
 msgid "Controls"
 msgstr "Contrôles"
 
-#: ui/pages/controls_page.slint:11
+#: ui/pages/controls_page.slint:12
 msgctxt "ControlsPage"
 msgid ""
 "This page gives an overview of the default widget set provided by Slint. The "
@@ -223,151 +229,151 @@ msgstr ""
 "sont disponible dans différent styles, fluent-(dark/light) and material-"
 "(dark/light). Les widgets peuvent être importés debuis \"std-widgets.slint\"."
 
-#: ui/pages/controls_page.slint:15
+#: ui/pages/controls_page.slint:16
 msgctxt "ControlsPage"
 msgid "Buttons"
 msgstr "Boutons"
 
-#: ui/pages/controls_page.slint:24
+#: ui/pages/controls_page.slint:25
 msgctxt "ControlsPage"
 msgid "Regular Button"
 msgstr "Bouton normal"
 
-#: ui/pages/controls_page.slint:29
+#: ui/pages/controls_page.slint:30
 msgctxt "ControlsPage"
 msgid "Primary Button with Icon"
 msgstr "Bouton avec une icone"
 
-#: ui/pages/controls_page.slint:43
+#: ui/pages/controls_page.slint:44
 msgctxt "ControlsPage"
 msgid "ON"
 msgstr "ON"
 
-#: ui/pages/controls_page.slint:43
+#: ui/pages/controls_page.slint:44
 msgctxt "ControlsPage"
 msgid "OFF"
 msgstr "OFF"
 
-#: ui/pages/controls_page.slint:52
+#: ui/pages/controls_page.slint:53
 #, fuzzy
 msgctxt "ControlsPage"
 msgid "Primary Button with colorized icon"
 msgstr "Bouton avec une icone"
 
-#: ui/pages/controls_page.slint:63
+#: ui/pages/controls_page.slint:64
 #, fuzzy
 msgctxt "ControlsPage"
 msgid "CheckBox - ComboBox - Switch"
 msgstr "CheckBox - SpinBox - ComboBox - Switch"
 
-#: ui/pages/controls_page.slint:71
+#: ui/pages/controls_page.slint:72
 msgctxt "ControlsPage"
 msgid "(checked)"
 msgstr "(coché)"
 
-#: ui/pages/controls_page.slint:71
+#: ui/pages/controls_page.slint:72
 msgctxt "ControlsPage"
 msgid "(unchecked)"
 msgstr "(non-coché)"
 
-#: ui/pages/controls_page.slint:77
+#: ui/pages/controls_page.slint:78
 msgctxt "ControlsPage"
 msgid "Select Something"
 msgstr "Selectionne quelque chose"
 
-#: ui/pages/controls_page.slint:77
+#: ui/pages/controls_page.slint:78
 msgctxt "ControlsPage"
 msgid "From this"
 msgstr "dans cette"
 
-#: ui/pages/controls_page.slint:77
+#: ui/pages/controls_page.slint:78
 msgctxt "ControlsPage"
 msgid "Combobox"
 msgstr "Combobox"
 
-#: ui/pages/controls_page.slint:82
+#: ui/pages/controls_page.slint:83
 msgctxt "ControlsPage"
 msgid "Flight Mode"
 msgstr "Mode Avion"
 
-#: ui/pages/controls_page.slint:90
+#: ui/pages/controls_page.slint:91
 #, fuzzy
 msgctxt "ControlsPage"
 msgid "LineEdit - SpinBox - TimePickerPopup - DatePickerPopup"
 msgstr "LineEdit"
 
-#: ui/pages/controls_page.slint:98
+#: ui/pages/controls_page.slint:99
 msgctxt "ControlsPage"
 msgid "Enter some text"
 msgstr "Entrez du texte"
 
-#: ui/pages/controls_page.slint:109
+#: ui/pages/controls_page.slint:111
 msgctxt "ControlsPage"
 msgid "Open TimePickerPopup"
 msgstr ""
 
-#: ui/pages/controls_page.slint:117
+#: ui/pages/controls_page.slint:119
 msgctxt "ControlsPage"
 msgid "Open DatePickerPopup"
 msgstr ""
 
-#: ui/pages/controls_page.slint:127
+#: ui/pages/controls_page.slint:129
 msgctxt "ControlsPage"
 msgid "Slider"
 msgstr "Slider"
 
-#: ui/pages/controls_page.slint:140
+#: ui/pages/controls_page.slint:142
 #, fuzzy
 msgctxt "ControlsPage"
 msgid "ProgressIndicator | Spinner"
 msgstr "ProgressIndicator"
 
-#: ui/pages/controls_page.slint:168
+#: ui/pages/controls_page.slint:170
 msgctxt "ControlsPage"
 msgid "indeterminate"
 msgstr "Indéterminé"
 
-#: ui/pages/controls_page.slint:176
+#: ui/pages/controls_page.slint:178
 msgctxt "ControlsPage"
 msgid "TabWidget"
 msgstr "TabWidget"
 
-#: ui/pages/controls_page.slint:180
+#: ui/pages/controls_page.slint:182
 msgctxt "ControlsPage"
 msgid "Tab 1"
 msgstr "1ᵉʳ Onglet"
 
-#: ui/pages/controls_page.slint:186
+#: ui/pages/controls_page.slint:188
 msgctxt "ControlsPage"
 msgid "Content of tab 1"
 msgstr "Contennu du 1ᵉʳ onglet"
 
-#: ui/pages/controls_page.slint:192
+#: ui/pages/controls_page.slint:194
 msgctxt "ControlsPage"
 msgid "Click me"
 msgstr "Clickez moi"
 
-#: ui/pages/controls_page.slint:201
+#: ui/pages/controls_page.slint:203
 msgctxt "ControlsPage"
 msgid "Tab 2"
 msgstr "2ᵉ Onglet"
 
-#: ui/pages/controls_page.slint:207
+#: ui/pages/controls_page.slint:209
 msgctxt "ControlsPage"
 msgid "Content of tab 2"
 msgstr "Contenu du 2ᵉ onglet"
 
-#: ui/pages/controls_page.slint:213
+#: ui/pages/controls_page.slint:215
 msgctxt "ControlsPage"
 msgid "Check me"
 msgstr "Cochez moi"
 
-#: ui/pages/controls_page.slint:222
+#: ui/pages/controls_page.slint:224
 msgctxt "ControlsPage"
 msgid "Tab 3"
 msgstr "3ᵉ Onglet"
 
-#: ui/pages/controls_page.slint:226
+#: ui/pages/controls_page.slint:228
 msgctxt "ControlsPage"
 msgid "Content of tab 3"
 msgstr "Contenu du 3ᵉ conglet"
@@ -385,25 +391,25 @@ msgid ""
 "repository and the website https://slint.dev and try it yourself."
 msgstr ""
 
-#: ui/pages/text_edit_page.slint:9
+#: ui/pages/text_edit_page.slint:10
 msgctxt "TextEditPage"
 msgid "TextEdit"
 msgstr "TextEdit"
 
-#: ui/pages/text_edit_page.slint:10
+#: ui/pages/text_edit_page.slint:11
 msgctxt "TextEditPage"
 msgid ""
 "Similar to LineEdit, but can be used to enter several lines of text. The "
 "widget can be imported from \"std-widgets.slint\"."
 msgstr "Silimaire à LineEdit mais utilisé pour entrer plusieurs ligne de texte"
 
-#: ui/pages/text_edit_page.slint:14
+#: ui/pages/text_edit_page.slint:15
 msgctxt "TextEditPage"
 msgid "Word-Wrap"
 msgstr "Retour à la ligne"
 
 #. min-width: 200px;
-#: ui/pages/text_edit_page.slint:18
+#: ui/pages/text_edit_page.slint:19
 msgctxt "TextEditPage"
 msgid ""
 "This is our TextEdit widget, which allows for editing text that spans over "
@@ -424,13 +430,13 @@ msgstr ""
 "\n"
 "Vous pouver entrer du texte ici et voir ce qui se passe"
 
-#: ui/pages/text_edit_page.slint:19
+#: ui/pages/text_edit_page.slint:20
 #, fuzzy
 msgctxt "TextEditPage"
 msgid "Add some text"
 msgstr "Entrez du texte"
 
-#: ui/pages/text_edit_page.slint:26
+#: ui/pages/text_edit_page.slint:28
 msgctxt "TextEditPage"
 msgid "No-Wrap"
 msgstr "Pas de retour à la ligne"
