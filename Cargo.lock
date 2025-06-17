@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "_7guis"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "chrono",
  "slint",
@@ -855,7 +855,7 @@ dependencies = [
 
 [[package]]
 name = "bevy-example"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "async-compat",
  "bevy",
@@ -1973,7 +1973,7 @@ dependencies = [
 
 [[package]]
 name = "carousel"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "mcu-board-support",
  "slint",
@@ -3020,7 +3020,7 @@ dependencies = [
 
 [[package]]
 name = "doctests"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "slint-interpreter",
  "spin_on",
@@ -3536,7 +3536,7 @@ checksum = "a3d8a32ae18130a3c84dd492d4215c3d913c3b07c6b63c2eb3eb7ff1101ab7bf"
 
 [[package]]
 name = "energy-monitor"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
@@ -3907,9 +3907,9 @@ dependencies = [
 
 [[package]]
 name = "femtovg"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47e15d51b37323a171a49399d46f0b0a9ec729d1106976f8fa70d68068b15504"
+checksum = "ffdf29af13b81d7562ccd57624242b2ed56edc2c83dad25f13bd74d87e7fa8d9"
 dependencies = [
  "bitflags 2.9.0",
  "bytemuck",
@@ -3931,7 +3931,7 @@ dependencies = [
 
 [[package]]
 name = "ffmpeg"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3982,7 +3982,7 @@ dependencies = [
 
 [[package]]
 name = "figma_import"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "clap",
  "derive_more 2.0.1",
@@ -4341,7 +4341,7 @@ dependencies = [
 
 [[package]]
 name = "gallery"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "slint",
  "slint-build",
@@ -5050,7 +5050,7 @@ dependencies = [
 
 [[package]]
 name = "gstreamer-player"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "anyhow",
  "cfg_aliases",
@@ -5321,7 +5321,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "home-automation"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
@@ -5509,7 +5509,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-android-activity"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "android-activity 0.5.2",
  "android-activity 0.6.0",
@@ -5524,7 +5524,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-linuxkms"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "bytemuck",
  "calloop 0.14.2",
@@ -5546,7 +5546,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-qt"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "const-field-offset",
  "cpp",
@@ -5563,7 +5563,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-selector"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "cfg-if",
  "i-slint-backend-linuxkms",
@@ -5579,7 +5579,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-testing"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "async-net",
  "byteorder",
@@ -5597,7 +5597,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-winit"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "accesskit 0.19.0",
  "accesskit_winit",
@@ -5634,7 +5634,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-common"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "cfg-if",
  "derive_more 2.0.1",
@@ -5645,7 +5645,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-compiler"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "by_address",
  "codemap",
@@ -5679,7 +5679,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-core"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "async-compat",
  "auto_enums",
@@ -5738,7 +5738,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-core-macros"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "quote",
  "serde_json",
@@ -5747,14 +5747,14 @@ dependencies = [
 
 [[package]]
 name = "i-slint-parser-test-macro"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "quote",
 ]
 
 [[package]]
 name = "i-slint-renderer-femtovg"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "cfg-if",
  "const-field-offset",
@@ -5783,7 +5783,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-renderer-skia"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "ash",
  "bytemuck",
@@ -6018,7 +6018,7 @@ dependencies = [
 
 [[package]]
 name = "imagefilter"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "image",
  "slint",
@@ -6687,7 +6687,7 @@ checksum = "3e2e65a1a2e43cfcb47a895c4c8b10d1f4a61097f9f254f183aee60cad9c651d"
 
 [[package]]
 name = "maps"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "image",
  "reqwest 0.12.12",
@@ -6726,7 +6726,7 @@ dependencies = [
 
 [[package]]
 name = "mcu-board-support"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "cfg-if",
  "cortex-m",
@@ -6773,7 +6773,7 @@ dependencies = [
 
 [[package]]
 name = "mcu-embassy"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
@@ -6825,7 +6825,7 @@ dependencies = [
 
 [[package]]
 name = "memory"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "rand",
  "slint",
@@ -7819,7 +7819,7 @@ dependencies = [
 
 [[package]]
 name = "opengl_texture"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "glow",
  "slint",
@@ -7829,7 +7829,7 @@ dependencies = [
 
 [[package]]
 name = "opengl_underlay"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "glow",
  "slint",
@@ -8149,7 +8149,7 @@ checksum = "953ec861398dccce10c670dfeaf3ec4911ca479e9c02154b3a215178c5f566f2"
 
 [[package]]
 name = "plotter"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "plotters",
  "slint",
@@ -8279,7 +8279,7 @@ dependencies = [
 
 [[package]]
 name = "printerdemo"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
@@ -8291,7 +8291,7 @@ dependencies = [
 
 [[package]]
 name = "printerdemo_mcu"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "divan",
  "mcu-board-support",
@@ -8434,20 +8434,10 @@ dependencies = [
  "memoffset",
  "once_cell",
  "portable-atomic",
- "pyo3-build-config 0.25.0",
+ "pyo3-build-config",
  "pyo3-ffi",
  "pyo3-macros",
  "unindent",
-]
-
-[[package]]
-name = "pyo3-build-config"
-version = "0.24.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e27165889bd793000a098bb966adc4300c312497ea25cf7a690a9f0ac5aa5fc1"
-dependencies = [
- "once_cell",
- "target-lexicon 0.13.2",
 ]
 
 [[package]]
@@ -8467,7 +8457,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc95a2e67091e44791d4ea300ff744be5293f394f1bafd9f78c080814d35956e"
 dependencies = [
  "libc",
- "pyo3-build-config 0.25.0",
+ "pyo3-build-config",
 ]
 
 [[package]]
@@ -8490,7 +8480,7 @@ checksum = "9dff85ebcaab8c441b0e3f7ae40a6963ecea8a9f5e74f647e33fcf5ec9a1e89e"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
- "pyo3-build-config 0.25.0",
+ "pyo3-build-config",
  "quote",
  "syn 2.0.101",
 ]
@@ -8511,7 +8501,7 @@ dependencies = [
  "maplit",
  "num-complex 0.4.6",
  "pyo3",
- "pyo3-build-config 0.24.1",
+ "pyo3-build-config",
  "pyo3-stub-gen-derive",
  "semver 1.0.25",
  "serde",
@@ -9720,9 +9710,9 @@ checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
 
 [[package]]
 name = "skia-bindings"
-version = "0.86.0"
+version = "0.86.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbcd02d7008cdc4ac86b7d7461874c7ac1d2c38cad96629d7617c5d4b848acd0"
+checksum = "a2bf215f640b53293844d441e93448b437ca4937595f60e3317fbb03d7ac6783"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
@@ -9737,9 +9727,9 @@ dependencies = [
 
 [[package]]
 name = "skia-safe"
-version = "0.86.0"
+version = "0.86.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "008dec8a6b69f03b2a0bc4520dc06a7a8efc844e59b2a9bc024f0cb02fb60b63"
+checksum = "e372258f52414e04de007326fa497581617c9fa872a3225dca5e42212723c426"
 dependencies = [
  "bitflags 2.9.0",
  "lazy_static",
@@ -9764,7 +9754,7 @@ checksum = "9db491c0d4152a069911a0fbdaca959691bf0b9d7110d98a7ed1c8e59b79ab30"
 
 [[package]]
 name = "slide_puzzle"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "rand",
  "slint",
@@ -9773,7 +9763,7 @@ dependencies = [
 
 [[package]]
 name = "slint"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "async-compat",
  "bytemuck",
@@ -9805,7 +9795,7 @@ dependencies = [
 
 [[package]]
 name = "slint-build"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "derive_more 2.0.1",
  "i-slint-compiler",
@@ -9815,7 +9805,7 @@ dependencies = [
 
 [[package]]
 name = "slint-compiler"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "clap",
  "i-slint-compiler",
@@ -9827,7 +9817,7 @@ dependencies = [
 
 [[package]]
 name = "slint-cpp"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "anyhow",
  "cbindgen",
@@ -9846,7 +9836,7 @@ dependencies = [
 
 [[package]]
 name = "slint-docsnapper"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "clap",
  "i-slint-compiler",
@@ -9861,7 +9851,7 @@ dependencies = [
 
 [[package]]
 name = "slint-generated"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "i-slint-core-macros",
  "slint",
@@ -9870,7 +9860,7 @@ dependencies = [
 
 [[package]]
 name = "slint-interpreter"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "derive_more 2.0.1",
  "document-features",
@@ -9897,7 +9887,7 @@ dependencies = [
 
 [[package]]
 name = "slint-lsp"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "by_address",
  "clap",
@@ -9934,7 +9924,7 @@ dependencies = [
 
 [[package]]
 name = "slint-macros"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "i-slint-compiler",
  "proc-macro2",
@@ -9944,7 +9934,7 @@ dependencies = [
 
 [[package]]
 name = "slint-node"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "css-color-parser2",
  "i-slint-backend-selector",
@@ -9963,7 +9953,7 @@ dependencies = [
 
 [[package]]
 name = "slint-python"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "chrono",
  "css-color-parser2",
@@ -9979,7 +9969,7 @@ dependencies = [
 
 [[package]]
 name = "slint-tr-extractor"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "chrono",
  "clap",
@@ -9991,7 +9981,7 @@ dependencies = [
 
 [[package]]
 name = "slint-updater"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "by_address",
  "clap",
@@ -10004,7 +9994,7 @@ dependencies = [
 
 [[package]]
 name = "slint-viewer"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "clap",
  "codemap",
@@ -10025,7 +10015,7 @@ dependencies = [
 
 [[package]]
 name = "slint-wasm-interpreter"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "console_error_panic_hook",
  "i-slint-backend-winit",
@@ -10567,7 +10557,7 @@ dependencies = [
 
 [[package]]
 name = "test-driver-cpp"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "cc",
  "i-slint-compiler",
@@ -10580,11 +10570,10 @@ dependencies = [
 
 [[package]]
 name = "test-driver-interpreter"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "i-slint-backend-testing",
  "itertools 0.14.0",
- "lazy_static",
  "slint-interpreter",
  "spin_on",
  "test_driver_lib",
@@ -10592,9 +10581,8 @@ dependencies = [
 
 [[package]]
 name = "test-driver-nodejs"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
- "lazy_static",
  "tempfile",
  "test_driver_lib",
  "which",
@@ -10602,7 +10590,7 @@ dependencies = [
 
 [[package]]
 name = "test-driver-rust"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "i-slint-backend-testing",
  "i-slint-compiler",
@@ -10614,7 +10602,7 @@ dependencies = [
 
 [[package]]
 name = "test-driver-screenshots"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "crossterm",
  "i-slint-backend-testing",
@@ -10629,9 +10617,8 @@ dependencies = [
 
 [[package]]
 name = "test_driver_lib"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
- "lazy_static",
  "regex",
  "walkdir",
 ]
@@ -10798,7 +10785,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "todo"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "console_error_panic_hook",
  "i-slint-backend-testing",
@@ -10811,7 +10798,7 @@ dependencies = [
 
 [[package]]
 name = "todo-mvc"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
@@ -11173,7 +11160,7 @@ dependencies = [
 
 [[package]]
 name = "uefi-demo"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "log",
  "minipng",
@@ -11337,7 +11324,7 @@ dependencies = [
 
 [[package]]
 name = "usecases"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "console_error_panic_hook",
  "serde",
@@ -11470,7 +11457,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "virtual_keyboard"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "slint",
  "slint-build",
@@ -11778,7 +11765,7 @@ dependencies = [
 
 [[package]]
 name = "weather-demo"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "android_logger",
  "async-std",
@@ -11959,7 +11946,7 @@ dependencies = [
 
 [[package]]
 name = "wgpu_texture"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "bytemuck",
  "slint",
@@ -12021,7 +12008,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windowattributes"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "slint",
 ]
@@ -12698,14 +12685,13 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 
 [[package]]
 name = "xtask"
-version = "1.12.0"
+version = "1.12.1"
 dependencies = [
  "anyhow",
  "cbindgen",
  "clap",
  "const_format",
  "i-slint-common",
- "lazy_static",
  "proc-macro2",
  "regex",
  "serde_json",
