@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.21)
 # Select C++ and C as languages, as Corrosion needs ${CMAKE_C_COMPILER}
 # for linking
-project(Slint HOMEPAGE_URL "https://slint.dev/" LANGUAGES C CXX VERSION 1.12.0)
+project(Slint HOMEPAGE_URL "https://slint.dev/" LANGUAGES C CXX VERSION 1.12.1)
 
 include(FeatureSummary)
 include(CMakeDependentOption)
@@ -22,7 +22,7 @@ if (NOT Corrosion_FOUND)
 endif (NOT Corrosion_FOUND)
 
 list(PREPEND CMAKE_MODULE_PATH ${Corrosion_SOURCE_DIR}/cmake)
-find_package(Rust 1.82 REQUIRED MODULE)
+find_package(Rust 1.85 REQUIRED MODULE)
 
 option(BUILD_SHARED_LIBS "Build Slint as shared library" ON)
 option(SLINT_FEATURE_COMPILER "Enable support for compiling .slint files to C++ ahead of time" ON)
@@ -505,7 +505,7 @@ if(WIN32)
     else()
         set(CPACK_SYSTEM_NAME win32)
     endif()
-    set(CPACK_SYSTEM_NAME "${CPACK_SYSTEM_NAME}${compiler_suffix}")
+    set(CPACK_SYSTEM_NAME "${CPACK_SYSTEM_NAME}${compiler_suffix}-${CMAKE_SYSTEM_PROCESSOR}")
 else()
     set(CPACK_GENERATOR "TGZ")
     set(CPACK_SYSTEM_NAME "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")

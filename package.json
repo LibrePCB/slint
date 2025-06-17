@@ -1,6 +1,6 @@
 {
   "name": "slint_repository",
-  "version": "1.12.0",
+  "version": "1.12.1",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -16,6 +16,10 @@
       "@biomejs/biome",
       "esbuild",
       "sharp"
-    ]
+    ],
+    "overrides": {
+      "brace-expansion@>=1.0.0 <=1.1.11": ">=1.1.12",
+      "brace-expansion@>=2.0.0 <=2.0.1": ">=2.0.2"
+    }
   }
 }

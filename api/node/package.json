@@ -1,6 +1,6 @@
 {
   "name": "slint-ui",
-  "version": "1.12.0",
+  "version": "1.12.1",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "homepage": "https://github.com/slint-ui/slint",
@@ -24,7 +24,7 @@
     "@biomejs/biome": "1.9.4",
     "@types/capture-console": "1.0.5",
     "@types/node": "20.16.10",
-    "ava": "6.3.0",
+    "ava": "6.4.0",
     "capture-console": "1.0.2",
     "jimp": "1.6.0",
     "typedoc": "0.28.5",
