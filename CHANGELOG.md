@@ -5,13 +5,24 @@ All notable changes to this project are documented in this file.
 
 ## [1.12.1] - TBD
 
+### General
+
+ - Fixed invalid code gen with return statements. (#8723)
+ - Updated `muda` dependency to avoid outaded and insecure `gtk` dependency to appear in the `Cargo.lock` file even if it was not used. (#7800)
+
 ### Node.js API
 
  - Added packages for Windows on ARM.
 
+### C++
+
+ - Fixed compilation of PopupWindow::show in changed callback (#8710)
+
 ### LSP and Tooling
 
  - Added binaries for Windows on ARM (VS Code extension, slint-lsp binaries)
+ - Binaries have bigger stack size on Windows
+ - live-preview: Lazily compute palette to speedup the UI
 
 ## [1.12.0] - 2026-06-16
 
