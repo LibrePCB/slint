@@ -349,7 +349,7 @@ declare_syntax! {
         ArgumentDeclaration -> [DeclaredIdentifier, Type],
         /// `-> type`  (but without the ->)
         ReturnType -> [Type],
-        CallbackConnection -> [ *DeclaredIdentifier,  CodeBlock ],
+        CallbackConnection -> [ *DeclaredIdentifier, ?CodeBlock, ?Expression ],
         /// Declaration of a property.
         PropertyDeclaration-> [ ?Type , DeclaredIdentifier, ?BindingExpression, ?TwoWayBinding ],
         /// QualifiedName are the properties name
@@ -367,7 +367,8 @@ declare_syntax! {
         /// the right-hand-side of a binding
         // Fixme: the test should be a or
         BindingExpression-> [ ?CodeBlock, ?Expression ],
-        CodeBlock-> [ *Expression, *ReturnStatement ],
+        CodeBlock-> [ *Expression, *LetStatement, *ReturnStatement ],
+        LetStatement -> [ DeclaredIdentifier, ?Type, Expression ],
         ReturnStatement -> [ ?Expression ],
         // FIXME: the test should test that as alternative rather than several of them (but it can also be a literal)
         Expression-> [ ?Expression, ?FunctionCallExpression, ?IndexExpression, ?SelfAssignment,

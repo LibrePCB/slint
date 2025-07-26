@@ -69,12 +69,28 @@ pub fn physical_size_to_slint(size: &winit::dpi::PhysicalSize<u32>) -> corelib::
     corelib::api::PhysicalSize::new(size.width, size.height)
 }
 
-fn logical_size_to_winit(s: i_slint_core::api::LogicalSize) -> winit::dpi::LogicalSize<f32> {
-    winit::dpi::LogicalSize::new(s.width, s.height)
+fn logical_size_to_winit(s: i_slint_core::api::LogicalSize) -> winit::dpi::LogicalSize<f64> {
+    winit::dpi::LogicalSize::new(s.width as f64, s.height as f64)
 }
 
 fn physical_size_to_winit(size: PhysicalSize) -> winit::dpi::PhysicalSize<u32> {
     winit::dpi::PhysicalSize::new(size.width, size.height)
+}
+
+fn apply_scale_factor_to_logical_sizes_in_attributes(
+    attributes: &mut WindowAttributes,
+    scale_factor: f64,
+) {
+    let fixup = |maybe_size: &mut Option<winit::dpi::Size>| {
+        if let Some(size) = maybe_size.as_mut() {
+            *size = winit::dpi::Size::Physical(size.to_physical::<u32>(scale_factor))
+        }
+    };
+
+    fixup(&mut attributes.inner_size);
+    fixup(&mut attributes.min_inner_size);
+    fixup(&mut attributes.max_inner_size);
+    fixup(&mut attributes.resize_increments);
 }
 
 fn icon_to_winit(
@@ -217,31 +233,42 @@ impl WinitWindowOrNone {
         match self {
             Self::HasWindow { window, .. } => {
                 window.set_resizable(resizable);
-
-                // Workaround for winit bug #2990
-                // Non-resizable windows can still contain a maximize button,
-                // so we'd have to additionally remove the button.
-                let mut buttons = window.enabled_buttons();
-                buttons.set(WindowButtons::MAXIMIZE, resizable);
-                window.set_enabled_buttons(buttons);
             }
             Self::None(attributes) => attributes.borrow_mut().resizable = resizable,
         }
     }
 
-    fn set_min_inner_size<S: Into<winit::dpi::Size>>(&self, min_inner_size: Option<S>) {
+    fn set_min_inner_size(
+        &self,
+        min_inner_size: Option<winit::dpi::LogicalSize<f64>>,
+        scale_factor: f64,
+    ) {
         match self {
-            Self::HasWindow { window, .. } => window.set_min_inner_size(min_inner_size),
+            Self::HasWindow { window, .. } => {
+                // Store as physical size to make sure that our potentially overriding scale factor is applied.
+                window
+                    .set_min_inner_size(min_inner_size.map(|s| s.to_physical::<u32>(scale_factor)))
+            }
             Self::None(attributes) => {
+                // Store as logical size, so that we can apply the real window scale factor later when it's known.
                 attributes.borrow_mut().min_inner_size = min_inner_size.map(|s| s.into());
             }
         }
     }
 
-    fn set_max_inner_size<S: Into<winit::dpi::Size>>(&self, max_inner_size: Option<S>) {
+    fn set_max_inner_size(
+        &self,
+        max_inner_size: Option<winit::dpi::LogicalSize<f64>>,
+        scale_factor: f64,
+    ) {
         match self {
-            Self::HasWindow { window, .. } => window.set_max_inner_size(max_inner_size),
+            Self::HasWindow { window, .. } => {
+                // Store as physical size to make sure that our potentially overriding scale factor is applied.
+                window
+                    .set_max_inner_size(max_inner_size.map(|s| s.to_physical::<u32>(scale_factor)))
+            }
             Self::None(attributes) => {
+                // Store as logical size, so that we can apply the real window scale factor later when it's known.
                 attributes.borrow_mut().max_inner_size = max_inner_size.map(|s| s.into())
             }
         }
@@ -262,7 +289,7 @@ enum WindowVisibility {
 pub struct WinitWindowAdapter {
     pub shared_backend_data: Rc<SharedBackendData>,
     window: OnceCell<corelib::api::Window>,
-    self_weak: Weak<Self>,
+    pub(crate) self_weak: Weak<Self>,
     pending_redraw: Cell<bool>,
     color_scheme: OnceCell<Pin<Box<Property<ColorScheme>>>>,
     constraints: Cell<corelib::window::LayoutConstraints>,
@@ -306,6 +333,7 @@ pub struct WinitWindowAdapter {
     >,
 
     winit_window_or_none: RefCell<WinitWindowOrNone>,
+    window_existence_wakers: RefCell<Vec<core::task::Waker>>,
 
     #[cfg(not(use_winit_theme))]
     xdg_settings_watcher: RefCell<Option<i_slint_core::future::JoinHandle<()>>>,
@@ -319,6 +347,8 @@ pub struct WinitWindowAdapter {
     /// Winit's window_icon API has no way of checking if the window icon is
     /// the same as a previously set one, so keep track of that here.
     window_icon_cache_key: RefCell<Option<ImageCacheKey>>,
+
+    frame_throttle: Box<dyn crate::frame_throttle::FrameThrottle>,
 }
 
 impl WinitWindowAdapter {
@@ -332,7 +362,7 @@ impl WinitWindowAdapter {
         #[cfg(all(muda, target_os = "macos"))] muda_enable_default_menu_bar: bool,
     ) -> Result<Rc<Self>, PlatformError> {
         let self_rc = Rc::new_cyclic(|self_weak| Self {
-            shared_backend_data,
+            shared_backend_data: shared_backend_data.clone(),
             window: OnceCell::from(corelib::api::Window::new(self_weak.clone() as _)),
             self_weak: self_weak.clone(),
             pending_redraw: Default::default(),
@@ -344,6 +374,7 @@ impl WinitWindowAdapter {
             minimized: Cell::default(),
             fullscreen: Cell::default(),
             winit_window_or_none: RefCell::new(WinitWindowOrNone::None(window_attributes.into())),
+            window_existence_wakers: RefCell::new(Vec::default()),
             size: Cell::default(),
             pending_requested_size: Cell::new(None),
             has_explicit_size: Default::default(),
@@ -362,6 +393,10 @@ impl WinitWindowAdapter {
             #[cfg(all(muda, target_os = "macos"))]
             muda_enable_default_menu_bar,
             window_icon_cache_key: Default::default(),
+            frame_throttle: crate::frame_throttle::create_frame_throttle(
+                self_weak.clone(),
+                shared_backend_data.is_wayland,
+            ),
         });
 
         self_rc.shared_backend_data.register_inactive_window((self_rc.clone()) as _);
@@ -405,6 +440,16 @@ impl WinitWindowAdapter {
         //  a) need to compute the correct size based on the scale factor before it's shown on the screen (handled by set_visible)
         //  b) need to create the accesskit adapter before it's shown on the screen, as required by accesskit.
         let show_after_creation = std::mem::replace(&mut window_attributes.visible, false);
+        let resizable = window_attributes.resizable;
+
+        let overriding_scale_factor = std::env::var("SLINT_SCALE_FACTOR")
+            .ok()
+            .and_then(|x| x.parse::<f32>().ok())
+            .filter(|f| *f > 0.);
+
+        if let Some(sf) = overriding_scale_factor {
+            apply_scale_factor_to_logical_sizes_in_attributes(&mut window_attributes, sf as f64)
+        }
 
         let winit_window = self.renderer.resume(
             active_event_loop,
@@ -412,11 +457,8 @@ impl WinitWindowAdapter {
             self.requested_graphics_api.clone(),
         )?;
 
-        let scale_factor = std::env::var("SLINT_SCALE_FACTOR")
-            .ok()
-            .and_then(|x| x.parse::<f32>().ok())
-            .filter(|f| *f > 0.)
-            .unwrap_or_else(|| winit_window.scale_factor() as f32);
+        let scale_factor =
+            overriding_scale_factor.unwrap_or_else(|| winit_window.scale_factor() as f32);
         self.window().try_dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor })?;
 
         *winit_window_or_none = WinitWindowOrNone::HasWindow {
@@ -452,8 +494,21 @@ impl WinitWindowAdapter {
             self.set_visibility(WindowVisibility::ShownFirstTime)?;
         }
 
+        {
+            // Workaround for winit bug #2990
+            // Non-resizable windows can still contain a maximize button,
+            // so we'd have to additionally remove the button.
+            let mut buttons = winit_window.enabled_buttons();
+            buttons.set(WindowButtons::MAXIMIZE, resizable);
+            winit_window.set_enabled_buttons(buttons);
+        }
+
         self.shared_backend_data
             .register_window(winit_window.id(), (self.self_weak.upgrade().unwrap()) as _);
+
+        for waker in self.window_existence_wakers.take().into_iter() {
+            waker.wake();
+        }
 
         Ok(winit_window)
     }
@@ -882,6 +937,34 @@ impl WinitWindowAdapter {
             Ok(())
         }
     }
+
+    pub(crate) fn pending_redraw(&self) -> bool {
+        self.pending_redraw.get()
+    }
+
+    pub async fn async_winit_window(
+        self_weak: Weak<Self>,
+    ) -> Result<Arc<winit::window::Window>, PlatformError> {
+        std::future::poll_fn(move |context| {
+            let Some(self_) = self_weak.upgrade() else {
+                return std::task::Poll::Ready(Err(format!(
+                    "Unable to obtain winit window from destroyed window"
+                )
+                .into()));
+            };
+            match self_.winit_window() {
+                Some(window) => std::task::Poll::Ready(Ok(window)),
+                None => {
+                    let waker = context.waker();
+                    if !self_.window_existence_wakers.borrow().iter().any(|w| w.will_wake(waker)) {
+                        self_.window_existence_wakers.borrow_mut().push(waker.clone());
+                    }
+                    std::task::Poll::Pending
+                }
+            }
+        })
+        .await
+    }
 }
 
 impl WindowAdapter for WinitWindowAdapter {
@@ -941,7 +1024,7 @@ impl WindowAdapter for WinitWindowAdapter {
 
     fn set_size(&self, size: corelib::api::WindowSize) {
         self.has_explicit_size.set(true);
-        // TODO: don't ignore error, propgate to caller
+        // TODO: don't ignore error, propagate to caller
         self.resize_window(window_size_to_winit(&size)).ok();
     }
 
@@ -951,9 +1034,7 @@ impl WindowAdapter for WinitWindowAdapter {
 
     fn request_redraw(&self) {
         if !self.pending_redraw.replace(true) {
-            if let Some(window) = self.winit_window_or_none.borrow().as_window() {
-                window.request_redraw()
-            }
+            self.frame_throttle.request_throttled_redraw();
         }
     }
 
@@ -1080,17 +1161,13 @@ impl WindowAdapter for WinitWindowAdapter {
 
         self.constraints.set(new_constraints);
 
-        let into_size = |s: corelib::api::LogicalSize| -> winit::dpi::PhysicalSize<f32> {
-            logical_size_to_winit(s).to_physical(sf as f64)
-        };
-
         let resizable = window_is_resizable(new_constraints.min, new_constraints.max);
         // we must call set_resizable before setting the min and max size otherwise setting the min and max size don't work on X11
         winit_window_or_none.set_resizable(resizable);
-        let winit_min_inner = new_constraints.min.map(into_size);
-        winit_window_or_none.set_min_inner_size(winit_min_inner);
-        let winit_max_inner = new_constraints.max.map(into_size);
-        winit_window_or_none.set_max_inner_size(winit_max_inner);
+        let winit_min_inner = new_constraints.min.map(logical_size_to_winit);
+        winit_window_or_none.set_min_inner_size(winit_min_inner, sf as f64);
+        let winit_max_inner = new_constraints.max.map(logical_size_to_winit);
+        winit_window_or_none.set_max_inner_size(winit_max_inner, sf as f64);
 
         // On ios, etc. apps are fullscreen and need to be responsive.
         #[cfg(not(ios_and_friends))]
@@ -1334,14 +1411,15 @@ impl Drop for WinitWindowAdapter {
 #[cfg(not(ios_and_friends))]
 fn adjust_window_size_to_satisfy_constraints(
     adapter: &WinitWindowAdapter,
-    min_size: Option<winit::dpi::PhysicalSize<f32>>,
-    max_size: Option<winit::dpi::PhysicalSize<f32>>,
+    min_size: Option<winit::dpi::LogicalSize<f64>>,
+    max_size: Option<winit::dpi::LogicalSize<f64>>,
 ) {
+    let sf = adapter.window().scale_factor() as f64;
     let current_size = adapter
         .pending_requested_size
         .get()
-        .map(|s| s.to_physical(adapter.window().scale_factor() as f64))
-        .unwrap_or_else(|| physical_size_to_winit(adapter.size.get()));
+        .map(|s| s.to_logical::<f64>(sf))
+        .unwrap_or_else(|| physical_size_to_winit(adapter.size.get()).to_logical(sf));
 
     let mut window_size = current_size;
     if let Some(min_size) = min_size {

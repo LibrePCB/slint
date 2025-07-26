@@ -3,12 +3,69 @@
 # Changelog
 All notable changes to this project are documented in this file.
 
-## [1.12.1] - TBD
+## [1.13.0] - Unreleased
+
+### General
+
+ - winit: Fixed the maximize window not being disabled for fixed-size windows
+ - winit: Added support for timer based frame throttling (#8826)
+ - Switched from WGPU24 to WGPU25
+ - Qt: Fixed default-font-size not working with PopupWindow
+ - LinuxKMS: Added support for overriding the default framebuffer interface selection
+
+### Slint Language
+
+ - Callbacks handler no longer need curly-braces. Extra semi-colon is no longer an error. (#8401)
+ - Added local variable with `let` (#2752)
+ - Added icon property to MenuItem and Menu
+ - Flickable forward wheel event in a orthogonal direction to their parent
+ - Add a compiler warning when using `padding` outside of layout (#6288)
+
+### Rust
+
+ - Minimum Supported Rust Version (MSRV) is 1.85
+ - Upgraded WGPU dependency to version 25: The `unstable-wgpu-25` Cargo feature replaces the old `unstable-wgpu-24` feature,
+   and the `slint::wgpu_25` module replaces the `slint::wgpu_24` module. There were no further changes to the API.
+ - Fixed compilation of generated code if the slint code declares a type named `core`
+ - Support for live-reload with the `slint/live-reload` feature and `SLINT_LIVE_RELOAD` env variable
+
+
+### C++
+
+ - Added `SharedString::clear()`
+ - Support for live-reload with the `SLINT_FEATURE_LIVE_RELOAD` feature and `SLINT_LIVE_RELOAD` env variable
+ - `SLINT_FEATURE_RENDERER_FEMTOVG_WGPU` is no longer enabled by default
+
+### Node.js API
+
+ - Fixed panic when attempting to convert brushes to colors.
+
+### Python
+
+ - Added support for automatically mapping exported Slint enums to property Python `enum.Enum` subclasses.
+ - ...
+
+### Tooling
+
+ - lsp: allow to rename functions and callbacks
+ - slint-compiler: Guess default output format from file extension
+
+
+
+## [1.12.1] - 2025-06-25
 
 ### General
 
  - Fixed invalid code gen with return statements. (#8723)
- - Updated `muda` dependency to avoid outaded and insecure `gtk` dependency to appear in the `Cargo.lock` file even if it was not used. (#7800)
+ - Updated `muda` dependency to avoid outdated and insecure `gtk` dependency to appear in the `Cargo.lock` file even if it was not used. (#7800)
+ - Fixed memory leaks and crash in change callbacks (#8768, #8741)
+ - winit: Fixed window constraints (min, max, pref) not being applied sometimes (#8765)
+ - No longer generate unused structs in the generated code to avoid warnings with Rust 1.89
+
+### Slint Language
+
+ - Enums without value cause compilation errors (instead of panics)
+ - Fixed runtime and compile errors when accessing the `Platform` global from within other globals. (#8777)
 
 ### Node.js API
 
@@ -16,15 +73,15 @@ All notable changes to this project are documented in this file.
 
 ### C++
 
- - Fixed compilation of PopupWindow::show in changed callback (#8710)
+ - Fixed compilation of `PopupWindow::show()` in changed callbacks. (#8710)
 
 ### LSP and Tooling
 
- - Added binaries for Windows on ARM (VS Code extension, slint-lsp binaries)
- - Binaries have bigger stack size on Windows
- - live-preview: Lazily compute palette to speedup the UI
+ - Added binaries for Windows on ARM (VS Code extension, slint-lsp binaries).
+ - Fixed potential crashes due to stack overflows on Windows.
+ - live-preview: Lazily compute palette to speedup the UI.
 
-## [1.12.0] - 2026-06-16
+## [1.12.0] - 2025-06-16
 
 ### General
 
@@ -1936,3 +1993,4 @@ as well as the [Rust migration guide for the `sixtyfps` crate](api/rs/slint/migr
 [1.10.0]: https://github.com/slint-ui/slint/releases/tag/v1.10.0
 [1.11.0]: https://github.com/slint-ui/slint/releases/tag/v1.11.0
 [1.12.0]: https://github.com/slint-ui/slint/releases/tag/v1.12.0
+[1.12.1]: https://github.com/slint-ui/slint/releases/tag/v1.12.1

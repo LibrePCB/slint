@@ -147,17 +147,6 @@ pub(crate) mod dependency_tracker {
             self.0.get().is_null()
         }
 
-        /// Remove all the nodes from the list;
-        pub fn clear(self: Pin<&Self>) {
-            unsafe {
-                if let Some(n) = self.0.get().as_ref() {
-                    n.debug_assert_valid();
-                    n.prev.set(core::ptr::null());
-                }
-            }
-            self.0.set(core::ptr::null());
-        }
-
         pub unsafe fn drop(_self: *mut Self) {
             if let Some(next) = (*_self).0.get().as_ref() {
                 debug_assert_eq!(_self as *const _, next.prev.get() as *const _);
@@ -192,6 +181,22 @@ pub(crate) mod dependency_tracker {
                     node.debug_assert_valid();
                     next = node.next.get();
                     f(&node.binding);
+                }
+            }
+        }
+
+        /// Returns the first node of the list, if any
+        pub fn take_head(&self) -> Option<T>
+        where
+            T: Copy,
+        {
+            unsafe {
+                if let Some(node) = self.0.get().as_ref() {
+                    node.debug_assert_valid();
+                    node.remove();
+                    Some(node.binding)
+                } else {
+                    None
                 }
             }
         }
@@ -1178,8 +1183,8 @@ fn property_two_ways_recurse_from_binding() {
             if !done.get() {
                 done.set(true);
                 Property::link_two_way(p1.as_ref(), p2.as_ref());
-                let xx = xx_weak.upgrade().unwrap();
-                p1.as_ref().set_binding(move || xx.as_ref().get() + 9);
+                let xx_weak = xx_weak.clone();
+                p1.as_ref().set_binding(move || xx_weak.upgrade().unwrap().as_ref().get() + 9);
             }
             global.as_ref().get() + 2
         }

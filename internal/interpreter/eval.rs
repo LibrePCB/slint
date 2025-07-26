@@ -155,11 +155,20 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
             crate::dynamic_item_tree::SPECIAL_PROPERTY_INDEX,
         )
         .unwrap(),
-        Expression::RepeaterModelReference { element } => load_property_helper(&ComponentInstance::InstanceRef(local_context.component_instance),
-            &element.upgrade().unwrap().borrow().base_type.as_component().root_element,
-            crate::dynamic_item_tree::SPECIAL_PROPERTY_MODEL_DATA,
-        )
-        .unwrap(),
+        Expression::RepeaterModelReference { element } => {
+            let value = load_property_helper(&ComponentInstance::InstanceRef(local_context.component_instance),
+                    &element.upgrade().unwrap().borrow().base_type.as_component().root_element,
+                    crate::dynamic_item_tree::SPECIAL_PROPERTY_MODEL_DATA,
+                )
+                .unwrap();
+            if matches!(value, Value::Void) {
+                // Uninitialized model data (because the model returned None) should still be initialized to the default value of the type
+                default_value_for_type(&expression.ty())
+            } else {
+                value
+            }
+
+        },
         Expression::FunctionParameterReference { index, .. } => {
             local_context.function_arguments[*index].clone()
         }
@@ -1344,6 +1353,21 @@ fn call_builtin_function(
             Value::Void
         }
         BuiltinFunction::DetectOperatingSystem => i_slint_core::detect_operating_system().into(),
+        // start and stop are unreachable because they are lowered to simple assignment of running
+        BuiltinFunction::StartTimer => unreachable!(),
+        BuiltinFunction::StopTimer => unreachable!(),
+        BuiltinFunction::RestartTimer => {
+            if let [Expression::ElementReference(timer_element)] = arguments {
+                crate::dynamic_item_tree::restart_timer(
+                    timer_element.clone(),
+                    local_context.component_instance,
+                );
+
+                Value::Void
+            } else {
+                panic!("internal error: argument to RestartTimer must be an element")
+            }
+        }
     }
 }
 

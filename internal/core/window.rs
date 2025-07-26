@@ -12,7 +12,7 @@ use crate::api::{
 };
 use crate::input::{
     key_codes, ClickState, FocusEvent, FocusReason, InternalKeyboardModifierState, KeyEvent,
-    KeyEventType, MouseEvent, MouseInputState, TextCursorBlinker,
+    KeyEventType, MouseEvent, MouseInputState, PointerEventButton, TextCursorBlinker,
 };
 use crate::item_tree::{
     ItemRc, ItemTreeRc, ItemTreeRef, ItemTreeVTable, ItemTreeWeak, ItemWeak,
@@ -23,7 +23,7 @@ use crate::lengths::{LogicalLength, LogicalPoint, LogicalRect, SizeLengths};
 use crate::menus::MenuVTable;
 use crate::properties::{Property, PropertyTracker};
 use crate::renderer::Renderer;
-use crate::{Callback, Coord, SharedString};
+use crate::{Callback, SharedString};
 use alloc::boxed::Box;
 use alloc::rc::{Rc, Weak};
 use alloc::vec::Vec;
@@ -538,17 +538,6 @@ impl WindowInner {
         self.pinned_fields.window_properties_tracker.set_dirty(); // component changed, layout constraints for sure must be re-calculated
         let window_adapter = self.window_adapter();
         window_adapter.renderer().set_window_adapter(&window_adapter);
-        {
-            let component = ItemTreeRc::borrow_pin(component);
-            let root_item = component.as_ref().get_item_ref(0);
-            let window_item = ItemRef::downcast_pin::<crate::items::WindowItem>(root_item).unwrap();
-
-            let default_font_size_prop =
-                crate::items::WindowItem::FIELD_OFFSETS.default_font_size.apply_pin(window_item);
-            if default_font_size_prop.get().get() <= 0 as Coord {
-                default_font_size_prop.set(window_adapter.renderer().default_font_size());
-            }
-        }
         self.set_window_item_geometry(
             window_adapter.size().to_logical(self.scale_factor()).to_euclid(),
         );
@@ -585,11 +574,35 @@ impl WindowInner {
         // handle multiple press release
         event = self.click_state.check_repeat(event, self.ctx.platform().click_interval());
 
+        let window_adapter = self.window_adapter();
+        let mut mouse_input_state = self.mouse_input_state.take();
+        if let Some(mut drop_event) = mouse_input_state.drag_data.clone() {
+            match &event {
+                MouseEvent::Released { position, button: PointerEventButton::Left, .. } => {
+                    if let Some(window_adapter) = window_adapter.internal(crate::InternalToken) {
+                        window_adapter.set_mouse_cursor(MouseCursor::Default);
+                    }
+                    drop_event.position = crate::lengths::logical_position_to_api(*position);
+                    event = MouseEvent::Drop(drop_event);
+                    mouse_input_state.drag_data = None;
+                }
+                MouseEvent::Moved { position } => {
+                    if let Some(window_adapter) = window_adapter.internal(crate::InternalToken) {
+                        window_adapter.set_mouse_cursor(MouseCursor::NoDrop);
+                    }
+                    drop_event.position = crate::lengths::logical_position_to_api(*position);
+                    event = MouseEvent::DragMove(drop_event);
+                }
+                MouseEvent::Exit => {
+                    mouse_input_state.drag_data = None;
+                }
+                _ => {}
+            }
+        }
+
         let pressed_event = matches!(event, MouseEvent::Pressed { .. });
         let released_event = matches!(event, MouseEvent::Released { .. });
 
-        let window_adapter = self.window_adapter();
-        let mut mouse_input_state = self.mouse_input_state.take();
         let last_top_item = mouse_input_state.top_item_including_delayed();
         if released_event {
             mouse_input_state =
@@ -647,7 +660,7 @@ impl WindowInner {
         });
 
         mouse_input_state = if let Some(mut event) =
-            crate::input::handle_mouse_grab(event, &window_adapter, &mut mouse_input_state)
+            crate::input::handle_mouse_grab(&event, &window_adapter, &mut mouse_input_state)
         {
             let mut item_tree = self.component.borrow().upgrade();
             let mut offset = LogicalPoint::default();
@@ -697,7 +710,7 @@ impl WindowInner {
                 event.translate(-offset.to_vector());
                 let mut new_input_state = crate::input::process_mouse_input(
                     root,
-                    event,
+                    &event,
                     &window_adapter,
                     mouse_input_state,
                 );
@@ -1674,8 +1687,8 @@ pub mod ffi {
                 let cpp_graphics_api = match graphics_api {
                     crate::api::GraphicsAPI::NativeOpenGL { .. } => GraphicsAPI::NativeOpenGL,
                     crate::api::GraphicsAPI::WebGL { .. } => unreachable!(), // We don't support wasm with C++
-                    #[cfg(feature = "unstable-wgpu-24")]
-                    crate::api::GraphicsAPI::WGPU24 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
+                    #[cfg(feature = "unstable-wgpu-25")]
+                    crate::api::GraphicsAPI::WGPU25 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
                 };
                 (self.callback)(state, cpp_graphics_api, self.user_data)
             }
@@ -1862,10 +1875,10 @@ pub mod ffi {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_dispatch_pointer_event(
         handle: *const WindowAdapterRcOpaque,
-        event: crate::input::MouseEvent,
+        event: &crate::input::MouseEvent,
     ) {
         let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().0.process_mouse_input(event);
+        window_adapter.window().0.process_mouse_input(event.clone());
     }
 
     /// Dispatch a window event
