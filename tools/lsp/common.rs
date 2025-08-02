@@ -29,6 +29,83 @@ use crate::wasm_prelude::*;
 /// ignore a node for code analysis purposes.
 pub const NODE_IGNORE_COMMENT: &str = "@lsp:ignore-node";
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum PreviewTarget {
+    #[allow(dead_code)]
+    ChildProcess,
+    #[allow(dead_code)]
+    EmbeddedWasm,
+    #[allow(dead_code)]
+    Dummy,
+}
+
+#[allow(dead_code)]
+pub trait LspToPreview {
+    fn send(&self, message: &LspToPreviewMessage) -> Result<()>;
+    fn set_preview_target(&self, target: PreviewTarget) -> Result<()>;
+    fn preview_target(&self) -> PreviewTarget;
+}
+
+#[derive(Default, Clone)]
+pub struct DummyLspToPreview {}
+
+impl LspToPreview for DummyLspToPreview {
+    fn send(&self, _message: &LspToPreviewMessage) -> Result<()> {
+        Ok(())
+    }
+
+    fn preview_target(&self) -> PreviewTarget {
+        PreviewTarget::Dummy
+    }
+
+    fn set_preview_target(&self, _: PreviewTarget) -> Result<()> {
+        Err("Can not change the preview target".into())
+    }
+}
+
+#[allow(dead_code)]
+pub trait PreviewToLsp {
+    fn send(&self, message: &PreviewToLspMessage) -> Result<()>;
+
+    /// Tell the editor about diagnostics
+    fn notify_diagnostics(
+        &self,
+        diagnostics: HashMap<lsp_types::Url, (SourceFileVersion, Vec<lsp_types::Diagnostic>)>,
+    ) -> Result<()> {
+        for (uri, (version, diagnostics)) in diagnostics {
+            self.send(&PreviewToLspMessage::Diagnostics { uri, version, diagnostics })?;
+        }
+        Ok(())
+    }
+
+    /// Ask the editor to show some document
+    fn ask_editor_to_show_document(
+        &self,
+        file: &str,
+        selection: lsp_types::Range,
+        take_focus: bool,
+    ) -> Result<()> {
+        let file = lsp_types::Url::from_file_path(file)
+            .map_err(|_| "Failed to convert URL".to_string())?;
+        if selection.start.character == 0 || selection.end.character == 0 {
+            return Ok(());
+        }
+        self.send(&PreviewToLspMessage::ShowDocument { file, selection, take_focus })
+    }
+
+    /// Sends a telemetry event
+    fn send_telemetry(&self, data: &mut [(String, serde_json::Value)]) -> Result<()> {
+        let object = {
+            let mut object = serde_json::Map::new();
+            for (name, value) in data.iter_mut() {
+                object.insert(std::mem::take(name), std::mem::take(value));
+            }
+            object
+        };
+        self.send(&PreviewToLspMessage::TelemetryEvent(object))
+    }
+}
+
 /// Check whether a node is marked to be ignored in the LSP/live preview
 /// using a comment containing `@lsp:ignore-node`
 pub fn is_element_node_ignored(node: &syntax_nodes::Element) -> bool {
@@ -177,7 +254,7 @@ impl ElementRcNode {
     /// Run with all the debug information on the node
     pub fn with_element_debug<R>(
         &self,
-        func: impl Fn(&i_slint_compiler::object_tree::ElementDebugInfo) -> R,
+        func: impl FnOnce(&i_slint_compiler::object_tree::ElementDebugInfo) -> R,
     ) -> R {
         let elem = self.element.borrow();
         let d = elem.debug.get(self.debug_index).unwrap();
@@ -187,14 +264,14 @@ impl ElementRcNode {
     /// Run with the `Element` node
     pub fn with_element_node<R>(
         &self,
-        func: impl Fn(&i_slint_compiler::parser::syntax_nodes::Element) -> R,
+        func: impl FnOnce(&i_slint_compiler::parser::syntax_nodes::Element) -> R,
     ) -> R {
         let elem = self.element.borrow();
         func(&elem.debug.get(self.debug_index).unwrap().node)
     }
 
     /// Run with the SyntaxNode incl. any id, condition, etc.
-    pub fn with_decorated_node<R>(&self, func: impl Fn(SyntaxNode) -> R) -> R {
+    pub fn with_decorated_node<R>(&self, func: impl FnOnce(SyntaxNode) -> R) -> R {
         let elem = self.element.borrow();
         func(find_element_with_decoration(&elem.debug.get(self.debug_index).unwrap().node))
     }
@@ -471,9 +548,6 @@ pub struct PreviewComponent {
     /// The name of the component within that file.
     /// If None, then the last component is going to be shown.
     pub component: Option<String>,
-
-    /// The style name for the preview
-    pub style: String,
 }
 
 #[allow(unused)]
@@ -532,7 +606,7 @@ pub enum PreviewToLspMessage {
     SendWorkspaceEdit { label: Option<String>, edit: lsp_types::WorkspaceEdit },
     /// Pass a `ShowMessage` notification on to the editor
     SendShowMessage { message: lsp_types::ShowMessageParams },
-    /// Senf a telemetry event
+    /// Send a telemetry event
     TelemetryEvent(serde_json::Map<String, serde_json::Value>),
 }
 

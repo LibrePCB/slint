@@ -6,7 +6,7 @@
 // cSpell: ignore codespace codespaces gnueabihf vsix
 
 import * as path from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import * as vscode from "vscode";
 import { SlintTelemetrySender } from "./telemetry";
 import * as common from "./common";
@@ -33,6 +33,10 @@ const program_extension = process.platform === "win32" ? ".exe" : "";
 interface Platform {
     program_name: string;
     options?: ExecutableOptions;
+}
+
+function lsp_panic_log_dir(context: vscode.ExtensionContext) {
+    return vscode.Uri.joinPath(context.logUri, "slint-lsp-panics/");
 }
 
 function lspPlatform(): Platform | null {
@@ -85,6 +89,77 @@ function lspPlatform(): Platform | null {
     return null;
 }
 
+function find_lsp_binary(
+    context: vscode.ExtensionContext,
+    lsp_platform: Platform,
+) {
+    const config = vscode.workspace.getConfiguration("slint");
+    const lsp_binary_path = config.lspBinaryPath;
+
+    if (lsp_binary_path === "") {
+        // No slint-lsp override configured: Try a local ../target build first, then try the plain bundled binary and
+        // finally the architecture specific one. A debug session will find the first one, a local package build the
+        // second and the distributed vsix the last.
+        const lspSearchPaths = [
+            path.join(
+                context.extensionPath,
+                "..",
+                "..",
+                "target",
+                "debug",
+                "slint-lsp" + program_extension,
+            ),
+            path.join(
+                context.extensionPath,
+                "..",
+                "..",
+                "target",
+                "release",
+                "slint-lsp" + program_extension,
+            ),
+            path.join(
+                context.extensionPath,
+                "bin",
+                "slint-lsp" + program_extension,
+            ),
+            path.join(context.extensionPath, "bin", lsp_platform.program_name),
+        ];
+
+        const serverModule = lspSearchPaths.find((path) => existsSync(path));
+
+        if (serverModule === undefined) {
+            console.warn(
+                "Could not locate slint-lsp server binary, neither in bundled bin/ directory nor relative in ../target",
+            );
+        }
+        return serverModule;
+    }
+
+    if (path.isAbsolute(lsp_binary_path)) {
+        // The slint-lsp override is a absolute path: Look in that path only
+        if (existsSync(lsp_binary_path)) {
+            return lsp_binary_path;
+        }
+        console.warn(
+            "Could not locate the configured slint-lsp server binary at absolute path",
+        );
+        return undefined;
+    }
+
+    // The slint-lsp override is a relative path: Look relative to PATH
+    const path_env = process.env.PATH?.split(path.delimiter).map((p) =>
+        path.join(p, lsp_binary_path),
+    );
+
+    const serverModule = path_env?.find((path) => existsSync(path));
+    if (serverModule === undefined) {
+        console.warn(
+            "Could not locate the configured slint-lsp server binary in PATH",
+        );
+    }
+    return serverModule;
+}
+
 // Please add changes to the BaseLanguageClient via
 // `client.add_updater((cl: BaseLanguageClient | null): void)`
 //
@@ -102,55 +177,21 @@ function startClient(
         return;
     }
 
-    // Try a local ../target build first, then try the plain bundled binary and finally the architecture specific one.
-    // A debug session will find the first one, a local package build the second and the distributed vsix the last.
-    const lspSearchPaths = [
-        path.join(
-            context.extensionPath,
-            "..",
-            "..",
-            "target",
-            "debug",
-            "slint-lsp" + program_extension,
-        ),
-        path.join(
-            context.extensionPath,
-            "..",
-            "..",
-            "target",
-            "release",
-            "slint-lsp" + program_extension,
-        ),
-        path.join(
-            context.extensionPath,
-            "bin",
-            "slint-lsp" + program_extension,
-        ),
-        path.join(context.extensionPath, "bin", lsp_platform.program_name),
-    ];
-
-    const serverModule = lspSearchPaths.find((path) => existsSync(path));
+    const serverModule = find_lsp_binary(context, lsp_platform);
 
     if (serverModule === undefined) {
-        console.warn(
-            "Could not locate slint-lsp server binary, neither in bundled bin/ directory nor relative in ../target",
-        );
         return;
     }
 
     const options = Object.assign({}, lsp_platform.options);
     options.env = Object.assign({}, process.env, lsp_platform.options?.env);
 
-    const devBuild = serverModule !== lspSearchPaths[lspSearchPaths.length - 1];
+    const devBuild = serverModule.includes("/target/debug/");
     if (devBuild) {
         options.env["RUST_BACKTRACE"] = "1";
     }
 
-    const slint_lsp_panic_file = vscode.Uri.joinPath(
-        context.logUri,
-        "slint-lsp-panic.log",
-    );
-    options.env["SLINT_LSP_PANIC_LOG"] = slint_lsp_panic_file.fsPath;
+    options.env["SLINT_LSP_PANIC_LOG_DIR"] = lsp_panic_log_dir(context).fsPath;
 
     const args = vscode.workspace
         .getConfiguration("slint")
@@ -174,32 +215,12 @@ function startClient(
                 event.oldState === State.Running
             ) {
                 cl.outputChannel.appendLine(
-                    "The Slint Language Server crashed. This is a bug. Please open an issue on https://github.com/slint-ui/slint/issues",
+                    "The Slint Language Server crashed. This is a bug, Please open an issue on the [Slint bug tracker](https://github.com/slint-ui/slint/issues).",
                 );
                 cl.outputChannel.show();
                 vscode.window.showErrorMessage(
-                    "The Slint Language Server crashed! Please open a bug on the Slint bug tracker with the panic message.",
+                    "The Slint Language Server crashed. Please open a bug on the [Slint bug tracker](https://github.com/slint-ui/slint/issues) with the panic message.",
                 );
-                vscode.workspace.fs
-                    .readFile(slint_lsp_panic_file)
-                    .then((data) => {
-                        const contents = Buffer.from(data).toString("utf-8");
-                        const lines = contents.split("\n");
-                        const version = lines[0];
-                        // Location is trusted because it is a path within the LSP (as build on our CI)
-                        const location = new vscode.TelemetryTrustedValue(
-                            lines[1],
-                        );
-                        const backtrace = lines[2];
-                        const message = lines.slice(3).join("\n");
-                        telemetryLogger.logError("lsp-panic", {
-                            version: version,
-                            location: location,
-                            message: message,
-                            backtrace: backtrace,
-                        });
-                        vscode.workspace.fs.delete(slint_lsp_panic_file);
-                    });
             }
         });
 
@@ -265,6 +286,63 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     startTelemetryTimer(context, telemetryLogger);
+
+    // Create a file system watcher to watch for panic logs:
+    const panic_dir = lsp_panic_log_dir(context);
+    const ensureDirectoryExists = (dir: string) => {
+        if (!existsSync(dir)) {
+            mkdirSync(dir, { recursive: true });
+        } else {
+            readdirSync(dir).forEach((file) => {
+                unlinkSync(path.join(dir, file));
+            });
+        }
+    };
+
+    ensureDirectoryExists(panic_dir.fsPath);
+    const watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(panic_dir, "slint_lsp_panic_*.log"),
+    );
+
+    const lsp_platform = lspPlatform();
+    if (lsp_platform === null) {
+        return;
+    }
+
+    const serverModule = find_lsp_binary(context, lsp_platform);
+
+    if (serverModule === undefined) {
+        return;
+    }
+
+    const custom_lsp = !serverModule.startsWith(
+        path.join(context.extensionPath, "bin"),
+    );
+
+    const version_extension = custom_lsp ? " [CUSTOM BINARY]" : "";
+
+    watcher.onDidCreate((uri) => {
+        vscode.workspace.fs.readFile(uri).then((data) => {
+            const contents = Buffer.from(data).toString("utf-8");
+            const lines = contents.split("\n");
+            const version = lines[0] + version_extension;
+            // Location is trusted because it is a path within the LSP (as build on our CI)
+            const location = new vscode.TelemetryTrustedValue(lines[1]);
+            const backtrace = lines[2];
+            const message = lines.slice(3).join("\n");
+            telemetryLogger.logError("lsp-panic", {
+                version: version,
+                location: location,
+                message: message,
+                backtrace: backtrace,
+            });
+            console.log("Removing file");
+            vscode.workspace.fs.delete(uri);
+        });
+    });
+
+    // Ensure the watcher is disposed of when the extension is deactivated
+    context.subscriptions.push(watcher);
 }
 
 export function deactivate(): Thenable<void> | undefined {

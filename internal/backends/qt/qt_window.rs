@@ -595,6 +595,30 @@ fn into_qbrush(
                 return QBrush(qrg);
             }}
         }
+        i_slint_core::Brush::ConicGradient(g) => {
+            cpp_class!(unsafe struct QConicalGradient as "QConicalGradient");
+            // QConicalGradient uses angles where 0 degrees is at 3 o'clock (east)
+            // We want gradient position 0 at 12 o'clock (north), so start at -90°
+            let mut qcg = cpp! {
+                unsafe [width as "qreal", height as "qreal"] -> QConicalGradient as "QConicalGradient" {
+                    QConicalGradient qcg(width / 2, height / 2, 90);
+                    return qcg;
+                }
+            };
+            let count = g.stops().count();
+            for (idx, s) in g.stops().enumerate() {
+                // Qt's conical gradient goes counter-clockwise, but Slint expects clockwise
+                // So we need to invert the positions: Qt position = 1.0 - Slint position
+                let pos: f32 = 1.0 - mangle_position(s.position, idx, count);
+                let color: u32 = s.color.as_argb_encoded();
+                cpp! {unsafe [mut qcg as "QConicalGradient", pos as "float", color as "QRgb"] {
+                    qcg.setColorAt(pos, QColor::fromRgba(color));
+                }};
+            }
+            cpp! {unsafe [qcg as "QConicalGradient"] -> qttypes::QBrush as "QBrush" {
+                return QBrush(qcg);
+            }}
+        }
         _ => qttypes::QBrush::default(),
     }
 }
@@ -1353,8 +1377,6 @@ impl QtItemRenderer<'_> {
         size: LogicalSize,
         image: Pin<&dyn i_slint_core::item_rendering::RenderImage>,
     ) {
-        let dest_rect: qttypes::QRectF = check_geometry!(size);
-
         let source_rect = image.source_clip();
 
         let pixmap: qttypes::QPixmap = self.cache.get_or_update_cache_entry(item_rc, || {
@@ -1399,8 +1421,12 @@ impl QtItemRenderer<'_> {
                 |mut pixmap: qttypes::QPixmap| {
                     let colorize = image.colorize();
                     if !colorize.is_transparent() {
-                        let brush: qttypes::QBrush =
-                            into_qbrush(colorize, dest_rect.width, dest_rect.height);
+                        let pixmap_size = pixmap.size();
+                        let brush: qttypes::QBrush = into_qbrush(
+                            colorize,
+                            pixmap_size.width.into(),
+                            pixmap_size.height.into(),
+                        );
                         cpp!(unsafe [mut pixmap as "QPixmap", brush as "QBrush"] {
                             QPainter p(&pixmap);
                             p.setCompositionMode(QPainter::CompositionMode_SourceIn);

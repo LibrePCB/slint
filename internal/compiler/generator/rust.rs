@@ -23,7 +23,7 @@ use crate::object_tree::Document;
 use crate::CompilerConfiguration;
 use itertools::Either;
 use lyon_path::geom::euclid::approxeq::ApproxEq;
-use proc_macro2::{Ident, TokenStream};
+use proc_macro2::{Ident, TokenStream, TokenTree};
 use quote::{format_ident, quote};
 use smol_str::SmolStr;
 use std::collections::{BTreeMap, BTreeSet};
@@ -761,10 +761,7 @@ fn generate_sub_component(
             let elem_name = ident(&item.name);
             while let Some(ty) = it {
                 for (prop, info) in &ty.properties {
-                    if info.ty.is_property_type()
-                        && !prop.starts_with("viewport")
-                        && prop != "commands"
-                    {
+                    if info.ty.is_property_type() && prop != "commands" {
                         let name = format!("{}::{}.{}", component.name, item.name, prop);
                         let prop = ident(&prop);
                         init.push(
@@ -1091,8 +1088,8 @@ fn generate_sub_component(
         }
     }));
 
-    let layout_info_h = compile_expression(&component.layout_info_h.borrow(), &ctx);
-    let layout_info_v = compile_expression(&component.layout_info_v.borrow(), &ctx);
+    let layout_info_h = compile_expression_no_parenthesis(&component.layout_info_h.borrow(), &ctx);
+    let layout_info_v = compile_expression_no_parenthesis(&component.layout_info_v.borrow(), &ctx);
 
     // FIXME! this is only public because of the ComponentHandle::WeakInner. we should find another way
     let visibility = parent_ctx.is_none().then(|| quote!(pub));
@@ -1172,8 +1169,8 @@ fn generate_sub_component(
                     tree_index: u32, tree_index_of_first_child: u32) {
                 #![allow(unused)]
                 let _self = self_rc.as_pin_ref();
-                _self.self_weak.set(sp::VRcMapped::downgrade(&self_rc));
-                _self.globals.set(globals);
+                let _ = _self.self_weak.set(sp::VRcMapped::downgrade(&self_rc));
+                let _ = _self.globals.set(globals);
                 _self.tree_index.set(tree_index);
                 _self.tree_index_of_first_child.set(tree_index_of_first_child);
                 #(#init)*
@@ -1493,7 +1490,7 @@ fn generate_global(
             }
             fn init(self: ::core::pin::Pin<sp::Rc<Self>>, globals: &sp::Rc<SharedGlobals>) {
                 #![allow(unused)]
-                self.globals.set(sp::Rc::downgrade(globals));
+                let _ = self.globals.set(sp::Rc::downgrade(globals));
                 let self_rc = self;
                 let _self = self_rc.as_ref();
                 #(#init)*
@@ -2148,7 +2145,7 @@ fn follow_sub_component_path<'a>(
 
 fn access_window_adapter_field(ctx: &EvaluationContext) -> TokenStream {
     let global_access = &ctx.generator_state.global_access;
-    quote!((&#global_access.window_adapter_impl()))
+    quote!(&#global_access.window_adapter_impl())
 }
 
 /// Given a property reference to a native item (eg, the property name is empty)
@@ -2206,7 +2203,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             let f = compile_expression(from, ctx);
             match (from.ty(ctx), to) {
                 (Type::Float32, Type::Int32) => {
-                    quote!((#f as i32))
+                    quote!(((#f) as i32))
                 }
                 (from, Type::String) if from.as_unit_product().is_some() => {
                     quote!(sp::shared_string_from_number((#f) as f64))
@@ -2215,7 +2212,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                     quote!(sp::ModelRc::new(#f.max(::core::default::Default::default()) as usize))
                 }
                 (Type::Float32, Type::Color) => {
-                    quote!(sp::Color::from_argb_encoded(#f as u32))
+                    quote!(sp::Color::from_argb_encoded((#f) as u32))
                 }
                 (Type::Color, Type::Brush) => {
                     quote!(slint::Brush::SolidColor(#f))
@@ -2351,8 +2348,14 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             }})
         }
         Expression::CodeBlock(sub) => {
-            let map = sub.iter().map(|e| compile_expression(e, ctx));
-            quote!({ #(#map);* })
+            let mut body = TokenStream::new();
+            for (i, e) in sub.iter().enumerate() {
+                body.extend(compile_expression_no_parenthesis(e, ctx));
+                if i + 1 < sub.len() && !matches!(e, Expression::StoreLocalVariable{..}) {
+                    body.extend(quote!(;));
+                }
+            }
+            quote!({ #body })
         }
         Expression::PropertyAssignment { property, value } => {
             let value = compile_expression(value, ctx);
@@ -2394,8 +2397,8 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         }
         Expression::BinaryExpression { lhs, rhs, op } => {
             let lhs_ty = lhs.ty(ctx);
-            let lhs = compile_expression(lhs, ctx);
-            let rhs = compile_expression(rhs, ctx);
+            let lhs = compile_expression_no_parenthesis(lhs, ctx);
+            let rhs = compile_expression_no_parenthesis(rhs, ctx);
 
             if lhs_ty.as_unit_product().is_some() && (*op == '=' || *op == '!') {
                 let maybe_negate = if *op == '!' { quote!(!) } else { quote!() };
@@ -2438,7 +2441,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                     ))
                     .into(),
                 };
-                quote!( ((#lhs #conv1 ) #op (#rhs #conv2)) )
+                quote!( (((#lhs) #conv1 ) #op ((#rhs) #conv2)) )
             }
         }
         Expression::UnaryOp { sub, op } => {
@@ -2479,9 +2482,9 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             }
         }
         Expression::Condition { condition, true_expr, false_expr } => {
-            let condition_code = compile_expression(condition, ctx);
+            let condition_code = compile_expression_no_parenthesis(condition, ctx);
             let true_code = compile_expression(true_expr, ctx);
-            let false_code = compile_expression(false_expr, ctx);
+            let false_code = compile_expression_no_parenthesis(false_expr, ctx);
             let semi = if false_expr.ty(ctx) == Type::Void { quote!(;) } else { quote!(as _) };
             quote!(
                 if #condition_code {
@@ -2531,7 +2534,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         }
 
         Expression::StoreLocalVariable { name, value } => {
-            let value = compile_expression(value, ctx);
+            let value = compile_expression_no_parenthesis(value, ctx);
             let name = ident(name);
             quote!(let #name = #value;)
         }
@@ -2582,6 +2585,16 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             });
             quote!(slint::Brush::RadialGradient(
                 sp::RadialGradientBrush::new_circle([#(#stops),*])
+            ))
+        }
+        Expression::ConicGradient { stops } => {
+            let stops = stops.iter().map(|(color, stop)| {
+                let color = compile_expression(color, ctx);
+                let position = compile_expression(stop, ctx);
+                quote!(sp::GradientStop{ color: #color, position: #position as _ })
+            });
+            quote!(slint::Brush::ConicGradient(
+                sp::ConicGradientBrush::new([#(#stops),*])
             ))
         }
         Expression::EnumerationValue(value) => {
@@ -2636,13 +2649,18 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             }
         }
         Expression::MinMax { ty, op, lhs, rhs } => {
+            let lhs = compile_expression(lhs, ctx);
             let t = rust_primitive_type(ty);
-            let wrap = |expr| match &t {
-                Some(t) => quote!((#expr as #t)),
-                None => expr,
+            let (lhs, rhs) = match t {
+                Some(t) => {
+                    let rhs = compile_expression(rhs, ctx);
+                    (quote!((#lhs as #t)), quote!(#rhs as #t))
+                },
+                None => {
+                    let rhs = compile_expression_no_parenthesis(rhs, ctx);
+                    (lhs, rhs)
+                }
             };
-            let lhs = wrap(compile_expression(lhs, ctx));
-            let rhs = wrap(compile_expression(rhs, ctx));
             match op {
                 MinMaxOp::Min => {
                     quote!(#lhs.min(#rhs))
@@ -2820,29 +2838,34 @@ fn compile_builtin_function_call(
                     &ctx.compilation_unit.sub_components
                         [current_sub_component.menu_item_trees[*tree_index as usize].root],
                 );
-                quote!({
+                quote! {
                     let menu_item_tree_instance = #item_tree_id::new(_self.self_weak.get().unwrap().clone()).unwrap();
-                    let context_menu_item_tree = sp::Rc::new(sp::MenuFromItemTree::new(sp::VRc::into_dyn(menu_item_tree_instance)));
-                    let mut entries = sp::SharedVector::default();
-                    sp::Menu::sub_menu(&*context_menu_item_tree, sp::Option::None, &mut entries);
-                    let _self = popup_instance_vrc.as_pin_ref();
-                    #access_entries.set(sp::ModelRc::new(sp::SharedVectorModel::from(entries)));
+                    let context_menu_item_tree = sp::VRc::new(sp::MenuFromItemTree::new(sp::VRc::into_dyn(menu_item_tree_instance)));
                     let context_menu_item_tree_ = context_menu_item_tree.clone();
-                    #access_sub_menu.set_handler(move |entry| {
+                    {
                         let mut entries = sp::SharedVector::default();
-                        sp::Menu::sub_menu(&*context_menu_item_tree_, sp::Option::Some(&entry.0), &mut entries);
-                        sp::ModelRc::new(sp::SharedVectorModel::from(entries))
-                    });
-                    #access_activated.set_handler(move |entry| {
-                        sp::Menu::activate(&*context_menu_item_tree, &entry.0);
-                    });
-                    let self_weak = parent_weak.clone();
-                    #access_close.set_handler(move |()| {
-                        let Some(self_rc) = self_weak.upgrade() else { return };
-                        let _self = self_rc.as_pin_ref();
-                        #close_popup
-                    });
-                })
+                        sp::Menu::sub_menu(&*context_menu_item_tree, sp::Option::None, &mut entries);
+                        let _self = popup_instance_vrc.as_pin_ref();
+                        #access_entries.set(sp::ModelRc::new(sp::SharedVectorModel::from(entries)));
+                        let context_menu_item_tree = context_menu_item_tree_.clone();
+                        #access_sub_menu.set_handler(move |entry| {
+                            let mut entries = sp::SharedVector::default();
+                            sp::Menu::sub_menu(&*context_menu_item_tree, sp::Option::Some(&entry.0), &mut entries);
+                            sp::ModelRc::new(sp::SharedVectorModel::from(entries))
+                        });
+                        let context_menu_item_tree = context_menu_item_tree_.clone();
+                        #access_activated.set_handler(move |entry| {
+                            sp::Menu::activate(&*context_menu_item_tree_, &entry.0);
+                        });
+                        let self_weak = parent_weak.clone();
+                        #access_close.set_handler(move |()| {
+                            let Some(self_rc) = self_weak.upgrade() else { return };
+                            let _self = self_rc.as_pin_ref();
+                            #close_popup
+                        });
+                    }
+                    let context_menu_item_tree = sp::VRc::into_dyn(context_menu_item_tree);
+                }
             } else {
                 // entries should be an expression of type array of MenuEntry
                 debug_assert!(
@@ -2863,13 +2886,39 @@ fn compile_builtin_function_call(
                         });
                     )
                 };
-                let fw_sub_menu = forward_callback(access_sub_menu, quote!(sub_menu));
-                let fw_activated = forward_callback(access_activated, quote!(activated));
+                let fw_sub_menu = forward_callback(access_sub_menu.clone(), quote!(sub_menu));
+                let fw_activated = forward_callback(access_activated.clone(), quote!(activated));
                 quote! {
                     let entries = #entries;
+
+                    // May seem overkill to have an instance of the struct for each call, but there should only be one call per component anyway
+                    struct ContextMenuWrapper(sp::VRc<sp::ItemTreeVTable, #popup_id>, sp::ModelRc<sp::MenuEntry>);
+                    const _ : () = {
+                        use slint::private_unstable_api::re_exports::*;
+                        MenuVTable_static!(static VT for ContextMenuWrapper);
+                    };
+                    impl sp::Menu for ContextMenuWrapper {
+                        fn sub_menu(&self, parent: sp::Option<&sp::MenuEntry>, result: &mut sp::SharedVector<sp::MenuEntry>) {
+                            let self_rc = self.0.clone();
+                            let _self = self_rc.as_pin_ref();
+                            let model = match parent {
+                                None => self.1.clone(),
+                                Some(parent) => #access_sub_menu.call(&(parent.clone(),))
+                            };
+                            *result = model.iter().map(|v| v.try_into().unwrap()).collect();
+                        }
+                        fn activate(&self, entry: &sp::MenuEntry) {
+                            let self_rc = self.0.clone();
+                            let _self = self_rc.as_pin_ref();
+                            #access_activated.call(&(entry.clone(),));
+                        }
+                    }
+                    let context_menu_item_tree = sp::VRc::new(ContextMenuWrapper(popup_instance.clone(), entries.clone()));
+                    let context_menu_item_tree = sp::VRc::into_dyn(context_menu_item_tree);
+
                     {
                         let _self = popup_instance_vrc.as_pin_ref();
-                        #access_entries.set(entries);
+                        #access_entries.set(entries.clone());
                         #fw_sub_menu
                         #fw_activated
                         let self_weak = parent_weak.clone();
@@ -2882,22 +2931,28 @@ fn compile_builtin_function_call(
                 }
             };
             let context_menu = context_menu.unwrap();
+
             quote!({
                 let position = #position;
                 let popup_instance = #popup_id::new(_self.globals.get().unwrap().clone()).unwrap();
                 let popup_instance_vrc = sp::VRc::map(popup_instance.clone(), |x| x);
-                let parent_weak = _self.self_weak.get().unwrap().clone();
-                #init_popup
-                #close_popup
-                let id = sp::WindowInner::from_pub(#window_adapter_tokens.window()).show_popup(
-                    &sp::VRc::into_dyn(popup_instance.into()),
-                    position,
-                    sp::PopupClosePolicy::CloseOnClickOutside,
-                    #context_menu_rc,
-                    true, // is_menu
-                );
-                #context_menu.popup_id.set(Some(id));
-                #popup_id::user_init(popup_instance_vrc);
+                {
+                    let parent_weak = _self.self_weak.get().unwrap().clone();
+                    #init_popup
+
+                    if !sp::WindowInner::from_pub(#window_adapter_tokens.window()).show_native_popup_menu(context_menu_item_tree, #position) {
+                        #close_popup
+                        let id = sp::WindowInner::from_pub(#window_adapter_tokens.window()).show_popup(
+                            &sp::VRc::into_dyn(popup_instance.into()),
+                            position,
+                            sp::PopupClosePolicy::CloseOnClickOutside,
+                            #context_menu_rc,
+                            true, // is_menu
+                        );
+                        #context_menu.popup_id.set(Some(id));
+                        #popup_id::user_init(popup_instance_vrc);
+                    }
+                }
             })
         }
         BuiltinFunction::SetSelectionOffsets => {
@@ -3116,12 +3171,14 @@ fn compile_builtin_function_call(
                     quote!()
                 } else {
                     quote!(if sp::WindowInner::from_pub(#window_adapter_tokens.window()).supports_native_menu_bar() {
-                        sp::WindowInner::from_pub(#window_adapter_tokens.window()).setup_menubar(sp::VBox::new(menu_item_tree));
+                        let menu_item_tree = sp::VRc::new(menu_item_tree);
+                        let menu_item_tree = sp::VRc::into_dyn(menu_item_tree);
+                        sp::WindowInner::from_pub(#window_adapter_tokens.window()).setup_menubar(menu_item_tree);
                     } else)
                 };
 
                 quote!({
-                    let menu_item_tree_instance = #item_tree_id::new(_self.self_weak.get().unwrap().clone()).unwrap();
+                    let menu_item_tree_instance = #item_tree_id::new(_self.self_weak.get().unwrap().clone()).unwrap(); // BLGAG
                     let menu_item_tree = sp::MenuFromItemTree::new(sp::VRc::into_dyn(menu_item_tree_instance));
                     #native_impl
                     /*else*/ {
@@ -3175,7 +3232,9 @@ fn compile_builtin_function_call(
                                 #activated.call(&(entry.clone(),))
                             }
                         }
-                        sp::WindowInner::from_pub(#window_adapter_tokens.window()).setup_menubar(sp::VBox::new(MenuBarWrapper(_self.self_weak.get().unwrap().clone())));
+                        let menubar = sp::VRc::new(MenuBarWrapper(_self.self_weak.get().unwrap().clone()));
+                        let menubar = sp::VRc::into_dyn(menubar);
+                        sp::WindowInner::from_pub(#window_adapter_tokens.window()).setup_menubar(menubar);
                     }
                 }
             } else {
@@ -3490,6 +3549,29 @@ pub fn generate_named_exports(exports: &crate::object_tree::Exports) -> Vec<Toke
             quote!(#type_id as #export_id)
         })
         .collect::<Vec<_>>()
+}
+
+fn compile_expression_no_parenthesis(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
+    fn extract_single_group(stream: &TokenStream) -> Option<TokenStream> {
+        let mut iter = stream.clone().into_iter();
+        let Some(elem) = iter.next() else { return None };
+        let TokenTree::Group(elem) = elem else { return None };
+        if elem.delimiter() != proc_macro2::Delimiter::Parenthesis {
+            return None;
+        }
+        if iter.next().is_some() {
+            return None;
+        }
+        Some(elem.stream())
+    }
+
+    let mut stream = compile_expression(expr, ctx);
+    if !matches!(expr, Expression::Struct { .. }) {
+        while let Some(s) = extract_single_group(&stream) {
+            stream = s;
+        }
+    }
+    stream
 }
 
 #[cfg(feature = "bundle-translations")]

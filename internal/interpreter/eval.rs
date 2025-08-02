@@ -4,7 +4,9 @@
 use crate::api::{SetPropertyError, Struct, Value};
 use crate::dynamic_item_tree::{CallbackHandler, InstanceRef};
 use core::pin::Pin;
-use corelib::graphics::{GradientStop, LinearGradientBrush, PathElement, RadialGradientBrush};
+use corelib::graphics::{
+    ConicGradientBrush, GradientStop, LinearGradientBrush, PathElement, RadialGradientBrush,
+};
 use corelib::items::{ColorScheme, ItemRef, MenuEntry, PropertyAnimation};
 use corelib::menus::{Menu, MenuFromItemTree, MenuVTable};
 use corelib::model::{Model, ModelExt, ModelRc, VecModel};
@@ -369,6 +371,13 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                 GradientStop{ color, position }
             }))))
         }
+        Expression::ConicGradient{stops} => {
+            Value::Brush(Brush::ConicGradient(ConicGradientBrush::new(stops.iter().map(|(color, stop)| {
+                let color = eval_expression(color, local_context).try_into().unwrap();
+                let position = eval_expression(stop, local_context).try_into().unwrap();
+                GradientStop{ color, position }
+            }))))
+        }
         Expression::EnumerationValue(value) => {
             Value::EnumerationValue(value.enumeration.name.to_string(), value.to_string())
         }
@@ -697,12 +706,14 @@ fn call_builtin_function(
             let description = enclosing_component.description;
             let item_info = &description.items[elem.borrow().id.as_str()];
             let item_comp = enclosing_component.self_weak().get().unwrap().upgrade().unwrap();
-            let item_rc = corelib::items::ItemRc::new(
-                vtable::VRc::into_dyn(item_comp),
-                item_info.item_index(),
-            );
+            let item_tree = vtable::VRc::into_dyn(item_comp);
+            let item_rc = corelib::items::ItemRc::new(item_tree.clone(), item_info.item_index());
 
-            if component.access_window(|window| window.show_native_popup_menu(&item_rc, position)) {
+            let context_menu_item = vtable::VRc::new(MenuFromItemTree::new(item_tree));
+            let context_menu_item = vtable::VRc::into_dyn(context_menu_item);
+            if component
+                .access_window(|window| window.show_native_popup_menu(context_menu_item, position))
+            {
                 return Value::Void;
             }
 
@@ -1149,7 +1160,9 @@ fn call_builtin_function(
 
                 if let Some(w) = component.window_adapter().internal(i_slint_core::InternalToken) {
                     if !no_native && w.supports_native_menu_bar() {
-                        w.setup_menubar(vtable::VBox::new(menu_item_tree));
+                        let menubar = vtable::VRc::new(menu_item_tree);
+                        let menubar = vtable::VRc::into_dyn(menubar);
+                        w.setup_menubar(menubar);
                         return Value::Void;
                     }
                 }
@@ -1181,12 +1194,14 @@ fn call_builtin_function(
             };
             if let Some(w) = component.window_adapter().internal(i_slint_core::InternalToken) {
                 if w.supports_native_menu_bar() {
-                    w.setup_menubar(vtable::VBox::new(MenuWrapper {
+                    let menubar = vtable::VRc::new(MenuWrapper {
                         entries: entries.clone(),
                         sub_menu: sub_menu.clone(),
                         activated: activated.clone(),
                         item_tree: component.self_weak().get().unwrap().clone(),
-                    }));
+                    });
+                    let menubar = vtable::VRc::into_dyn(menubar);
+                    w.setup_menubar(menubar);
                 }
             }
             Value::Void

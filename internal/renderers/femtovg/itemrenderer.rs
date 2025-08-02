@@ -1559,8 +1559,18 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
                     [path_width, path_height].into(),
                 );
 
-                let stops =
-                    gradient.stops().map(|stop| (stop.position, to_femtovg_color(&stop.color)));
+                let mut stops: Vec<_> = gradient
+                    .stops()
+                    .map(|stop| (stop.position, to_femtovg_color(&stop.color)))
+                    .collect();
+
+                // Add an extra stop at 1.0 with the same color as the last stop
+                if let Some(last_stop) = stops.last().cloned() {
+                    if last_stop.0 != 1.0 {
+                        stops.push((1.0, last_stop.1));
+                    }
+                }
+
                 femtovg::Paint::linear_gradient_stops(start.x, start.y, end.x, end.y, stops)
             }
             Brush::RadialGradient(gradient) => {
@@ -1569,8 +1579,18 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
                 let path_width = path_bounds.width();
                 let path_height = path_bounds.height();
 
-                let stops =
-                    gradient.stops().map(|stop| (stop.position, to_femtovg_color(&stop.color)));
+                let mut stops: Vec<_> = gradient
+                    .stops()
+                    .map(|stop| (stop.position, to_femtovg_color(&stop.color)))
+                    .collect();
+
+                // Add an extra stop at 1.0 with the same color as the last stop
+                if let Some(last_stop) = stops.last().cloned() {
+                    if last_stop.0 != 1.0 {
+                        stops.push((1.0, last_stop.1));
+                    }
+                }
+
                 femtovg::Paint::radial_gradient_stops(
                     path_width / 2.,
                     path_height / 2.,
@@ -1578,6 +1598,16 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
                     0.5 * (path_width * path_width + path_height * path_height).sqrt(),
                     stops,
                 )
+            }
+            Brush::ConicGradient(gradient) => {
+                // FemtoVG doesn't support conic gradients natively
+                // Fallback to a solid color (using first stop color)
+                if let Some(first_stop) = gradient.stops().next() {
+                    femtovg::Paint::color(to_femtovg_color(&first_stop.color))
+                } else {
+                    // No stops, use transparent
+                    femtovg::Paint::color(femtovg::Color::rgba(0, 0, 0, 0))
+                }
             }
             _ => return None,
         })

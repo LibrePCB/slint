@@ -375,7 +375,7 @@ declare_syntax! {
                        ?ConditionalExpression, ?QualifiedName, ?BinaryExpression, ?Array, ?ObjectLiteral,
                        ?UnaryOpExpression, ?CodeBlock, ?StringTemplate, ?AtImageUrl, ?AtGradient, ?AtTr,
                        ?MemberAccess ],
-        /// Concatenate the Expressions to make a string (usually expended from a template string)
+        /// Concatenate the Expressions to make a string (usually expanded from a template string)
         StringTemplate -> [*Expression],
         /// `@image-url("foo.png")`
         AtImageUrl -> [],
@@ -827,7 +827,7 @@ impl SyntaxNode {
             .find(|n| n.kind() == kind)
             .and_then(|x| x.as_token().map(|x| x.text().into()))
     }
-    pub fn descendants(&self) -> impl Iterator<Item = SyntaxNode> {
+    pub fn descendants(&self) -> impl Iterator<Item = SyntaxNode> + use<'_> {
         let source_file = self.source_file.clone();
         self.node
             .descendants()

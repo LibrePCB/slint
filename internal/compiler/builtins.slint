@@ -136,6 +136,8 @@ export component FocusScope {
     in property <bool> enabled: true;
     in property <FocusPolicy> focus-policy;
     out property <bool> has-focus;
+    callback capture_key_pressed(event: KeyEvent) -> EventResult;
+    callback capture_key_released(event: KeyEvent) -> EventResult;
     callback key_pressed(event: KeyEvent) -> EventResult;
     callback key_released(event: KeyEvent) -> EventResult;
     callback focus_changed_event(reason: FocusReason);
@@ -626,6 +628,7 @@ export component NativeLineEdit {
     out property <length> native-padding-right;
     out property <length> native-padding-top;
     out property <length> native-padding-bottom;
+    out property <image> clear-icon;
     in property <bool> has-focus;
     in property <bool> enabled: true;
     //-is_internal

@@ -3447,6 +3447,17 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                 stops_it.join(", "), stops.len()
             )
         }
+        Expression::ConicGradient{ stops} => {
+            let mut stops_it = stops.iter().map(|(color, stop)| {
+                let color = compile_expression(color, ctx);
+                let position = compile_expression(stop, ctx);
+                format!("slint::private_api::GradientStop{{ {color}, float({position}), }}")
+            });
+            format!(
+                "[&] {{ const slint::private_api::GradientStop stops[] = {{ {} }}; return slint::Brush(slint::private_api::ConicGradientBrush(stops, {})); }}()",
+                stops_it.join(", "), stops.len()
+            )
+        }
         Expression::EnumerationValue(value) => {
             let prefix = if value.enumeration.node.is_some() { "" } else {"slint::cbindgen_private::"};
             format!(
@@ -3737,12 +3748,10 @@ fn compile_builtin_function_call(
                         if ({window}.supports_native_menu_bar()) {{
                             auto item_tree = {item_tree_id}::create(self);
                             auto item_tree_dyn = item_tree.into_dyn();
-                            vtable::VBox<slint::cbindgen_private::MenuVTable> box{{}};
-                            slint::cbindgen_private::slint_menus_create_wrapper(&item_tree_dyn, &box);
-                            slint::cbindgen_private::slint_windowrc_setup_native_menu_bar(&{window}.handle(), const_cast<slint::cbindgen_private::MenuVTable*>(box.vtable), box.instance);
-                            // The ownership of the VBox is transferred to slint_windowrc_setup_native_menu_bar
-                            box.instance = nullptr;
-                            box.vtable = nullptr;
+                            slint::private_api::MaybeUninitialized<vtable::VRc<slint::cbindgen_private::MenuVTable>> maybe;
+                            slint::cbindgen_private::slint_menus_create_wrapper(&item_tree_dyn, &maybe.value);
+                            auto vrc = maybe.take();
+                            slint::cbindgen_private::slint_windowrc_setup_native_menu_bar(&{window}.handle(), &vrc);
                         }} else {{
                             auto item_tree = {item_tree_id}::create(self);
                             auto item_tree_dyn = item_tree.into_dyn();
