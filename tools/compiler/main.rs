@@ -221,6 +221,7 @@ fn main() -> std::io::Result<()> {
         }
 
         writeln!(f)?;
+        f.flush()?;
     }
     diag.print_warnings_and_exit_on_error();
     Ok(())

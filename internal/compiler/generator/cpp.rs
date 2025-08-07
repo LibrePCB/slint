@@ -873,7 +873,9 @@ pub fn generate(
 
     for (cpp_file_name, cpp_file) in config.cpp_files.iter().zip(cpp_files) {
         use std::io::Write;
-        write!(&mut BufWriter::new(std::fs::File::create(&cpp_file_name)?), "{cpp_file}")?;
+        let mut writer = BufWriter::new(std::fs::File::create(&cpp_file_name)?);
+        write!(&mut writer, "{cpp_file}")?;
+        writer.flush()?;
     }
 
     Ok(file)
