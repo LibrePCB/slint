@@ -379,6 +379,7 @@ if (SLINT_BUILD_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_string_internal.h
         ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_timer_internal.h
         ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_events_internal.h
+        ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_testing_internal.h
     )
 
     if(SLINT_FEATURE_INTERPRETER)
@@ -392,6 +393,11 @@ if (SLINT_BUILD_RUNTIME)
     foreach(header IN LISTS generated_headers)
         set_property(TARGET Slint APPEND PROPERTY PUBLIC_HEADER ${header})
     endforeach()
+
+    # Let CMake know about generated header files of build.rs to hopefully
+    # get a correct dependency tree.
+    set_source_files_properties(generated_headers PROPERTIES GENERATED TRUE)
+    target_sources(Slint PRIVATE generated_headers)
 
     target_include_directories(Slint INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated_include>
