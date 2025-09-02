@@ -201,7 +201,7 @@ fn main() -> std::io::Result<()> {
         let mut file =
             BufWriter::new(atomic_write_file::AtomicWriteFile::options().open(&args.output)?);
         generator::generate(format, &mut file, &doc, &loader.compiler_config)?;
-        file.flush();
+        file.flush()?;
         file.into_inner()?.commit()?;
     }
 
