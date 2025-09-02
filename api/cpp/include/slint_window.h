@@ -17,39 +17,6 @@ namespace private_api {
 using ItemTreeRc = vtable::VRc<cbindgen_private::ItemTreeVTable>;
 using slint::LogicalPosition;
 
-template<typename Component, typename SubMenu, typename Activated>
-struct MenuWrapper
-{
-    Component component;
-    SubMenu submenu;
-    Activated activated;
-    static cbindgen_private::MenuVTable static_vtable;
-};
-
-template<typename Component, typename SubMenu, typename Activated>
-inline cbindgen_private::MenuVTable MenuWrapper<Component, SubMenu, Activated>::static_vtable {
-    .sub_menu =
-            [](auto data, const cbindgen_private::MenuEntry *entry,
-               slint::SharedVector<cbindgen_private::MenuEntry> *result) {
-                auto wrapper = reinterpret_cast<MenuWrapper *>(data.instance);
-                auto model = wrapper->submenu(wrapper->component, entry);
-                result->clear();
-                if (model) {
-                    auto count = model->row_count();
-                    for (size_t i = 0; i < count; ++i) {
-                        result->push_back(*model->row_data(i));
-                    }
-                }
-            },
-    .activate =
-            [](auto data, const cbindgen_private::MenuEntry *entry) {
-                auto wrapper = reinterpret_cast<MenuWrapper *>(data.instance);
-                wrapper->activated(wrapper->component, *entry);
-            },
-    .drop_in_place = vtable::drop_in_place<cbindgen_private::MenuVTable, MenuWrapper>,
-    .dealloc = vtable::dealloc<cbindgen_private::MenuVTable>,
-};
-
 class WindowAdapterRc
 {
 public:
@@ -87,18 +54,6 @@ public:
     bool supports_native_menu_bar() const
     {
         return slint_windowrc_supports_native_menu_bar(&inner);
-    }
-
-    template<typename Component, typename SubMenu, typename Activated>
-    void setup_native_menu_bar(Component component, SubMenu submenu, Activated activated) const
-    {
-        if (!supports_native_menu_bar()) {
-            return;
-        }
-        using Wrapper = MenuWrapper<Component, SubMenu, Activated>;
-        auto instance = vtable::VRc<cbindgen_private::MenuVTable, Wrapper>::make(
-                Wrapper { component, std::move(submenu), std::move(activated) });
-        cbindgen_private::slint_windowrc_setup_native_menu_bar(&inner, &instance.into_dyn());
     }
 
     bool text_input_focused() const { return slint_windowrc_get_text_input_focused(&inner); }
@@ -150,10 +105,17 @@ public:
     }
 
     template<typename Component, typename SharedGlobals, typename InitFn>
-    uint32_t show_popup_menu(SharedGlobals *globals, LogicalPosition pos,
-                             cbindgen_private::ItemRc context_menu_rc, InitFn init) const
+    uint32_t show_popup_menu(
+            SharedGlobals *globals, LogicalPosition pos, cbindgen_private::ItemRc context_menu_rc,
+            InitFn init,
+            std::optional<vtable::VRc<cbindgen_private::MenuVTable>> menu = std::nullopt) const
     {
-        // if (cbindgen_private::slint_windowrc_show_native_context_menu(....)) { return }
+        if (menu) {
+            if (cbindgen_private::slint_windowrc_show_native_popup_menu(&inner, &menu.value(), pos,
+                                                                        &context_menu_rc)) {
+                return 0;
+            }
+        }
 
         auto popup = Component::create(globals);
         init(&*popup);
@@ -254,8 +216,7 @@ public:
     inline std::optional<SharedString> register_font_from_data(const uint8_t *data, std::size_t len)
     {
         SharedString maybe_err;
-        cbindgen_private::slint_register_font_from_data(
-                &inner, { const_cast<uint8_t *>(data), len }, &maybe_err);
+        cbindgen_private::slint_register_font_from_data(&inner, make_slice(data, len), &maybe_err);
         if (!maybe_err.empty()) {
             return maybe_err;
         } else {
@@ -267,11 +228,6 @@ public:
     inline void register_bitmap_font(const cbindgen_private::BitmapFont &font)
     {
         cbindgen_private::slint_register_bitmap_font(&inner, &font);
-    }
-
-    inline float default_font_size() const
-    {
-        return cbindgen_private::slint_windowrc_default_font_size(&inner);
     }
 
     /// \private

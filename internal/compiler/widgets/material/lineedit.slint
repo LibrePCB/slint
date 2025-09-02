@@ -85,10 +85,9 @@ export component LineEdit {
                 horizontal-stretch: 1;
             }
 
-            LineEditClearIcon {
+            if !root.text.is-empty && root.input-type != InputType.password && root.enabled && !root.read-only: LineEditClearIcon {
                 width: self.source.width * 1px;
                 text: base.text;
-                visible: !root.text.is-empty && root.input-type != InputType.password && root.enabled && !root.read-only;
                 source: @image-url("_clear.svg");
                 colorize: base.text-color;
                 clear => {
@@ -102,6 +101,7 @@ export component LineEdit {
                 show-password-image: @image-url("_visibility.svg");
                 hide-password-image: @image-url("_visibility_off.svg");
                 colorize: base.text-color;
+                show-password: base.input-type != InputType.password;
                 show-password-changed(show) => {
                     base.input-type = show ? InputType.text : root.input-type;
                     base.focus();

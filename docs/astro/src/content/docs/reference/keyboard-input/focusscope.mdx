@@ -55,14 +55,23 @@ Is `true` when the element has keyboard focus.
 
 ### enabled
 <SlintProperty propName="enabled" typeName="bool" defaultValue="true">
- When true, the `FocusScope` will make itself the focused element when clicked. Set this to false if you don't want the click-to-focus
-    behavior. Similarly, a disabled `FocusScope` does not accept the focus via tab focus traversal. A parent `FocusScope` will still receive key events from
-    child `FocusScope`s that were rejected, even if `enabled` is set to false.
+When false, the FocusScope will not accept focus, neither via click nor via tab focus traversal, not even programmatically.
+
+A parent `FocusScope` will still receive key events from child `FocusScope`s that were rejected, even if `enabled` is set to false.
 </SlintProperty>
 
-### focus-policy
-<SlintProperty propName="focus-policy" typeName="enum" enumName="FocusPolicy">
-The focus policy of the scope.
+### focus-on-click
+<SlintProperty propName="focus-on-click" typeName="bool" defaultValue="true">
+When true, the `FocusScope` will make itself the focused element when clicked.
+
+This property has no effect if the `enabled` property is set to false.
+</SlintProperty>
+
+### focus-on-tab-navigation
+<SlintProperty propName="focus-on-tab-navigation" typeName="bool" defaultValue="true">
+When true, the `FocusScope` will accept focus as part of the tab focus traversal.
+
+This property has no effect if the `enabled` property is set to false.
 </SlintProperty>
 
 ## Functions
@@ -76,19 +85,19 @@ Call this function to remove keyboard focus from this `FocusScope` if it current
 ## Callbacks
 
 ### capture-key-pressed(KeyEvent) -> EventResult
-This function is called during key event handling, *before* `key-pressed` is called. Use this to intercept key press events. The returned `EventResult`
+This function is called during key event handling, *before* `key-pressed` is called. Use this to intercept key press events. The returned <Link type="EventResult" />
 indicates whether to accept or reject the event. Rejected events are forwarded to the parent element.
 
 ### capture-key-released(KeyEvent) -> EventResult
-This function is called during key event handling, *before* `key-released` is called. Use this to intercept key release events. The returned `EventResult`
+This function is called during key event handling, *before* `key-released` is called. Use this to intercept key release events. The returned <Link type="EventResult" />
 indicates whether to accept or reject the event. Rejected events are forwarded to the parent element.
 
 ### key-pressed(KeyEvent) -> EventResult
-Invoked when a key is pressed, the argument is a <Link type="KeyEvent" /> struct. The returned `EventResult`
+Invoked when a key is pressed, the argument is a <Link type="KeyEvent" /> struct. The returned <Link type="EventResult" />
 indicates whether to accept or reject the event. Rejected events are forwarded to the parent element.
 
 ### key-released(KeyEvent) -> EventResult
-Invoked when a key is released, the argument is a <Link type="KeyEvent" /> struct. The returned `EventResult`
+Invoked when a key is released, the argument is a <Link type="KeyEvent" /> struct. The returned <Link type="EventResult" />
 indicates whether to accept or reject the event. Rejected events are forwarded to the parent element.
 
 ### focus-changed-event(FocusReason)

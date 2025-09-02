@@ -134,27 +134,16 @@ macro_rules! for_each_enums {
             /// This enum describes the different reasons for a FocusEvent
             #[non_exhaustive]
             enum FocusReason {
+                /// A built-in function invocation caused the event (`.focus()`, `.clear-focus()`)
+                Programmatic,
                 /// Keyboard navigation caused the event (tabbing)
                 TabNavigation,
                 /// A mouse click caused the event
                 PointerClick,
                 /// A popup caused the event
                 PopupActivation,
-                /// A built-in function invocation caused the event (`.focus()`, `.clear-focus()`)
-                Programmatic,
                 /// The window manager changed the active window and caused the event
                 WindowActivation,
-            }
-
-            /// This enum describes the different focus policies for a FocusScope
-            #[non_exhaustive]
-            enum FocusPolicy {
-                /// The FocusScope accepts focus from both tab navigation and pointer clicks
-                TabAndClick,
-                /// The FocusScope only accepts focus from tab navigation
-                TabOnly,
-                /// The FocusScope only accepts focus from pointer clicks
-                ClickOnly,
             }
 
             /// The enum reports what happened to the `PointerEventButton` in the event

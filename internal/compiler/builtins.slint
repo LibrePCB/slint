@@ -134,7 +134,8 @@ export component TouchArea {
 
 export component FocusScope {
     in property <bool> enabled: true;
-    in property <FocusPolicy> focus-policy;
+    in property <bool> focus-on-click: true;
+    in property <bool> focus-on-tab-navigation: true;
     out property <bool> has-focus;
     callback capture_key_pressed(event: KeyEvent) -> EventResult;
     callback capture_key_released(event: KeyEvent) -> EventResult;
@@ -197,6 +198,7 @@ export component DragArea {
     //-default_size_binding:expands_to_parent_geometry
 
 }
+
 export component DropArea {
     in property <bool> enabled: true;
     callback can-drop(event: DropEvent) -> bool;
@@ -209,6 +211,8 @@ component MenuItem {
     in property <string> title;
     callback activated();
     in property <bool> enabled: true;
+    in property <bool> checkable: false;
+    in-out property <bool> checked: false;
     in property <image> icon;
     //-disallow_global_types_as_child_elements
     //-is_non_item_type
@@ -223,9 +227,11 @@ component Menu {
     in property <string> title;
     in property <bool> enabled: true;
     in property <image> icon;
-    MenuItem {}
-    MenuSeparator {}
-    Menu {}
+    MenuItem { }
+
+    MenuSeparator { }
+
+    Menu { }
     //-disallow_global_types_as_child_elements
     //-is_non_item_type
 }
@@ -234,7 +240,7 @@ component Menu {
 component MenuBar {
     //-is_non_item_type
     //-disallow_global_types_as_child_elements
-    Menu {}
+    Menu { }
 }
 
 // The NativeItem, exported as ContextMenuInternal for the style
@@ -287,7 +293,7 @@ component WindowItem {
 }
 
 export component Window inherits WindowItem {
-    MenuBar {}
+    MenuBar { }
 }
 
 export component BoxShadow inherits Empty {
@@ -724,7 +730,6 @@ export global NativeStyleMetrics {
     out property <length> text-cursor-width;
     out property <color> window-background;
     out property <color> default-text-color;
-    out property <length> default-font-size;
     out property <color> textedit-background;
     out property <color> textedit-text-color;
     out property <color> textedit-background-disabled;

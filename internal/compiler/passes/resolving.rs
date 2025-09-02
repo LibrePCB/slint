@@ -1,7 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-//! Passes that resolve the property binding expression.
+//! This pass resolves the property binding expressions.
 //!
 //! Before this pass, all the expression are of type Expression::Uncompiled,
 //! and there should no longer be Uncompiled expression after this pass.
@@ -17,7 +17,7 @@ use crate::parser::{identifier_text, syntax_nodes, NodeOrToken, SyntaxKind, Synt
 use crate::typeregister::TypeRegister;
 use core::num::IntErrorKind;
 use smol_str::{SmolStr, ToSmolStr};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 /// This represents a scope for the Component, where Component is the repeated component, but
@@ -65,10 +65,17 @@ fn resolve_expression(
             SyntaxKind::BindingExpression => {
                 Expression::from_binding_expression_node(node.clone(), &mut lookup_ctx)
             }
-            SyntaxKind::PropertyChangedCallback => Expression::from_codeblock_node(
-                syntax_nodes::PropertyChangedCallback::from(node.clone()).CodeBlock(),
-                &mut lookup_ctx,
-            ),
+            SyntaxKind::PropertyChangedCallback => {
+                let node = syntax_nodes::PropertyChangedCallback::from(node.clone());
+                if let Some(code_block_node) = node.CodeBlock() {
+                    Expression::from_codeblock_node(code_block_node, &mut lookup_ctx)
+                } else if let Some(expr_node) = node.Expression() {
+                    Expression::from_expression_node(expr_node, &mut lookup_ctx)
+                } else {
+                    assert!(diag.has_errors());
+                    Expression::Invalid
+                }
+            }
             SyntaxKind::TwoWayBinding => {
                 assert!(diag.has_errors(), "Two way binding should have been resolved already  (property: {property_name:?})");
                 Expression::Invalid
@@ -1209,9 +1216,7 @@ impl Expression {
         );
         let true_expr = Self::from_expression_node(true_expr_n.clone(), ctx);
         let false_expr = Self::from_expression_node(false_expr_n.clone(), ctx);
-        let result_ty = Self::common_target_type_for_type_list(
-            [true_expr.ty(), false_expr.ty()].iter().cloned(),
-        );
+        let result_ty = common_expression_type(&true_expr, &false_expr);
         let true_expr = true_expr.maybe_convert_to(result_ty.clone(), &true_expr_n, ctx.diag);
         let false_expr = false_expr.maybe_convert_to(result_ty, &false_expr_n, ctx.diag);
         Expression::Condition {
@@ -1375,6 +1380,66 @@ impl Expression {
             }
         })
     }
+}
+
+/// Return the type that merge two times when they are used in two branch of a condition
+///
+/// Ideally this could just be Expression::common_target_type_for_type_list, but that function
+/// has a bug actually that it tries to convert things that only works for array literal,
+/// but doesn't work if we have a type of an array.
+/// So try to recurse into struct literal and array literal in expression to only call
+/// common_target_type_for_type_list for them, but always keep the type of the array
+/// if it is NOT an literal
+fn common_expression_type(true_expr: &Expression, false_expr: &Expression) -> Type {
+    fn merge_struct(origin: &Struct, other: &Struct) -> Type {
+        let mut fields = other.fields.clone();
+        fields.extend(origin.fields.iter().map(|(k, v)| (k.clone(), v.clone())));
+        Rc::new(Struct { fields, name: None, node: None, rust_attributes: None }).into()
+    }
+
+    if let Expression::Struct { ty, values } = true_expr {
+        if let Expression::Struct { values: values2, .. } = false_expr {
+            let mut fields = BTreeMap::new();
+            for (k, v) in values.iter() {
+                if let Some(v2) = values2.get(k) {
+                    fields.insert(k.clone(), common_expression_type(v, v2));
+                } else {
+                    fields.insert(k.clone(), v.ty());
+                }
+            }
+            for (k, v) in values2.iter() {
+                if !values.contains_key(k) {
+                    fields.insert(k.clone(), v.ty());
+                }
+            }
+            return Type::Struct(Rc::new(Struct {
+                fields,
+                name: None,
+                node: None,
+                rust_attributes: None,
+            }));
+        } else if let Type::Struct(false_ty) = false_expr.ty() {
+            return merge_struct(&false_ty, &ty);
+        }
+    } else if let Expression::Struct { ty, .. } = false_expr {
+        if let Type::Struct(true_ty) = true_expr.ty() {
+            return merge_struct(&true_ty, &ty);
+        }
+    }
+
+    if let Expression::Array { .. } = true_expr {
+        if let Expression::Array { .. } = false_expr {
+            // fallback to common_target_type_for_type_list
+        } else if let Type::Array(ty) = false_expr.ty() {
+            return Type::Array(ty);
+        }
+    } else if let Expression::Array { .. } = false_expr {
+        if let Type::Array(ty) = true_expr.ty() {
+            return Type::Array(ty);
+        }
+    }
+
+    Expression::common_target_type_for_type_list([true_expr.ty(), false_expr.ty()].into_iter())
 }
 
 /// Perform the lookup

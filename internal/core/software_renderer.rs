@@ -883,6 +883,10 @@ impl RendererSealed for SoftwareRenderer {
         self::fonts::systemfonts::register_font_from_path(path)
     }
 
+    fn default_font_size(&self) -> LogicalLength {
+        self::fonts::DEFAULT_FONT_SIZE
+    }
+
     fn set_window_adapter(&self, window_adapter: &Rc<dyn WindowAdapter>) {
         *self.maybe_window_adapter.borrow_mut() = Some(Rc::downgrade(window_adapter));
         self.partial_rendering_state.clear_cache();
@@ -1828,7 +1832,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                 src_rect.size().cast(),
                             ),
                         ),
-                        colorize: (colorize.alpha() > 0).then_some(colorize),
+                        colorize: (color.alpha() > 0).then_some(color),
                         alpha,
                         dst_x: target_rect.origin.x as _,
                         dst_y: target_rect.origin.y as _,

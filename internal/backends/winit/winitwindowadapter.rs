@@ -11,6 +11,8 @@ use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::Arc;
 
+use euclid::approxeq::ApproxEq;
+
 #[cfg(muda)]
 use i_slint_core::api::LogicalPosition;
 use i_slint_core::lengths::{PhysicalPx, ScaleFactor};
@@ -33,7 +35,7 @@ use corelib::items::{ItemRc, ItemRef};
 
 #[cfg(any(enable_accesskit, muda))]
 use crate::SlintEvent;
-use crate::{SharedBackendData, WinitWindowEventResult};
+use crate::{EventResult, SharedBackendData};
 use corelib::api::PhysicalSize;
 use corelib::layout::Orientation;
 use corelib::lengths::LogicalLength;
@@ -41,7 +43,7 @@ use corelib::platform::{PlatformError, WindowEvent};
 use corelib::window::{WindowAdapter, WindowAdapterInternal, WindowInner};
 use corelib::Property;
 use corelib::{graphics::*, Coord};
-use i_slint_core::{self as corelib, graphics::RequestedGraphicsAPI};
+use i_slint_core::{self as corelib};
 use std::cell::OnceCell;
 #[cfg(any(enable_accesskit, muda))]
 use winit::event_loop::EventLoopProxy;
@@ -79,6 +81,20 @@ fn logical_size_to_winit(s: i_slint_core::api::LogicalSize) -> winit::dpi::Logic
 
 fn physical_size_to_winit(size: PhysicalSize) -> winit::dpi::PhysicalSize<u32> {
     winit::dpi::PhysicalSize::new(size.width, size.height)
+}
+
+fn filter_out_zero_width_or_height(
+    size: winit::dpi::LogicalSize<f64>,
+) -> winit::dpi::LogicalSize<f64> {
+    fn filter(v: f64) -> f64 {
+        if v.approx_eq(&0.) {
+            // Some width or height is better than zero
+            10.
+        } else {
+            v
+        }
+    }
+    winit::dpi::LogicalSize { width: filter(size.width), height: filter(size.height) }
 }
 
 fn apply_scale_factor_to_logical_sizes_in_attributes(
@@ -307,7 +323,6 @@ pub struct WinitWindowAdapter {
     fullscreen: Cell<bool>,
 
     pub(crate) renderer: Box<dyn WinitCompatibleRenderer>,
-    requested_graphics_api: Option<RequestedGraphicsAPI>,
     /// We cache the size because winit_window.inner_size() can return different value between calls (eg, on X11)
     /// And we wan see the newer value before the Resized event was received, leading to inconsistencies
     size: Cell<PhysicalSize>,
@@ -328,14 +343,7 @@ pub struct WinitWindowAdapter {
     event_loop_proxy: EventLoopProxy<SlintEvent>,
 
     pub(crate) window_event_filter: Cell<
-        Option<
-            Box<
-                dyn FnMut(
-                    &corelib::api::Window,
-                    &winit::event::WindowEvent,
-                ) -> WinitWindowEventResult,
-            >,
-        >,
+        Option<Box<dyn FnMut(&corelib::api::Window, &winit::event::WindowEvent) -> EventResult>>,
     >,
 
     winit_window_or_none: RefCell<WinitWindowOrNone>,
@@ -366,10 +374,9 @@ impl WinitWindowAdapter {
         shared_backend_data: Rc<SharedBackendData>,
         renderer: Box<dyn WinitCompatibleRenderer>,
         window_attributes: winit::window::WindowAttributes,
-        requested_graphics_api: Option<RequestedGraphicsAPI>,
         #[cfg(any(enable_accesskit, muda))] proxy: EventLoopProxy<SlintEvent>,
         #[cfg(all(muda, target_os = "macos"))] muda_enable_default_menu_bar: bool,
-    ) -> Result<Rc<Self>, PlatformError> {
+    ) -> Rc<Self> {
         let self_rc = Rc::new_cyclic(|self_weak| Self {
             shared_backend_data: shared_backend_data.clone(),
             window: OnceCell::from(corelib::api::Window::new(self_weak.clone() as _)),
@@ -389,7 +396,6 @@ impl WinitWindowAdapter {
             has_explicit_size: Default::default(),
             pending_resize_event_after_show: Default::default(),
             renderer,
-            requested_graphics_api,
             #[cfg(target_arch = "wasm32")]
             virtual_keyboard_helper: Default::default(),
             #[cfg(any(enable_accesskit, muda))]
@@ -412,7 +418,7 @@ impl WinitWindowAdapter {
 
         self_rc.shared_backend_data.register_inactive_window((self_rc.clone()) as _);
 
-        Ok(self_rc)
+        self_rc
     }
 
     fn renderer(&self) -> &dyn WinitCompatibleRenderer {
@@ -468,11 +474,7 @@ impl WinitWindowAdapter {
             window_attributes = window_attributes.with_transparent(false);
         }
 
-        let winit_window = self.renderer.resume(
-            active_event_loop,
-            window_attributes,
-            self.requested_graphics_api.clone(),
-        )?;
+        let winit_window = self.renderer.resume(active_event_loop, window_attributes)?;
 
         let scale_factor =
             overriding_scale_factor.unwrap_or_else(|| winit_window.scale_factor() as f32);
@@ -546,6 +548,9 @@ impl WinitWindowAdapter {
                 *winit_window_or_none = WinitWindowOrNone::None(attributes.into());
 
                 if let Some(last_instance) = Arc::into_inner(last_window_rc) {
+                    // Note: Don't register the window in inactive_windows for re-creation later, as creating the window
+                    // on wayland implies making it visible. Unfortunately, winit won't allow creating a window on wayland
+                    // that's not visible.
                     self.shared_backend_data.unregister_window(Some(last_instance.id()));
                     drop(last_instance);
                 } else {
@@ -632,7 +637,7 @@ impl WinitWindowAdapter {
         };
         let mut maybe_muda_adapter = maybe_muda_adapter.borrow_mut();
         let Some(muda_adapter) = maybe_muda_adapter.as_mut() else { return };
-        muda_adapter.rebuild_menu(&winit_window, self.menubar.borrow().as_ref());
+        muda_adapter.rebuild_menu(&winit_window, self.menubar.borrow().as_ref(), MudaType::Menubar);
     }
 
     #[cfg(muda)]
@@ -872,8 +877,11 @@ impl WinitWindowAdapter {
             let recreating_window = matches!(visibility, WindowVisibility::Shown);
 
             let Some(winit_window) = self.winit_window() else {
-                // Can't really show it on the screen, safe it in the attributes and try again later.
+                // Can't really show it on the screen, safe it in the attributes and try again later
+                // by registering it for activation when we can.
                 self.winit_window_or_none.borrow().set_visible(true);
+                self.shared_backend_data
+                    .register_inactive_window((self.self_weak.upgrade().unwrap()) as _);
                 return Ok(());
             };
 
@@ -955,6 +963,9 @@ impl WinitWindowAdapter {
                 }) || std::env::var_os("SLINT_DESTROY_WINDOW_ON_HIDE").is_some()
             }) {
                 self.suspend()?;
+                // Note: Don't register the window in inactive_windows for re-creation later, as creating the window
+                // on wayland implies making it visible. Unfortunately, winit won't allow creating a window on wayland
+                // that's not visible.
             } else {
                 self.winit_window_or_none.borrow().set_visible(false);
             }
@@ -1197,9 +1208,13 @@ impl WindowAdapter for WinitWindowAdapter {
         let resizable = window_is_resizable(new_constraints.min, new_constraints.max);
         // we must call set_resizable before setting the min and max size otherwise setting the min and max size don't work on X11
         winit_window_or_none.set_resizable(resizable);
-        let winit_min_inner = new_constraints.min.map(logical_size_to_winit);
+        // Important: Filter out (temporary?) zero width/heights, to avoid attempting to create a zero surface. For example, with wayland
+        // the client-side rendering ends up passing a zero width/height to the renderer.
+        let winit_min_inner =
+            new_constraints.min.map(logical_size_to_winit).map(filter_out_zero_width_or_height);
         winit_window_or_none.set_min_inner_size(winit_min_inner, sf as f64);
-        let winit_max_inner = new_constraints.max.map(logical_size_to_winit);
+        let winit_max_inner =
+            new_constraints.max.map(logical_size_to_winit).map(filter_out_zero_width_or_height);
         winit_window_or_none.set_max_inner_size(winit_max_inner, sf as f64);
 
         // On ios, etc. apps are fullscreen and need to be responsive.

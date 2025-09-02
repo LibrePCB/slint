@@ -47,7 +47,7 @@ pub type EventLoopBuilder = winit::event_loop::EventLoopBuilder<SlintEvent>;
 
 /// Returned by callbacks passed to [`Window::on_winit_window_event`](WinitWindowAccessor::on_winit_window_event)
 /// to determine if winit events should propagate to the Slint event loop.
-pub enum WinitWindowEventResult {
+pub enum EventResult {
     /// The winit event should propagate normally.
     Propagate,
     /// The winit event shouldn't be processed further.
@@ -57,7 +57,7 @@ pub enum WinitWindowEventResult {
 mod renderer {
     use std::sync::Arc;
 
-    use i_slint_core::{graphics::RequestedGraphicsAPI, platform::PlatformError};
+    use i_slint_core::platform::PlatformError;
     use winit::event_loop::ActiveEventLoop;
 
     pub trait WinitCompatibleRenderer {
@@ -74,7 +74,6 @@ mod renderer {
             &self,
             active_event_loop: &ActiveEventLoop,
             window_attributes: winit::window::WindowAttributes,
-            requested_graphics_api: Option<RequestedGraphicsAPI>,
         ) -> Result<Arc<winit::window::Window>, PlatformError>;
     }
 
@@ -101,7 +100,7 @@ mod xdg_color_scheme;
 pub(crate) mod wasm_input_helper;
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "renderer-femtovg")] {
+    if #[cfg(enable_femtovg_renderer)] {
         const DEFAULT_RENDERER_NAME: &str = "FemtoVG";
     } else if #[cfg(enable_skia_renderer)] {
         const DEFAULT_RENDERER_NAME: &'static str = "Skia";
@@ -114,7 +113,7 @@ cfg_if::cfg_if! {
 
 fn default_renderer_factory(
     shared_backend_data: &Rc<SharedBackendData>,
-) -> Box<dyn WinitCompatibleRenderer> {
+) -> Result<Box<dyn WinitCompatibleRenderer>, PlatformError> {
     cfg_if::cfg_if! {
         if #[cfg(enable_skia_renderer)] {
             renderer::skia::WinitSkiaRenderer::new_suspended(shared_backend_data)
@@ -143,24 +142,28 @@ fn try_create_window_with_fallback_renderer(
             feature = "renderer-skia-vulkan"
         ))]
         renderer::skia::WinitSkiaRenderer::new_suspended,
-        #[cfg(all(feature = "renderer-femtovg", supports_opengl))]
+        #[cfg(feature = "renderer-femtovg-wgpu")]
+        renderer::femtovg::WGPUFemtoVGRenderer::new_suspended,
+        #[cfg(all(
+            feature = "renderer-femtovg",
+            supports_opengl,
+            not(feature = "renderer-femtovg-wgpu")
+        ))]
         renderer::femtovg::GlutinFemtoVGRenderer::new_suspended,
         #[cfg(feature = "renderer-software")]
         renderer::sw::WinitSoftwareRenderer::new_suspended,
     ]
     .into_iter()
     .find_map(|renderer_factory| {
-        WinitWindowAdapter::new(
+        Some(WinitWindowAdapter::new(
             shared_backend_data.clone(),
-            renderer_factory(&shared_backend_data),
+            renderer_factory(&shared_backend_data).ok()?,
             attrs.clone(),
-            None,
             #[cfg(any(enable_accesskit, muda))]
             _proxy.clone(),
             #[cfg(all(muda, target_os = "macos"))]
             muda_enable_default_menu_bar,
-        )
-        .ok()
+        ))
     })
 }
 
@@ -176,15 +179,15 @@ pub mod native_widgets {}
 /// Use this trait to intercept events from winit.
 ///
 /// It imitates [`winit::application::ApplicationHandler`] with two changes:
-///   - All functions are invoked before Slint sees them. Use the [`WinitWindowEventResult`] return value to
+///   - All functions are invoked before Slint sees them. Use the [`EventResult`] return value to
 ///     optionally prevent Slint from seeing the event.
 ///   - The [`Self::window_event()`] function has additional parameters to provide access to the Slint Window and
 ///     Winit window, if applicable.
 #[allow(unused_variables)]
 pub trait CustomApplicationHandler {
     /// Re-implement to intercept the [`ApplicationHandler::resumed()`](winit::application::ApplicationHandler::resumed()) event.
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) -> WinitWindowEventResult {
-        WinitWindowEventResult::Propagate
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) -> EventResult {
+        EventResult::Propagate
     }
 
     /// Re-implement to intercept the [`ApplicationHandler::window_event()`](winit::application::ApplicationHandler::window_event()) event.
@@ -195,8 +198,8 @@ pub trait CustomApplicationHandler {
         winit_window: Option<&winit::window::Window>,
         slint_window: Option<&i_slint_core::api::Window>,
         event: &winit::event::WindowEvent,
-    ) -> WinitWindowEventResult {
-        WinitWindowEventResult::Propagate
+    ) -> EventResult {
+        EventResult::Propagate
     }
 
     /// Re-implement to intercept the [`ApplicationHandler::new_events()`](winit::application::ApplicationHandler::new_events()) event.
@@ -204,8 +207,8 @@ pub trait CustomApplicationHandler {
         &mut self,
         event_loop: &ActiveEventLoop,
         cause: winit::event::StartCause,
-    ) -> WinitWindowEventResult {
-        WinitWindowEventResult::Propagate
+    ) -> EventResult {
+        EventResult::Propagate
     }
 
     /// Re-implement to intercept the [`ApplicationHandler::device_event()`](winit::application::ApplicationHandler::device_event()) event.
@@ -214,28 +217,28 @@ pub trait CustomApplicationHandler {
         event_loop: &ActiveEventLoop,
         device_id: winit::event::DeviceId,
         event: winit::event::DeviceEvent,
-    ) -> WinitWindowEventResult {
-        WinitWindowEventResult::Propagate
+    ) -> EventResult {
+        EventResult::Propagate
     }
 
     /// Re-implement to intercept the [`ApplicationHandler::about_to_wait()`](winit::application::ApplicationHandler::about_to_wait()) event.
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) -> WinitWindowEventResult {
-        WinitWindowEventResult::Propagate
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) -> EventResult {
+        EventResult::Propagate
     }
 
     /// Re-implement to intercept the [`ApplicationHandler::suspended()`](winit::application::ApplicationHandler::suspended()) event.
-    fn suspended(&mut self, event_loop: &ActiveEventLoop) -> WinitWindowEventResult {
-        WinitWindowEventResult::Propagate
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) -> EventResult {
+        EventResult::Propagate
     }
 
     /// Re-implement to intercept the [`ApplicationHandler::exiting()`](winit::application::ApplicationHandler::exiting()) event.
-    fn exiting(&mut self, event_loop: &ActiveEventLoop) -> WinitWindowEventResult {
-        WinitWindowEventResult::Propagate
+    fn exiting(&mut self, event_loop: &ActiveEventLoop) -> EventResult {
+        EventResult::Propagate
     }
 
     /// Re-implement to intercept the [`ApplicationHandler::memory_warning()`](winit::application::ApplicationHandler::memory_warning()) event.
-    fn memory_warning(&mut self, event_loop: &ActiveEventLoop) -> WinitWindowEventResult {
-        WinitWindowEventResult::Propagate
+    fn memory_warning(&mut self, event_loop: &ActiveEventLoop) -> EventResult {
+        EventResult::Propagate
     }
 }
 
@@ -329,9 +332,9 @@ impl BackendBuilder {
     #[must_use]
     pub fn with_custom_application_handler(
         mut self,
-        handler: impl CustomApplicationHandler + 'static,
+        handler: Box<dyn CustomApplicationHandler + 'static>,
     ) -> Self {
-        self.custom_application_handler = Some(Box::new(handler));
+        self.custom_application_handler = Some(handler);
         self
     }
 
@@ -362,34 +365,34 @@ impl BackendBuilder {
 
         // Initialize the winit event loop and propagate errors if for example `DISPLAY` or `WAYLAND_DISPLAY` isn't set.
 
-        let shared_data = Rc::new(SharedBackendData::new(event_loop_builder)?);
+        let shared_data = Rc::new(SharedBackendData::new(
+            event_loop_builder,
+            self.requested_graphics_api.clone(),
+        )?);
 
         let renderer_factory_fn = match (
             self.renderer_name.as_deref(),
             self.requested_graphics_api.as_ref(),
         ) {
-            #[cfg(any(
-                all(feature = "renderer-femtovg", supports_opengl),
-                feature = "renderer-femtovg-wgpu"
-            ))]
+            #[cfg(all(feature = "renderer-femtovg", supports_opengl))]
             (Some("gl"), maybe_graphics_api) | (Some("femtovg"), maybe_graphics_api) => {
                 // If a graphics API was requested, double check that it's GL. FemtoVG doesn't support Metal, etc.
                 if let Some(api) = maybe_graphics_api {
-                    i_slint_core::graphics::RequestedOpenGLVersion::try_from(api.clone())?;
+                    i_slint_core::graphics::RequestedOpenGLVersion::try_from(api)?;
                 }
                 renderer::femtovg::GlutinFemtoVGRenderer::new_suspended
             }
             #[cfg(feature = "renderer-femtovg-wgpu")]
             (Some("femtovg-wgpu"), maybe_graphics_api) => {
                 if !maybe_graphics_api.is_some_and(|_api| {
-                    #[cfg(feature = "unstable-wgpu-25")]
-                    if matches!(_api, RequestedGraphicsAPI::WGPU25(..)) {
+                    #[cfg(feature = "unstable-wgpu-26")]
+                    if matches!(_api, RequestedGraphicsAPI::WGPU26(..)) {
                         return true;
                     }
                     false
                 }) {
                     return Err(
-                        "The FemtoVG WGPU renderer only supports the WGPU25 graphics API selection"
+                        "The FemtoVG WGPU renderer only supports the WGPU26 graphics API selection"
                             .into(),
                     );
                 }
@@ -401,11 +404,22 @@ impl BackendBuilder {
             }
             #[cfg(all(enable_skia_renderer, supports_opengl))]
             (Some("skia-opengl"), maybe_graphics_api @ _) => {
-                // If a graphics API was requested, double check that it's GL. FemtoVG doesn't support Metal, etc.
+                // If a graphics API was requested, double check that it's GL.
                 if let Some(api) = maybe_graphics_api {
-                    i_slint_core::graphics::RequestedOpenGLVersion::try_from(api.clone())?;
+                    i_slint_core::graphics::RequestedOpenGLVersion::try_from(api)?;
                 }
                 renderer::skia::WinitSkiaRenderer::new_opengl_suspended
+            }
+            #[cfg(all(enable_skia_renderer, feature = "unstable-wgpu-26"))]
+            (Some("skia-wgpu"), maybe_graphics_api @ _) => {
+                if !maybe_graphics_api
+                    .map_or(true, |api| !matches!(api, RequestedGraphicsAPI::WGPU26(..)))
+                {
+                    return Err(
+                        format!("Skia with WGPU doesn't support non-WGPU graphics API").into()
+                    );
+                }
+                renderer::skia::WinitSkiaRenderer::new_wgpu_26_suspended
             }
             #[cfg(all(enable_skia_renderer, not(target_os = "android")))]
             (Some("skia-software"), None) => {
@@ -426,9 +440,15 @@ impl BackendBuilder {
                     return Err(PlatformError::NoPlatform);
                 }
             }
-            #[cfg(feature = "unstable-wgpu-25")]
-            (None, Some(RequestedGraphicsAPI::WGPU25(..))) => {
-                renderer::femtovg::WGPUFemtoVGRenderer::new_suspended
+            #[cfg(feature = "unstable-wgpu-26")]
+            (None, Some(RequestedGraphicsAPI::WGPU26(..))) => {
+                cfg_if::cfg_if! {
+                    if #[cfg(enable_skia_renderer)] {
+                        renderer::skia::WinitSkiaRenderer::new_wgpu_26_suspended
+                    } else {
+                        renderer::femtovg::WGPUFemtoVGRenderer::new_suspended
+                    }
+                }
             }
             (None, Some(_requested_graphics_api)) => {
                 cfg_if::cfg_if! {
@@ -436,7 +456,7 @@ impl BackendBuilder {
                         renderer::skia::WinitSkiaRenderer::factory_for_graphics_api(Some(_requested_graphics_api))?
                     } else if #[cfg(all(feature = "renderer-femtovg", supports_opengl))] {
                         // If a graphics API was requested, double check that it's GL. FemtoVG doesn't support Metal, etc.
-                        i_slint_core::graphics::RequestedOpenGLVersion::try_from(_requested_graphics_api.clone())?;
+                        i_slint_core::graphics::RequestedOpenGLVersion::try_from(_requested_graphics_api)?;
                         renderer::femtovg::GlutinFemtoVGRenderer::new_suspended
                     } else {
                         return Err(format!("Graphics API use requested by the compile-time enabled renderers don't support that").into())
@@ -446,7 +466,6 @@ impl BackendBuilder {
         };
 
         Ok(Backend {
-            requested_graphics_api: self.requested_graphics_api,
             renderer_factory_fn,
             event_loop_state: Default::default(),
             window_attributes_hook: self.window_attributes_hook,
@@ -461,6 +480,7 @@ impl BackendBuilder {
 }
 
 pub(crate) struct SharedBackendData {
+    _requested_graphics_api: Option<RequestedGraphicsAPI>,
     #[cfg(enable_skia_renderer)]
     skia_context: i_slint_renderer_skia::SkiaSharedContext,
     active_windows: RefCell<HashMap<winit::window::WindowId, Weak<WinitWindowAdapter>>>,
@@ -475,7 +495,10 @@ pub(crate) struct SharedBackendData {
 }
 
 impl SharedBackendData {
-    fn new(mut builder: EventLoopBuilder) -> Result<Self, PlatformError> {
+    fn new(
+        mut builder: EventLoopBuilder,
+        requested_graphics_api: Option<RequestedGraphicsAPI>,
+    ) -> Result<Self, PlatformError> {
         #[cfg(not(target_arch = "wasm32"))]
         use raw_window_handle::HasDisplayHandle;
 
@@ -528,6 +551,7 @@ impl SharedBackendData {
                 .map_err(|display_err| PlatformError::OtherError(display_err.into()))?,
         );
         Ok(Self {
+            _requested_graphics_api: requested_graphics_api,
             #[cfg(enable_skia_renderer)]
             skia_context: i_slint_renderer_skia::SkiaSharedContext::default(),
             active_windows: Default::default(),
@@ -545,7 +569,11 @@ impl SharedBackendData {
     }
 
     pub fn register_inactive_window(&self, window: Rc<WinitWindowAdapter>) {
-        self.inactive_windows.borrow_mut().push(Rc::downgrade(&window));
+        let window = Rc::downgrade(&window);
+        let mut inactive_windows = self.inactive_windows.borrow_mut();
+        if !inactive_windows.iter().any(|w| Weak::ptr_eq(w, &window)) {
+            inactive_windows.push(window);
+        }
     }
 
     pub fn unregister_window(&self, id: Option<winit::window::WindowId>) {
@@ -591,8 +619,8 @@ impl SharedBackendData {
 /// slint::platform::set_platform(Box::new(Backend::new().unwrap()));
 /// ```
 pub struct Backend {
-    requested_graphics_api: Option<RequestedGraphicsAPI>,
-    renderer_factory_fn: fn(&Rc<SharedBackendData>) -> Box<dyn WinitCompatibleRenderer>,
+    renderer_factory_fn:
+        fn(&Rc<SharedBackendData>) -> Result<Box<dyn WinitCompatibleRenderer>, PlatformError>,
     event_loop_state: RefCell<Option<crate::event_loop::EventLoopState>>,
     shared_data: Rc<SharedBackendData>,
     custom_application_handler: RefCell<Option<Box<dyn crate::CustomApplicationHandler>>>,
@@ -669,26 +697,29 @@ impl i_slint_core::platform::Platform for Backend {
             attrs = hook(attrs);
         }
 
-        let adapter = WinitWindowAdapter::new(
-            self.shared_data.clone(),
-            (self.renderer_factory_fn)(&self.shared_data),
-            attrs.clone(),
-            self.requested_graphics_api.clone(),
-            #[cfg(any(enable_accesskit, muda))]
-            self.shared_data.event_loop_proxy.clone(),
-            #[cfg(all(muda, target_os = "macos"))]
-            self.muda_enable_default_menu_bar_bar,
-        )
-        .or_else(|e| {
-            try_create_window_with_fallback_renderer(
-                &self.shared_data,
-                attrs,
-                &self.shared_data.event_loop_proxy.clone(),
-                #[cfg(all(muda, target_os = "macos"))]
-                self.muda_enable_default_menu_bar_bar,
-            )
-            .ok_or_else(|| format!("Winit backend failed to find a suitable renderer: {e}"))
-        })?;
+        let adapter = (self.renderer_factory_fn)(&self.shared_data).map_or_else(
+            |e| {
+                try_create_window_with_fallback_renderer(
+                    &self.shared_data,
+                    attrs.clone(),
+                    &self.shared_data.event_loop_proxy.clone(),
+                    #[cfg(all(muda, target_os = "macos"))]
+                    self.muda_enable_default_menu_bar_bar,
+                )
+                .ok_or_else(|| format!("Winit backend failed to find a suitable renderer: {e}"))
+            },
+            |renderer| {
+                Ok(WinitWindowAdapter::new(
+                    self.shared_data.clone(),
+                    renderer,
+                    attrs.clone(),
+                    #[cfg(any(enable_accesskit, muda))]
+                    self.shared_data.event_loop_proxy.clone(),
+                    #[cfg(all(muda, target_os = "macos"))]
+                    self.muda_enable_default_menu_bar_bar,
+                ))
+            },
+        )?;
         Ok(adapter)
     }
 
@@ -826,7 +857,7 @@ pub trait WinitWindowAccessor: private::WinitWindowAccessorSealed {
     /// If this window [is not backed by winit](WinitWindowAccessor::has_winit_window), this function is a no-op.
     fn on_winit_window_event(
         &self,
-        callback: impl FnMut(&i_slint_core::api::Window, &winit::event::WindowEvent) -> WinitWindowEventResult
+        callback: impl FnMut(&i_slint_core::api::Window, &winit::event::WindowEvent) -> EventResult
             + 'static,
     );
 
@@ -917,7 +948,7 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
 
     fn on_winit_window_event(
         &self,
-        mut callback: impl FnMut(&i_slint_core::api::Window, &winit::event::WindowEvent) -> WinitWindowEventResult
+        mut callback: impl FnMut(&i_slint_core::api::Window, &winit::event::WindowEvent) -> EventResult
             + 'static,
     ) {
         if let Some(adapter) = i_slint_core::window::WindowInner::from_pub(self)

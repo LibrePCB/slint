@@ -442,7 +442,7 @@ pub fn compile_with_config(
     println!("cargo:rerun-if-env-changed=SLINT_ASSET_SECTION");
     println!("cargo:rerun-if-env-changed=SLINT_EMBED_RESOURCES");
     println!("cargo:rerun-if-env-changed=SLINT_EMIT_DEBUG_INFO");
-    println!("cargo:rerun-if-env-changed=SLINT_LIVE_RELOAD");
+    println!("cargo:rerun-if-env-changed=SLINT_LIVE_PREVIEW");
 
     println!(
         "cargo:rustc-env=SLINT_INCLUDE_GENERATED={}",
@@ -521,6 +521,8 @@ pub fn compile_with_output_path(
             dependencies.push(Path::new(resource).to_path_buf());
         }
     }
+
+    code_formatter.sink.flush().map_err(CompileError::SaveError)?;
 
     Ok(dependencies)
 }

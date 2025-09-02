@@ -9,7 +9,7 @@
 */
 use crate::drag_resize_window::{handle_cursor_move_for_resize, handle_resize};
 use crate::winitwindowadapter::WindowVisibility;
-use crate::WinitWindowEventResult;
+use crate::EventResult;
 use crate::{SharedBackendData, SlintEvent};
 use corelib::graphics::euclid;
 use corelib::input::{KeyEvent, KeyEventType, MouseEvent};
@@ -40,7 +40,7 @@ pub enum CustomEvent {
     #[cfg(enable_accesskit)]
     Accesskit(accesskit_winit::Event),
     #[cfg(muda)]
-    Muda(muda::MenuEvent, crate::muda::MudaType),
+    Muda(muda::MenuEvent),
 }
 
 impl std::fmt::Debug for CustomEvent {
@@ -53,7 +53,7 @@ impl std::fmt::Debug for CustomEvent {
             #[cfg(enable_accesskit)]
             Self::Accesskit(a) => write!(f, "AccessKit({a:?})"),
             #[cfg(muda)]
-            Self::Muda(e, mt) => write!(f, "Muda({e:?},{mt:?})"),
+            Self::Muda(e) => write!(f, "Muda({e:?})"),
         }
     }
 }
@@ -113,10 +113,8 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
         if matches!(
             self.custom_application_handler
                 .as_mut()
-                .map_or(WinitWindowEventResult::Propagate, |handler| {
-                    handler.resumed(event_loop)
-                }),
-            WinitWindowEventResult::PreventDefault
+                .map_or(EventResult::Propagate, |handler| { handler.resumed(event_loop) }),
+            EventResult::PreventDefault
         ) {
             return;
         }
@@ -142,7 +140,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
         if let Some(winit_window) = window.winit_window() {
             if matches!(
                 self.custom_application_handler.as_mut().map_or(
-                    WinitWindowEventResult::Propagate,
+                    EventResult::Propagate,
                     |handler| handler.window_event(
                         event_loop,
                         window_id,
@@ -151,7 +149,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                         &event
                     )
                 ),
-                WinitWindowEventResult::PreventDefault
+                EventResult::PreventDefault
             ) {
                 return;
             }
@@ -161,8 +159,8 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 window.window_event_filter.set(Some(window_event_filter));
 
                 match event_result {
-                    WinitWindowEventResult::PreventDefault => return,
-                    WinitWindowEventResult::Propagate => (),
+                    EventResult::PreventDefault => return,
+                    EventResult::Propagate => (),
                 }
             }
 
@@ -447,14 +445,19 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 event_loop.set_control_flow(ControlFlow::Poll);
             }
             #[cfg(muda)]
-            CustomEvent::Muda(event, muda_type) => {
-                if let Some((window, eid)) = event.id().0.split_once('|').and_then(|(w, e)| {
-                    Some((
-                        self.shared_backend_data
-                            .window_by_id(winit::window::WindowId::from(w.parse::<u64>().ok()?))?,
-                        e.parse::<usize>().ok()?,
-                    ))
-                }) {
+            CustomEvent::Muda(event) => {
+                if let Some((window, eid, muda_type)) =
+                    event.id().0.split_once('|').and_then(|(w, e)| {
+                        let (e, muda_type) = e.split_once('|')?;
+                        Some((
+                            self.shared_backend_data.window_by_id(
+                                winit::window::WindowId::from(w.parse::<u64>().ok()?),
+                            )?,
+                            e.parse::<usize>().ok()?,
+                            muda_type.parse::<crate::muda::MudaType>().ok()?,
+                        ))
+                    })
+                {
                     window.muda_event(eid, muda_type);
                 };
             }
@@ -463,12 +466,10 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
         if matches!(
-            self.custom_application_handler
-                .as_mut()
-                .map_or(WinitWindowEventResult::Propagate, |handler| {
-                    handler.new_events(event_loop, cause)
-                }),
-            WinitWindowEventResult::PreventDefault
+            self.custom_application_handler.as_mut().map_or(EventResult::Propagate, |handler| {
+                handler.new_events(event_loop, cause)
+            }),
+            EventResult::PreventDefault
         ) {
             return;
         }
@@ -482,10 +483,8 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
         if matches!(
             self.custom_application_handler
                 .as_mut()
-                .map_or(WinitWindowEventResult::Propagate, |handler| {
-                    handler.about_to_wait(event_loop)
-                }),
-            WinitWindowEventResult::PreventDefault
+                .map_or(EventResult::Propagate, |handler| { handler.about_to_wait(event_loop) }),
+            EventResult::PreventDefault
         ) {
             return;
         }

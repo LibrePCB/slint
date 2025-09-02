@@ -7,34 +7,65 @@ All notable changes to this project are documented in this file.
 
 ### General
 
- - winit: Fixed the maximize window not being disabled for fixed-size windows
- - winit: Added support for timer based frame throttling (#8826)
- - Switched from WGPU24 to WGPU25
- - Qt: Fixed default-font-size not working with PopupWindow
- - LinuxKMS: Added support for overriding the default framebuffer interface selection
+ - winit: Fixed the maximize window not being disabled for fixed-size windows.
+ - winit: Added support for timer based frame throttling (#8826).
+ - winit: Added support for custom event hooks (`with_winit_custom_application_handler`).
+ - winit: Fall back to software rendering if there are no GPU-backed WGPU adapters (#9164).
+ - LinuxKMS: Added support for overriding the default framebuffer interface selection/
+ - LinuxKMS: Added support for a padded legacy linux framebuffers.
+ - LinuxKMS: Added support for libinput event hooks (behind `unstable-libinput-09` feature flag)
+ - Skia: Fixed `no-wrap` still wrapping text (#7080)
+ - Skia: Added support for importing WGPU textures, via `unstable-wgpu-26` when Skia is enabled.
+ - Software renderer: Add radial gradient support (#8980)
+ - Software renderer: Fix rendering of the Qt style (#9006)
+ - Windows: Fixed menu bar in fullscreen mode
+ - Windows: Context menus are now using native look and feel.
+ - Fixed gradient rendering bugs in Qt and FemtoVG renderers (#9030, #7909)
 
 ### Slint Language
 
- - Callbacks handler no longer need curly-braces. Extra semi-colon is no longer an error. (#8401)
- - Added local variable with `let` (#2752)
- - Added icon property to MenuItem and Menu
- - Flickable forward wheel event in a orthogonal direction to their parent
- - Add a compiler warning when using `padding` outside of layout (#6288)
+ - Callback handlers no longer need curly-braces. Extra semi-colon is no longer an error. (#8401)
+ - Added support for local variable with `let` (#2752)
+ - `MenuItem`: Added `icon`, `checkable`, and `checked` properties.
+ - `MenuBar` can now be hidden by placing it in a `if`.
+ - Fixed `MenuSeparator` not always being visible.
+ - `Flickable`: Forward wheel events in a orthogonal direction to their parent.
+ - Added a compiler warning when using `padding` outside of layouts (#6288).
+ - `Timer`: Added `stop()`, `start()`, and `restart()` functions (#8821).
+ - `FocusScope`: Added `focus-on-click` and `focus-on-tab-navigation` properties.
+ - `FocusScope`: Added `capture_key_pressed` and `capture_key_released` callbacks
+ - `Dialog` and `Window` that aren't top-level now draw their background.
+ - Added support for `@conic-gradient` (#9021)
+ - `Path`: Fixed changing `commands` or path sub-elements in a component that inherit from `Path`.
+ - `Path`: Fix settings `commands` from states (#4080)
+ - Added `Key.Back` for the back key on android.
+ - Added an `Easing` namespace to reference easing curve outside of `easing` properties.
+ - `focus()` can now be called on invisible items.
+ - `Window`: Fixed `default-font-size` not propagating into `PopupWindow`.
+
+### Widgets
+
+ - `LineEdit`: Show a clear icon when not empty.
+ - `LineEdit`: Users can toggle password visibility via an icon when `input-type` is set to `password`.
 
 ### Rust
 
  - Minimum Supported Rust Version (MSRV) is 1.85
- - Upgraded WGPU dependency to version 25: The `unstable-wgpu-25` Cargo feature replaces the old `unstable-wgpu-24` feature,
-   and the `slint::wgpu_25` module replaces the `slint::wgpu_24` module. There were no further changes to the API.
- - Fixed compilation of generated code if the slint code declares a type named `core`
- - Support for live-reload with the `slint/live-reload` feature and `SLINT_LIVE_RELOAD` env variable
-
+ - Upgraded WGPU dependency to version 26: The `unstable-wgpu-26` Cargo feature replaces the old `unstable-wgpu-24` feature,
+   and the `slint::wgpu_26` module replaces the `slint::wgpu_24` module. There were no further changes to the API.
+ - Fixed compilation of generated code if the slint code declares a type named `core`.
+ - Support for live-preview with the `slint/live-preview` feature and `SLINT_LIVE_PREVIEW` env variable
+ - winit: Added API to await for the existence of the winit window
+ - Added `FromIterator<char>` and `Extend<char>` for `SharedString`
+ - Added `SharedVector::reserve()`
 
 ### C++
 
- - Added `SharedString::clear()`
- - Support for live-reload with the `SLINT_FEATURE_LIVE_RELOAD` feature and `SLINT_LIVE_RELOAD` env variable
+ - Added `SharedString::clear()`.
+ - Support for live-preview with the `SLINT_FEATURE_LIVE_PREVIEW` feature and `SLINT_LIVE_PREVIEW` env variable
  - `SLINT_FEATURE_RENDERER_FEMTOVG_WGPU` is no longer enabled by default
+ - esp-idf: `slint::invoke_from_event_loop` can now be invoked before starting the event loop.
+ - Fixed Windows AArch64 support
 
 ### Node.js API
 
@@ -43,14 +74,19 @@ All notable changes to this project are documented in this file.
 ### Python
 
  - Added support for automatically mapping exported Slint enums to property Python `enum.Enum` subclasses.
- - ...
+ - Add support for creating slint.Image objects from arrays (#9014)
 
 ### Tooling
 
  - lsp: allow to rename functions and callbacks
+ - lsp: show documentation comments in the hoover/tooltip (#9057)
+ - live-preview: Move the preview in a separate process
+ - live-preview: allow dropping in a `ListView` by adding a `for` loop
+ - live-preview: Added an "Outline" panel
+ - live-preview: Fixed highlighted elements not following items
+ - live-preview: Added undo/redo support
  - slint-compiler: Guess default output format from file extension
-
-
+ - SlintPad: replace the web menu bar with the preview menu bar. Move the preview on the left.
 
 ## [1.12.1] - 2025-06-25
 

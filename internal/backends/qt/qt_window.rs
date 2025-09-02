@@ -1130,18 +1130,10 @@ impl ItemRenderer for QtItemRenderer<'_> {
                 if blur_radius > 0. {
                     cpp! {
                     unsafe[img as "QImage*", blur_radius as "float"] -> qttypes::QPixmap as "QPixmap" {
-                        class PublicGraphicsBlurEffect : public QGraphicsBlurEffect {
-                        public:
-                            // Make public what's protected
-                            using QGraphicsBlurEffect::draw;
-                        };
-
-                        // Need a scene for the effect source private to draw()
                         QGraphicsScene scene;
-
                         auto pixmap_item = scene.addPixmap(QPixmap::fromImage(*img));
 
-                        auto blur_effect = new PublicGraphicsBlurEffect;
+                        auto blur_effect = new QGraphicsBlurEffect;
                         blur_effect->setBlurRadius(blur_radius);
                         blur_effect->setBlurHints(QGraphicsBlurEffect::QualityHint);
 
@@ -1153,8 +1145,9 @@ impl ItemRenderer for QtItemRenderer<'_> {
                         blurred_scene.fill(Qt::transparent);
 
                         QPainter p(&blurred_scene);
-                        p.translate(blur_radius, blur_radius);
-                        blur_effect->draw(&p);
+                        scene.render(&p,
+                            QRectF(0, 0, blurred_scene.width(), blurred_scene.height()),
+                            QRectF(-blur_radius, -blur_radius, blurred_scene.width(), blurred_scene.height()));
                         p.end();
 
                         return QPixmap::fromImage(blurred_scene);
@@ -1543,6 +1536,8 @@ impl QtItemRenderer<'_> {
                 bottom_left_radius as "float",
                 bottom_right_radius as "float",
                 mut rect as "QRectF"] {
+            (*painter)->save();
+            auto cleanup = qScopeGuard([&] { (*painter)->restore(); });
             (*painter)->setBrush(brush);
             QPen pen = border_width > 0 ? QPen(border_color, border_width, Qt::SolidLine, Qt::FlatCap, Qt::MiterJoin) : Qt::NoPen;
             if (top_left_radius <= 0 && top_right_radius <= 0 && bottom_left_radius <= 0 && bottom_right_radius <= 0) {
@@ -2403,6 +2398,16 @@ impl i_slint_core::renderer::RendererSealed for QtWindow {
             }
         } }
         Ok(())
+    }
+
+    fn default_font_size(&self) -> LogicalLength {
+        let default_font_size = cpp!(unsafe[] -> i32 as "int" {
+            return QFontInfo(qApp->font()).pixelSize();
+        });
+        // Ideally this would return the value from another property with a binding that's updated
+        // as a FontChange event is received. This is relevant for the case of using the Qt backend
+        // with a non-native style.
+        LogicalLength::new(default_font_size as f32)
     }
 
     fn free_graphics_resources(

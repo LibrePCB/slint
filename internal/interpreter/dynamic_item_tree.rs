@@ -118,7 +118,8 @@ pub(crate) struct RepeaterWithinItemTree<'par_id, 'sub_id> {
     pub(crate) model: Expression,
     /// Offset of the `Repeater`
     offset: FieldOffset<Instance<'par_id>, Repeater<ErasedItemTreeBox>>,
-    /// Whether this is a `if` or a `for`
+    /// When true, it is representing a `if`, instead of a `for`.
+    /// Based on [`i_slint_compiler::object_tree::RepeatedElementInfo::is_conditional_element`]
     is_conditional: bool,
 }
 
@@ -1723,7 +1724,7 @@ pub fn instantiate(
             repeater.set_model_binding(move || {
                 let m = model_binding_closure();
                 if let Value::Model(m) = m {
-                    m.clone()
+                    m
                 } else {
                     ModelRc::new(crate::value_model::ValueModel::new(m))
                 }
@@ -2412,6 +2413,8 @@ pub fn show_popup(
     parent_item: &ItemRc,
 ) {
     generativity::make_guard!(guard);
+    let debug_handler = instance.description.debug_handler.borrow().clone();
+
     // FIXME: we should compile once and keep the cached compiled component
     let compiled = generate_item_tree(
         &popup.component,
@@ -2420,6 +2423,8 @@ pub fn show_popup(
         false,
         guard,
     );
+    compiled.recursively_set_debug_handler(debug_handler);
+
     let inst = instantiate(
         compiled,
         Some(parent_comp),
@@ -2462,7 +2467,8 @@ pub fn close_popup(
 pub fn make_menu_item_tree(
     menu_item_tree: &Rc<object_tree::Component>,
     enclosing_component: &InstanceRef,
-) -> MenuFromItemTree {
+    condition: Option<&Expression>,
+) -> vtable::VRc<i_slint_core::menus::MenuVTable, MenuFromItemTree> {
     generativity::make_guard!(guard);
     let mit_compiled = generate_item_tree(
         menu_item_tree,
@@ -2471,15 +2477,24 @@ pub fn make_menu_item_tree(
         false,
         guard,
     );
+    let enclosing_component_weak = enclosing_component.self_weak().get().unwrap();
     let mit_inst = instantiate(
         mit_compiled.clone(),
-        Some(enclosing_component.self_weak().get().unwrap().clone()),
+        Some(enclosing_component_weak.clone()),
         None,
         None,
         Default::default(),
     );
     mit_inst.run_setup_code();
-    MenuFromItemTree::new(vtable::VRc::into_dyn(mit_inst))
+    let item_tree = vtable::VRc::into_dyn(mit_inst);
+    let menu = match condition {
+        Some(condition) => {
+            let binding = make_binding_eval_closure(condition.clone(), enclosing_component_weak);
+            MenuFromItemTree::new_with_condition(item_tree, move || binding().try_into().unwrap())
+        }
+        None => MenuFromItemTree::new(item_tree),
+    };
+    vtable::VRc::new(menu)
 }
 
 pub fn update_timers(instance: InstanceRef) {

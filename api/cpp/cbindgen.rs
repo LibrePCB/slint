@@ -247,7 +247,7 @@ fn default_config() -> cbindgen::Config {
         ("target_arch = wasm32".into(), "SLINT_TARGET_WASM".into()),
         ("target_os = android".into(), "__ANDROID__".into()),
         // Disable Rust WGPU specific API feature
-        ("feature = unstable-wgpu-25".into(), "SLINT_DISABLED_CODE".into()),
+        ("feature = unstable-wgpu-26".into(), "SLINT_DISABLED_CODE".into()),
     ]
     .iter()
     .cloned()
@@ -414,13 +414,7 @@ fn gen_corelib(
     string_config.export.exclude = vec!["SharedString".into()];
     string_config.export.body.insert(
         "Slice".to_owned(),
-        "    const T &operator[](int i) const { return ptr[i]; }
-        /// Note: this doesn't initialize Slice properly, but we need to keep the struct as compatible with C
-        constexpr Slice() = default;
-        /// Rust uses a NonNull, so even empty slices shouldn't use nullptr
-        constexpr Slice(const T *ptr, uintptr_t len) : ptr(ptr ? const_cast<T*>(ptr) : reinterpret_cast<T*>(sizeof(T))), len(len) {}
-        "
-            .to_owned(),
+        "    const T &operator[](int i) const { return ptr[i]; }".to_owned(),
     );
     cbindgen::Builder::new()
         .with_config(string_config)
@@ -568,7 +562,8 @@ fn gen_corelib(
             "slint_windowrc_color_scheme",
             "slint_windowrc_supports_native_menu_bar",
             "slint_windowrc_setup_native_menu_bar",
-            "slint_windowrc_default_font_size",
+            "slint_windowrc_show_native_popup_menu",
+            "slint_windowrc_resolved_default_font_size",
             "slint_windowrc_dispatch_pointer_event",
             "slint_windowrc_dispatch_key_event",
             "slint_windowrc_dispatch_event",
@@ -991,7 +986,7 @@ macro_rules! declare_features {
 
 declare_features! {
     interpreter
-    live_reload
+    live_preview
     testing
     backend_qt
     backend_winit

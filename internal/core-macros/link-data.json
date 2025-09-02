@@ -47,14 +47,14 @@
     "EnumType": {
         "href": "reference/global-structs-enums/"
     },
+    "EventResult": {
+        "href": "reference/global-structs-enums/#eventresult"
+    },
     "Expressions": {
         "href": "guide/language/coding/expressions-and-statements/"
     },
     "float": {
         "href": "reference/primitive-types/#float"
-    },
-    "FocusPolicy": {
-        "href": "reference/global-structs-enums/#focuspolicy"
     },
     "FocusReason": {
         "href": "reference/global-structs-enums/#focusreason"

@@ -447,7 +447,7 @@ pub struct WindowInner {
     mouse_input_state: Cell<MouseInputState>,
     pub(crate) modifiers: Cell<InternalKeyboardModifierState>,
 
-    /// ItemRC that currently have the focus. (possibly a, instance of TextInput)
+    /// ItemRC that currently have the focus (possibly an instance of TextInput)
     pub focus_item: RefCell<crate::item_tree::ItemWeak>,
     /// The last text that was sent to the input method
     pub(crate) last_ime_text: RefCell<SharedString>,
@@ -569,7 +569,7 @@ impl WindowInner {
         self.component.borrow().upgrade()
     }
 
-    /// Returns a slice of the active poppups.
+    /// Returns a slice of the active popups.
     pub fn active_popups(&self) -> core::cell::Ref<'_, [PopupWindow]> {
         core::cell::Ref::map(self.active_popups.borrow(), |v| v.as_slice())
     }
@@ -766,7 +766,7 @@ impl WindowInner {
     ///
     /// Arguments:
     /// * `event`: The key event received by the windowing system.
-    pub fn process_key_input(&self, mut event: KeyEvent) {
+    pub fn process_key_input(&self, mut event: KeyEvent) -> crate::input::KeyEventResult {
         if let Some(updated_modifier) = self
             .modifiers
             .get()
@@ -804,7 +804,7 @@ impl WindowInner {
                 == crate::input::KeyEventResult::EventAccepted
             {
                 crate::properties::ChangeTracker::run_change_handlers();
-                return;
+                return crate::input::KeyEventResult::EventAccepted;
             }
         }
 
@@ -816,7 +816,7 @@ impl WindowInner {
                 == crate::input::KeyEventResult::EventAccepted
             {
                 crate::properties::ChangeTracker::run_change_handlers();
-                return;
+                return crate::input::KeyEventResult::EventAccepted;
             }
             item = focus_item.parent_item(ParentItemTraversalMode::StopAtPopups);
         }
@@ -829,12 +829,16 @@ impl WindowInner {
             && event.event_type == KeyEventType::KeyPressed
         {
             self.focus_next_item();
+            crate::properties::ChangeTracker::run_change_handlers();
+            return crate::input::KeyEventResult::EventAccepted;
         } else if (event.text.starts_with(key_codes::Backtab)
             || (event.text.starts_with(key_codes::Tab) && event.modifiers.shift))
             && event.event_type == KeyEventType::KeyPressed
             && !extra_mod
         {
             self.focus_previous_item();
+            crate::properties::ChangeTracker::run_change_handlers();
+            return crate::input::KeyEventResult::EventAccepted;
         } else if event.event_type == KeyEventType::KeyPressed
             && event.text.starts_with(key_codes::Escape)
         {
@@ -860,8 +864,11 @@ impl WindowInner {
             if close_on_escape {
                 window.close_top_popup();
             }
+            crate::properties::ChangeTracker::run_change_handlers();
+            return crate::input::KeyEventResult::EventAccepted;
         }
         crate::properties::ChangeTracker::run_change_handlers();
+        crate::input::KeyEventResult::EventIgnored
     }
 
     /// Installs a binding on the specified property that's toggled whenever the text cursor is supposed to be visible or not.
@@ -973,7 +980,7 @@ impl WindowInner {
         let mut visited = Vec::new();
 
         loop {
-            if current_item.is_visible()
+            if (current_item.is_visible() || reason == FocusReason::Programmatic)
                 && self.publish_focus_item(&Some(current_item.clone()), reason)
                     == crate::input::FocusEventResult::FocusAccepted
             {
@@ -1300,8 +1307,12 @@ impl WindowInner {
         &self,
         context_menu_item: vtable::VRc<MenuVTable>,
         position: LogicalPosition,
+        parent_item: &ItemRc,
     ) -> bool {
         if let Some(x) = self.window_adapter().internal(crate::InternalToken) {
+            let position = parent_item
+                .map_to_window(parent_item.geometry().origin + position.to_euclid().to_vector());
+            let position = crate::lengths::logical_position_to_api(position);
             x.show_native_popup_menu(context_menu_item, position)
         } else {
             false
@@ -1517,6 +1528,7 @@ pub mod ffi {
     use crate::api::{RenderingNotifier, RenderingState, SetRenderingNotifierError};
     use crate::graphics::Size;
     use crate::graphics::{IntSize, Rgba8Pixel};
+    use crate::items::WindowItem;
     use crate::SharedVector;
 
     /// This enum describes a low-level access to specific graphics APIs used
@@ -1721,8 +1733,8 @@ pub mod ffi {
                 let cpp_graphics_api = match graphics_api {
                     crate::api::GraphicsAPI::NativeOpenGL { .. } => GraphicsAPI::NativeOpenGL,
                     crate::api::GraphicsAPI::WebGL { .. } => unreachable!(), // We don't support wasm with C++
-                    #[cfg(feature = "unstable-wgpu-25")]
-                    crate::api::GraphicsAPI::WGPU25 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
+                    #[cfg(feature = "unstable-wgpu-26")]
+                    crate::api::GraphicsAPI::WGPU26 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
                 };
                 (self.callback)(state, cpp_graphics_api, self.user_data)
             }
@@ -1878,13 +1890,28 @@ pub mod ffi {
             .map(|x| x.setup_menubar(menu_instance.clone()));
     }
 
+    /// Show a native context menu
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_show_native_popup_menu(
+        handle: *const WindowAdapterRcOpaque,
+        context_menu: &vtable::VRc<MenuVTable>,
+        position: LogicalPosition,
+        parent_item: &ItemRc,
+    ) -> bool {
+        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+        WindowInner::from_pub(window_adapter.window()).show_native_popup_menu(
+            context_menu.clone(),
+            position,
+            parent_item,
+        )
+    }
+
     /// Return the default-font-size property of the WindowItem
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn slint_windowrc_default_font_size(
-        handle: *const WindowAdapterRcOpaque,
+    pub unsafe extern "C" fn slint_windowrc_resolved_default_font_size(
+        item_tree: &ItemTreeRc,
     ) -> f32 {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().0.window_item().unwrap().as_pin_ref().default_font_size().get()
+        WindowItem::resolved_default_font_size(item_tree.clone()).get()
     }
 
     /// Dispatch a key pressed or release event
