@@ -411,8 +411,8 @@ if (SLINT_BUILD_RUNTIME)
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/SlintMacro.cmake)
     endif()
 
-    export(TARGETS Slint librepcbslint
-        NAMESPACE Slint:: FILE "${CMAKE_BINARY_DIR}/lib/cmake/Slint/SlintTargets.cmake")
+    #export(TARGETS Slint librepcbslint
+    #    NAMESPACE Slint:: FILE "${CMAKE_BINARY_DIR}/lib/cmake/Slint/SlintTargets.cmake")
     #install(EXPORT SlintTargets NAMESPACE Slint:: DESTINATION lib/cmake/Slint)
     #install(TARGETS Slint librepcbslint
     #    EXPORT SlintTargets LIBRARY DESTINATION lib PUBLIC_HEADER DESTINATION include/slint)
