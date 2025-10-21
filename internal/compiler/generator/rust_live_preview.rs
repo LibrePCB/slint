@@ -14,6 +14,8 @@ pub fn generate(
     doc: &Document,
     compiler_config: &CompilerConfiguration,
 ) -> std::io::Result<TokenStream> {
+    let module_header = super::rust::generate_module_header();
+
     let (structs_and_enums_ids, inner_module) =
         super::rust::generate_types(&doc.used_types.borrow().structs_and_enums);
 
@@ -31,8 +33,9 @@ pub fn generate(
         .as_ref()
         .ok_or_else(|| std::io::Error::other("Cannot determine path of the main file"))?
         .source_file
-        .path()
-        .to_string_lossy();
+        .path();
+    let main_file = std::path::absolute(main_file).unwrap_or_else(|_| main_file.to_path_buf());
+    let main_file = main_file.to_string_lossy();
 
     let public_components = llr
         .public_components
@@ -59,6 +62,7 @@ pub fn generate(
 
     Ok(quote! {
         mod #generated_mod {
+            #module_header
             #inner_module
             #(#globals)*
             #(#public_components)*

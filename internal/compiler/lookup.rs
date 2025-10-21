@@ -448,7 +448,7 @@ impl LookupObject for ElementRc {
             let r = expression_from_reference(
                 NamedReference::new(self, name.clone()),
                 &prop.property_type,
-                check_deprecated_stylemetrics(self, ctx, name),
+                check_extra_deprecated(self, ctx, name),
             );
             if let Some(r) = f(name, r) {
                 return Some(r);
@@ -482,7 +482,7 @@ impl LookupObject for ElementRc {
         {
             let deprecated = (lookup_result.resolved_name != name.as_str())
                 .then(|| lookup_result.resolved_name.to_string())
-                .or_else(|| check_deprecated_stylemetrics(self, ctx, name));
+                .or_else(|| check_extra_deprecated(self, ctx, name));
             Some(expression_from_reference(
                 NamedReference::new(self, lookup_result.resolved_name.to_smolstr()),
                 &lookup_result.property_type,
@@ -494,11 +494,14 @@ impl LookupObject for ElementRc {
     }
 }
 
-pub fn check_deprecated_stylemetrics(
+pub fn check_extra_deprecated(
     elem: &ElementRc,
     ctx: &LookupCtx<'_>,
     name: &SmolStr,
 ) -> Option<String> {
+    if crate::typeregister::DEPRECATED_ROTATION_ORIGIN_PROPERTIES.iter().any(|(p, _)| p == name) {
+        return Some(format!("transform-origin.{}", &name[name.len() - 1..]));
+    }
     let borrow = elem.borrow();
     (!ctx.type_register.expose_internal_types
         && matches!(
@@ -755,6 +758,7 @@ impl LookupObject for MathFunctions {
             .or_else(|| f("ln", b(BuiltinFunction::Ln)))
             .or_else(|| f("pow", b(BuiltinFunction::Pow)))
             .or_else(|| f("exp", b(BuiltinFunction::Exp)))
+            .or_else(|| f("sign", BuiltinMacroFunction::Sign.into()))
     }
 }
 
@@ -1081,13 +1085,15 @@ impl LookupObject for NumberExpression<'_> {
         ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
-        let member_function = |f: BuiltinFunction| {
+        let member = |f: LookupResultCallable| {
             LookupResult::Callable(LookupResultCallable::MemberFunction {
                 base: self.0.clone(),
                 base_node: ctx.current_token.clone(), // Note that this is not the base_node, but the function's node
-                member: LookupResultCallable::Callable(Callable::Builtin(f)).into(),
+                member: f.into(),
             })
         };
+        let member_function = |f| member(LookupResultCallable::Callable(Callable::Builtin(f)));
+        let member_macro = |f| member(LookupResultCallable::Macro(f));
 
         let mut f2 = |s, res| f(&SmolStr::new_static(s), res);
         None.or_else(|| f2("round", member_function(BuiltinFunction::Round)))
@@ -1098,7 +1104,10 @@ impl LookupObject for NumberExpression<'_> {
             .or_else(|| f2("acos", member_function(BuiltinFunction::ACos)))
             .or_else(|| f2("atan", member_function(BuiltinFunction::ATan)))
             .or_else(|| f2("log", member_function(BuiltinFunction::Log)))
+            .or_else(|| f2("ln", member_function(BuiltinFunction::Ln)))
             .or_else(|| f2("pow", member_function(BuiltinFunction::Pow)))
+            .or_else(|| f2("exp", member_function(BuiltinFunction::Exp)))
+            .or_else(|| f2("sign", member_macro(BuiltinMacroFunction::Sign)))
             .or_else(|| f2("to-fixed", member_function(BuiltinFunction::ToFixed)))
             .or_else(|| f2("to-precision", member_function(BuiltinFunction::ToPrecision)))
             .or_else(|| NumberWithUnitExpression(self.0).for_each_entry(ctx, f))

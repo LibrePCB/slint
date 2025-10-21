@@ -41,6 +41,47 @@ The width and height of the element. When set, this overrides the default size.
 </SlintProperty>
 
 
+### Transforms
+
+Transforms allow for rotating and scaling items around a specified origin point. The default origin point is the center of the element.
+
+Transforms are not available for the software renderer.
+
+```slint {5-7}
+Image {
+    x: 0;
+    y: 0;
+    source: @image-url("images/slint-logo.svg");
+    transform-rotation: 45deg;
+    transform-origin: {x: 0, y: 0};
+}
+```
+
+#### transform-rotation
+<SlintProperty propName="transform-rotation" typeName="angle" defaultValue='0deg'/>
+
+#### transform-origin
+<SlintProperty propName="transform-origin" typeName="struct" structName="Point" defaultValue='{x: self.width / 2, y: self.height / 2}'>
+The origin to rotate and scale around.
+
+Default to the center of the element.
+</SlintProperty>
+
+#### transform-scale
+<SlintProperty propName="transform-scale" typeName="float" defaultValue='100%'>
+The scale factor to apply to the element and all its children.
+
+This doesn't affect the geometry (width, height) of the element, but affects the rendering.
+The scale is done around the `transform-origin` point.
+
+It is also possible to use the `transform-scale-x` and `transform-scale-y` properties to specify the scale factors for the x and y axis.
+</SlintProperty>
+
+#### transform-scale-x
+<SlintProperty propName="transform-scale-x" typeName="float" defaultValue='self.scale'/>
+#### transform-scale-y
+<SlintProperty propName="transform-scale-y" typeName="float" defaultValue='self.scale'/>
+
 ### opacity
 <CodeSnippetMD imagePath="/src/assets/generated/rectangle-opacity.png" scale="3" imageWidth="100" imageHeight="310"  imageAlt='rectangle opacity'>
 ```slint playground

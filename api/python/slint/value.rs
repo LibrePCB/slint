@@ -1,9 +1,9 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use pyo3::IntoPyObjectExt;
+use pyo3::{prelude::*, PyVisit};
+use pyo3::{IntoPyObjectExt, PyTraverseError};
 use pyo3_stub_gen::{derive::gen_stub_pyclass, derive::gen_stub_pymethods};
 
 use std::cell::OnceCell;
@@ -58,6 +58,53 @@ impl<'py> IntoPyObject<'py> for SlintToPyValue {
     }
 }
 
+pub fn traverse_value(
+    value: &slint_interpreter::Value,
+    visit: &PyVisit<'_>,
+) -> Result<(), PyTraverseError> {
+    match value {
+        slint_interpreter::Value::Model(model) => {
+            if let Some(rust_model) = model.as_any().downcast_ref::<crate::models::PyModelShared>()
+            {
+                rust_model.__traverse__(&visit)?
+            }
+        }
+        slint_interpreter::Value::Struct(structval) => traverse_struct(&structval, visit)?,
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn traverse_struct(
+    structval: &slint_interpreter::Struct,
+    visit: &PyVisit<'_>,
+) -> Result<(), PyTraverseError> {
+    for (_, value) in structval.iter() {
+        traverse_value(value, visit)?;
+    }
+    Ok(())
+}
+
+pub fn clear_strongrefs_in_value(value: &slint_interpreter::Value) {
+    match value {
+        slint_interpreter::Value::Model(model) => {
+            if let Some(rust_model) = model.as_any().downcast_ref::<crate::models::PyModelShared>()
+            {
+                rust_model.__clear__();
+            }
+        }
+        slint_interpreter::Value::Struct(structval) => clear_strongrefs_in_struct(&structval),
+        _ => {}
+    }
+}
+
+fn clear_strongrefs_in_struct(structval: &slint_interpreter::Struct) {
+    for (_, value) in structval.iter() {
+        clear_strongrefs_in_value(value);
+    }
+}
+
 #[gen_stub_pyclass]
 #[pyclass(subclass, unsendable)]
 #[derive(Clone)]
@@ -66,7 +113,6 @@ pub struct PyStruct {
     pub type_collection: TypeCollection,
 }
 
-#[gen_stub_pymethods]
 #[pymethods]
 impl PyStruct {
     fn __getattr__(&self, key: &str) -> PyResult<SlintToPyValue> {
@@ -79,7 +125,7 @@ impl PyStruct {
             |value| Ok(self.type_collection.to_py_value(value.clone())),
         )
     }
-    fn __setattr__(&mut self, py: Python<'_>, key: String, value: PyObject) -> PyResult<()> {
+    fn __setattr__(&mut self, py: Python<'_>, key: String, value: Py<PyAny>) -> PyResult<()> {
         let pv =
             TypeCollection::slint_value_from_py_value(py, &value, Some(&self.type_collection))?;
         self.data.set_field(key, pv);
@@ -100,6 +146,16 @@ impl PyStruct {
 
     fn __copy__(&self) -> Self {
         self.clone()
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        traverse_struct(&self.data, &visit)
+    }
+
+    fn __clear__(&mut self) {
+        for (_, value) in self.data.iter() {
+            clear_strongrefs_in_value(&value);
+        }
     }
 }
 
@@ -123,12 +179,12 @@ impl PyStructFieldIterator {
 }
 
 thread_local! {
-    static ENUM_CLASS: OnceCell<PyObject> = OnceCell::new();
+    static ENUM_CLASS: OnceCell<Py<PyAny>> = OnceCell::new();
 }
 
-pub fn enum_class(py: Python) -> PyObject {
+pub fn enum_class(py: Python) -> Py<PyAny> {
     ENUM_CLASS.with(|cls| {
-        cls.get_or_init(|| -> PyObject {
+        cls.get_or_init(|| -> Py<PyAny> {
             let enum_module = py.import("enum").unwrap();
             enum_module.getattr("Enum").unwrap().into()
         })
@@ -141,7 +197,7 @@ pub fn enum_class(py: Python) -> PyObject {
 /// a `.slint` file loaded with load_file. This is used to map enums
 /// provided by Slint to the correct python enum classes.
 pub struct TypeCollection {
-    enum_classes: Rc<HashMap<String, PyObject>>,
+    enum_classes: Rc<HashMap<String, Py<PyAny>>>,
 }
 
 impl TypeCollection {
@@ -193,7 +249,7 @@ impl TypeCollection {
         enum_name: &str,
         enum_value: &str,
         py: Python<'_>,
-    ) -> Result<PyObject, PyErr> {
+    ) -> Result<Py<PyAny>, PyErr> {
         let enum_cls = self.enum_classes.get(enum_name).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
                 "Slint provided enum {enum_name} is unknown"
@@ -209,13 +265,13 @@ impl TypeCollection {
         crate::models::ReadOnlyRustModel { model: model.clone(), type_collection: self.clone() }
     }
 
-    pub fn enums(&self) -> impl Iterator<Item = (&String, &PyObject)> {
+    pub fn enums(&self) -> impl Iterator<Item = (&String, &Py<PyAny>)> {
         self.enum_classes.iter()
     }
 
     pub fn slint_value_from_py_value(
         py: Python<'_>,
-        ob: &PyObject,
+        ob: &Py<PyAny>,
         type_collection: Option<&Self>,
     ) -> PyResult<slint_interpreter::Value> {
         Self::slint_value_from_py_value_bound(&ob.bind(py), type_collection)

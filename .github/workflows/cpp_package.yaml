@@ -15,7 +15,7 @@ on:
 env:
     MACOSX_DEPLOYMENT_TARGET: "11.0"
     # Keep in sync with features in nightly_snapshot.yaml, slint_tool_binary.yaml, api/node/Cargo.toml, and api/python/slint/Cargo.toml
-    SLINT_BINARY_FEATURES: "-DSLINT_FEATURE_BACKEND_LINUXKMS_NOSEAT=ON -DSLINT_FEATURE_BACKEND_WINIT=ON -DSLINT_FEATURE_RENDERER_FEMTOVG=ON -DSLINT_FEATURE_RENDERER_SKIA=ON -DSLINT_FEATURE_RENDERER_SOFTWARE=ON"
+    SLINT_BINARY_FEATURES: "-DSLINT_FEATURE_BACKEND_LINUXKMS_NOSEAT=ON -DSLINT_FEATURE_BACKEND_WINIT=ON -DSLINT_FEATURE_RENDERER_FEMTOVG=ON -DSLINT_FEATURE_RENDERER_SKIA=ON -DSLINT_FEATURE_RENDERER_SOFTWARE=ON -DSLINT_FEATURE_LIVE_PREVIEW=ON"
     SLINT_MCU_FEATURES: "-DSLINT_FEATURE_FREESTANDING=ON -DSLINT_FEATURE_RENDERER_SOFTWARE=ON"
     # env variable used by espup https://github.com/esp-rs/espup?tab=readme-ov-file#github-api
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -28,12 +28,10 @@ jobs:
             CARGO_INCREMENTAL: false
         strategy:
             matrix:
-                os: [ubuntu-22.04, macOS-13, macos-14, windows-2022]
+                os: [ubuntu-22.04, macos-14, windows-2022]
                 include:
                     - os: ubuntu-22.04
                       package_suffix: linux
-                    - os: macOS-13
-                      package_suffix: macos-x86_64
                     - os: macos-14
                       package_suffix: macos-aarch64
                     - os: windows-2022
@@ -237,7 +235,7 @@ jobs:
             CARGO_INCREMENTAL: false
         strategy:
             matrix:
-                os: [ubuntu-22.04, macOS-13, macos-14, windows-2022]
+                os: [ubuntu-22.04, macos-14, windows-2022]
                 include:
                     - os: ubuntu-22.04
                       package_suffix: Linux-x86_64
@@ -245,20 +243,17 @@ jobs:
                     - os: ubuntu-22.04-arm
                       package_suffix: Linux-aarch64
                       cargo_target: aarch64-unknown-linux-gnu
-                    - os: macOS-13
-                      package_suffix: Darwin-x86_64
-                      cargo_target: x86_64-apple-darwin
                     - os: macos-14
                       package_suffix: Darwin-arm64
                       cargo_target: aarch64-apple-darwin
                     - os: windows-2022
                       package_suffix: Windows-AMD64
                       msvc_arch: x64
-                      cargo_target: x86_64-pc-windows-gnu
+                      cargo_target: x86_64-pc-windows-msvc
                     - os: windows-11-arm
                       package_suffix: Windows-ARM64
                       msvc_arch: arm64
-                      cargo_target: aarch64-pc-windows-gnu
+                      cargo_target: aarch64-pc-windows-msvc
 
         runs-on: ${{ matrix.os }}
         steps:

@@ -117,15 +117,15 @@ jobs:
                   path: |
                       bin
 
-    build_vscode_lsp_macos_x86_64:
+    build_vscode_lsp_macos_aarch64_bundle:
         env:
             SLINT_NO_QT: 1
-        runs-on: macos-13
+        runs-on: macos-26
         steps:
             - uses: actions/checkout@v5
             - uses: ./.github/actions/setup-rust
               with:
-                  target: x86_64-apple-darwin
+                  target: aarch64-apple-darwin
             - name: Install cargo-bundle
               run: cargo install --version=0.6.0 cargo-bundle
             - name: Build Main LSP Bundle
@@ -135,68 +135,18 @@ jobs:
               run: |
                   mkdir bin
                   cp -a target/release/bundle/osx/Slint\ Live\ Preview.app bin
-            - name: "Upload LSP Artifact"
-              uses: actions/upload-artifact@v4
+            - uses: ./.github/actions/codesign
               with:
-                  name: vscode-lsp-binary-x86_64-apple-darwin
-                  path: |
-                      bin
-
-    build_vscode_lsp_macos_aarch64:
-        env:
-            SLINT_NO_QT: 1
-        runs-on: macos-14
-        steps:
-            - uses: actions/checkout@v5
-            - uses: ./.github/actions/setup-rust
-              with:
-                  target: aarch64-apple-darwin
-            - name: Build AArch64 LSP
-              run: cargo build --target aarch64-apple-darwin --features ${{ env.SLINT_BINARY_FEATURES }} --release -p slint-lsp
-            - name: Create artifact directory
-              run: |
-                  mkdir bin
-                  cp -a target/aarch64-apple-darwin/release/slint-lsp bin/slint-lsp-aarch64-apple-darwin
-            - name: "Upload LSP Artifact"
-              uses: actions/upload-artifact@v4
-              with:
-                  name: vscode-lsp-binary-aarch64-apple-darwin
-                  path: |
-                      bin
-
-    build_vscode_lsp_macos_bundle:
-        needs: [build_vscode_lsp_macos_x86_64, build_vscode_lsp_macos_aarch64]
-        runs-on: macos-13
-        steps:
-            - uses: actions/checkout@v5
-              with:
-                  path: "src"
-            - uses: actions/download-artifact@v5
-              with:
-                  name: vscode-lsp-binary-x86_64-apple-darwin
-            - uses: actions/download-artifact@v5
-              with:
-                  name: vscode-lsp-binary-aarch64-apple-darwin
-                  path: bin
-            - name: Add macOS AArch64 binary to bundle
-              run: |
-                  lipo -create -output tmp Slint\ Live\ Preview.app/Contents/MacOS/slint-lsp bin/slint-lsp-aarch64-apple-darwin
-                  mv tmp Slint\ Live\ Preview.app/Contents/MacOS/slint-lsp
-                  rm -rf bin
-            - uses: ./src/.github/actions/codesign
-              with:
-                  binary: "Slint Live Preview.app"
+                  binary: "bin/Slint Live Preview.app"
                   certificate: ${{ secrets.APPLE_CERTIFICATE_P12 }}
                   certificate_password: ${{ secrets.APPLE_CERTIFICATE_P12_PASSWORD }}
                   keychain_password: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
                   developer_id: ${{ secrets.APPLE_DEV_ID }}
-            - name: "Remove temporary source checkout"
-              run: rm -rf src
             - name: "Upload LSP macOS bundle Artifact"
               uses: actions/upload-artifact@v4
               with:
                   name: vscode-lsp-binary-darwin
-                  path: .
+                  path: bin
 
     build_vscode_cross_linux_lsp:
         env:
@@ -232,22 +182,23 @@ jobs:
         needs:
             [
                 build_vscode_lsp_linux_windows,
-                build_vscode_lsp_macos_bundle,
+                build_vscode_lsp_macos_aarch64_bundle,
                 build_vscode_cross_linux_lsp,
                 check-for-secrets,
             ]
-        runs-on: macos-13
+        runs-on: macos-14
         if: ${{ needs.check-for-secrets.outputs.has-openvsx-pat == 'yes' && needs.check-for-secrets.outputs.has-vscode-marketplace-pat == 'yes' }}
         steps:
             - uses: actions/checkout@v5
-            - uses: pnpm/action-setup@v4.1.0
+            - uses: pnpm/action-setup@v4.2.0
               with:
-                version: 10.14.0
+                version: 10.18.2
             - name: Install GNU Sed
               run: brew install gnu-sed
-            - uses: actions/setup-node@v4
+            - uses: actions/setup-node@v6
               with:
                   node-version: 20
+                  package-manager-cache: false
             - uses: actions/download-artifact@v5
               with:
                   name: vscode-lsp-binary-x86_64-unknown-linux-gnu
@@ -322,13 +273,14 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v5
-            - uses: actions/setup-node@v4
+            - uses: actions/setup-node@v6
               with:
                 node-version: 20
+                package-manager-cache: false
               id: node-install
-            - uses: pnpm/action-setup@v4.1.0
+            - uses: pnpm/action-setup@v4.2.0
               with:
-                version: 10.14.0
+                version: 10.18.2
             - name: Run pnpm install
               working-directory: tools/figma-inspector
               run: pnpm install --frozen-lockfile
@@ -436,7 +388,7 @@ jobs:
                 rm -rf $output_path/demos
                 mkdir -p $output_path/demos
 
-                for demo_subdir in examples,gallery, demos,printerdemo,rust examples,todo,rust examples,todo-mvc,rust examples,slide_puzzle, examples,memory, examples,imagefilter,rust examples,plotter, examples,opengl_underlay, examples,carousel,rust demos,energy-monitor, demos,weather-demo, demos,home-automation,rust demos,usecases,rust; do
+                for demo_subdir in examples,gallery, demos,printerdemo,rust examples,todo,rust examples,todo-mvc,rust examples,slide_puzzle, examples,speedometer,rust examples,memory, examples,imagefilter,rust examples,plotter, examples,opengl_underlay, examples,carousel,rust demos,energy-monitor, demos,weather-demo, demos,home-automation,rust demos,usecases,rust; do
                   IFS=',' read example_or_demo demo subdir <<< "${demo_subdir}"
 
                   mkdir -p $output_path/demos/$demo
@@ -720,6 +672,8 @@ jobs:
               run: cargo apk build -p weather-demo --target aarch64-linux-android --lib --release
             - name: Build usecases demo
               run: cargo apk build -p usecases --target aarch64-linux-android --lib --release
+            - name: Build material gallery
+              run: cargo apk build -p material-gallery --target aarch64-linux-android --lib --release
             - name: "upload APK artifact"
               uses: actions/upload-artifact@v4
               with:
@@ -729,3 +683,5 @@ jobs:
                     target/release/apk/todo_lib.apk
                     target/release/apk/weather_demo.apk
                     target/release/apk/usecases_lib.apk
+                    target/release/apk/usecases_lib.apk
+                    target/release/apk/slint_material.apk

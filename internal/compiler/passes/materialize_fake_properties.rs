@@ -12,6 +12,7 @@ use crate::layout::Orientation;
 use crate::namedreference::NamedReference;
 use crate::object_tree::*;
 use smol_str::SmolStr;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -100,7 +101,7 @@ fn should_materialize(
     };
 
     if !has_declared_property {
-        let ty = crate::typeregister::reserved_property(prop).property_type;
+        let ty = crate::typeregister::reserved_property(Cow::Borrowed(prop)).property_type.clone();
         if ty != Type::Invalid {
             return Some(ty);
         } else if prop == "close-on-click" {
@@ -184,6 +185,10 @@ pub fn initialize(elem: &ElementRc, name: &str) -> Option<Expression> {
         "preferred-width" => layout_constraint_prop(elem, "preferred", Orientation::Horizontal),
         "opacity" => Expression::NumberLiteral(1., Unit::None),
         "visible" => Expression::BoolLiteral(true),
+        "rowspan" => Expression::NumberLiteral(1., Unit::None),
+        "colspan" => Expression::NumberLiteral(1., Unit::None),
+        "rotation-origin-x" => size_div_2(elem, "width"),
+        "rotation-origin-y" => size_div_2(elem, "height"),
         _ => return None,
     };
     Some(expr)
@@ -195,4 +200,12 @@ fn layout_constraint_prop(elem: &ElementRc, field: &str, orient: Orientation) ->
         None => crate::layout::implicit_layout_info_call(elem, orient),
     };
     Expression::StructFieldAccess { base: expr.into(), name: field.into() }
+}
+
+fn size_div_2(elem: &ElementRc, field: &str) -> Expression {
+    Expression::BinaryExpression {
+        lhs: Expression::PropertyReference(NamedReference::new(elem, field.into())).into(),
+        op: '/',
+        rhs: Expression::NumberLiteral(2., Unit::None).into(),
+    }
 }

@@ -80,6 +80,7 @@ export component PreviewUi inherits Window {
 
             MenuItem {
                 title: @tr("Reload");
+                icon: Platform.os != OperatingSystemType.macos ? Icons.sync : @image-url("");
                 activated => {
                     Api.reload-preview();
                 }
@@ -121,24 +122,28 @@ export component PreviewUi inherits Window {
 
             MenuItem {
                 title: @tr("Library");
+                icon: Icons.library;
                 checkable: true;
                 checked <=> root.library-widget;
             }
 
             MenuItem {
                 title: @tr("Properties");
+                icon: Icons.properties;
                 checkable: true;
                 checked <=> root.properties-widget;
             }
 
             MenuItem {
                 title: @tr("Outline");
+                icon: Icons.outline;
                 checkable: true;
                 checked <=> root.outline-widget;
             }
 
             MenuItem {
                 title: @tr("Simulation Data");
+                icon: Icons.simulator;
                 checkable: true;
                 checked <=> root.data-widget;
             }
@@ -204,18 +209,6 @@ export component PreviewUi inherits Window {
 
                     style-selected => {
                         Api.style-changed();
-                    }
-                    library-toggled(val) => {
-                        root.library-widget = val;
-                    }
-                    outline-toggled(val) => {
-                        root.outline-widget = val;
-                    }
-                    properties-toggled(val) => {
-                        root.properties-widget = val;
-                    }
-                    simulator-toggled(val) => {
-                        root.data-widget = val;
                     }
                     edit := Button {
                         icon: Icons.inspect;

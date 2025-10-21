@@ -17,6 +17,11 @@ jobs:
         runs-on: ubuntu-22.04
         container: espressif/idf:${{ matrix.esp-idf-target }}
         steps:
+            - name: Fix up pydantic regression (https://github.com/espressif/idf-component-manager/issues/97#issuecomment-3380777944)
+              run: |
+                  . ${IDF_PATH}/export.sh
+                  cd $IDF_PYTHON_ENV_PATH
+                  bin/pip install pydantic==2.11.10
             - uses: actions/checkout@v5
             - uses: dtolnay/rust-toolchain@stable
             - uses: esp-rs/xtensa-toolchain@v1.6
@@ -110,7 +115,7 @@ jobs:
                 components: rust-src
                 target: ${{matrix.target}}
           - name: Setup Zephyr project
-            uses: zephyrproject-rtos/action-zephyr-setup@v1.0.7
+            uses: zephyrproject-rtos/action-zephyr-setup@v1.0.9
             with:
                 app-path: slint
                 manifest-file-name: demos/printerdemo/zephyr/west.yaml
@@ -148,8 +153,8 @@ jobs:
                 - demo: demos/energy-monitor
                   scheme: "Energy Monitor"
                   bundle_id: dev.slint.demos.EnergyMonitor
-                  device: iPhone 16
-        runs-on: macos-15
+                  device: iPhone 17
+        runs-on: macos-26
         steps:
             - uses: actions/checkout@v5
             - uses: ./.github/actions/setup-rust
@@ -158,7 +163,6 @@ jobs:
             - run: brew install xcodegen
             - run: xcodegen -s ios-project.yml
               working-directory: ${{ matrix.demo }}
-            - run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
             - name: "Boot Simulator (to ensure also that xcodebuild -destination works)"
               run: |
                 xcrun simctl boot "${{ matrix.device }}"
@@ -198,15 +202,32 @@ jobs:
               run: cargo build
               working-directory: examples/bevy
 
+    android_wgpu:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: Install Android API level 30
+              run: ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-30"
+            - uses: dtolnay/rust-toolchain@stable
+            - name: Install cargo-apk
+              run: cargo install cargo-apk
+            - uses: ./.github/actions/setup-rust
+              with:
+                  target: aarch64-linux-android
+            - uses: ./.github/actions/install-linux-dependencies
+            - uses: ./.github/actions/install-skia-dependencies
+            - name: Build wgpu_texture demo
+              run: cargo apk build -p wgpu_texture --target aarch64-linux-android --lib
+
     uvx_slint_compiler:
         strategy:
             matrix:
-                os: [ubuntu-22.04, ubuntu-22.04-arm, macos-13, macos-14, windows-2022, windows-11-arm]
+                os: [ubuntu-22.04, ubuntu-22.04-arm, macos-14, windows-2022, windows-11-arm]
         runs-on: ${{ matrix.os }}
         steps:
             - uses: actions/checkout@v5
             - name: Install uv
-              uses: astral-sh/setup-uv@v6
+              uses: astral-sh/setup-uv@v7
             - name: Run slint compiler via uxv
               working-directory: api/python/compiler
               env:

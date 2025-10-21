@@ -907,15 +907,16 @@ impl WinitWindowAdapter {
 
             #[cfg(target_arch = "wasm32")]
             if let Some(html_canvas) = winit_window.canvas() {
-                let existing_canvas_size = winit::dpi::LogicalSize::new(
-                    html_canvas.client_width() as f32,
-                    html_canvas.client_height() as f32,
-                );
                 // Try to maintain the existing size of the canvas element, if any
-                if existing_canvas_size.width > 0. {
+                if !is_preferred_sized_canvas(&html_canvas)
+                    && !canvas_has_explicit_size_set(&html_canvas)
+                {
+                    let existing_canvas_size = winit::dpi::LogicalSize::new(
+                        html_canvas.client_width() as f32,
+                        html_canvas.client_height() as f32,
+                    );
                     preferred_size.width = existing_canvas_size.width;
-                }
-                if existing_canvas_size.height > 0. {
+
                     preferred_size.height = existing_canvas_size.height;
                 }
             }
@@ -1226,12 +1227,7 @@ impl WindowAdapter for WinitWindowAdapter {
         if let Some(canvas) =
             winit_window_or_none.as_window().and_then(|winit_window| winit_window.canvas())
         {
-            if canvas
-                .dataset()
-                .get("slintAutoResizeToPreferred")
-                .and_then(|val_str| val_str.parse().ok())
-                .unwrap_or_default()
-            {
+            if is_preferred_sized_canvas(&canvas) {
                 let pref = new_constraints.preferred;
                 if pref.width > 0 as Coord || pref.height > 0 as Coord {
                     // TODO: don't ignore error, propgate to caller
@@ -1489,11 +1485,18 @@ fn adjust_window_size_to_satisfy_constraints(
     max_size: Option<winit::dpi::LogicalSize<f64>>,
 ) {
     let sf = adapter.window().scale_factor() as f64;
-    let current_size = adapter
+    let Some(current_size) = adapter
         .pending_requested_size
         .get()
+        .or_else(|| {
+            let existing_adapter_size = adapter.size.get();
+            (existing_adapter_size.width != 0 && existing_adapter_size.height != 0)
+                .then(|| physical_size_to_winit(existing_adapter_size).into())
+        })
         .map(|s| s.to_logical::<f64>(sf))
-        .unwrap_or_else(|| physical_size_to_winit(adapter.size.get()).to_logical(sf));
+    else {
+        return;
+    };
 
     let mut window_size = current_size;
     if let Some(min_size) = min_size {
@@ -1512,4 +1515,33 @@ fn adjust_window_size_to_satisfy_constraints(
         // TODO: don't ignore error, propgate to caller
         adapter.resize_window(window_size.into()).ok();
     }
+}
+
+#[cfg(target_family = "wasm")]
+fn is_preferred_sized_canvas(canvas: &web_sys::HtmlCanvasElement) -> bool {
+    canvas
+        .dataset()
+        .get("slintAutoResizeToPreferred")
+        .and_then(|val_str| val_str.parse::<bool>().ok())
+        .unwrap_or_default()
+}
+
+#[cfg(target_family = "wasm")]
+fn canvas_has_explicit_size_set(canvas: &web_sys::HtmlCanvasElement) -> bool {
+    let style = canvas.style();
+    if !style.get_property_value("width").unwrap_or_default().is_empty()
+        || !style.get_property_value("height").unwrap_or_default().is_empty()
+    {
+        return true;
+    }
+
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let Some(computed_style) = window.get_computed_style(&canvas).ok().flatten() else {
+        return false;
+    };
+
+    computed_style.get_property_value("width").ok().as_deref() != Some("auto")
+        || computed_style.get_property_value("height").ok().as_deref() != Some("auto")
 }

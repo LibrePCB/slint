@@ -42,6 +42,7 @@ export struct SelectionRectangle {
     y: length,
     width: length,
     height: length,
+    angle: angle,
 }
 
 /// A `Selection`
@@ -118,6 +119,7 @@ export enum BrushKind {
     solid,
     linear,
     radial,
+    conic,
 }
 
 export struct GradientStop {
@@ -211,6 +213,7 @@ export struct PropertyContainer {
 /// Information on an Element a Property belongs to
 export struct ElementInformation {
     id: string,
+    component-name: string,
     type-name: string,
     source-uri: string,
     source-version: int,
@@ -271,6 +274,7 @@ export global Api {
     // ## Component Data for ComponentList:
     // All the components
     in property <[ComponentListItem]> known-components;
+    callback library-search(string);
     // The component currently viewed
     out property <ComponentItem> visible-component;
 
@@ -330,14 +334,10 @@ export global Api {
                         visual-items: ["px", "cm", "mm", "in", "pt", "phx"],
                     }
                 },
-                {
-                    name: "z",
-                    type-name: "float",
-                    value: {
-                        kind: PropertyValueKind.float,
-                        value-float: 10,
-                    }
-                },
+                { name: "z", type-name: "float", value: {
+                    kind: PropertyValueKind.float,
+                    value-float: 10,
+                } },
                 {
                     name: "combobox",
                     type-name: "string",
@@ -361,28 +361,16 @@ export global Api {
                         kind: PropertyValueKind.string,
                     }
                 },
-                {
-                    name: "checkable",
-                    type-name: "bool",
-                    value: {
-                        kind: PropertyValueKind.boolean,
-                    }
-                },
-                {
-                    name: "icon",
-                    type-name: "image",
-                    value: {
-                        kind: PropertyValueKind.code,
-                    }
-                },
+                { name: "checkable", type-name: "bool", value: {
+                    kind: PropertyValueKind.boolean,
+                } },
+                { name: "icon", type-name: "image", value: {
+                    kind: PropertyValueKind.code,
+                } },
                 {
                     name: "brush",
                     type-name: "brush",
-                    value: {
-                        kind: PropertyValueKind.brush,
-                        value-brush: Colors.green,
-                        value-string: "#00ff00"
-                    },
+                    value: { kind: PropertyValueKind.brush, value-brush: Colors.green, value-string: "#00ff00" },
                 },
                 {
                     name: "text-between",
@@ -395,13 +383,8 @@ export global Api {
                 {
                     name: "color",
                     type-name: "color",
-                    value: {
-                        kind: PropertyValueKind.color,
-                        value-brush: Colors.green,
-                        value-string: "#00ff00"
-                    },
+                    value: { kind: PropertyValueKind.color, value-brush: Colors.green, value-string: "#00ff00" },
                 },
-
                 {
                     name: "a-really-long-named-attribute",
                     type-name: "float",
@@ -416,7 +399,7 @@ export global Api {
                     value: {
                         kind: PropertyValueKind.code,
                         value-float: 10.5,
-                        code: 10/2,
+                        code: 10 / 2,
                     }
                 },
                 {
@@ -428,9 +411,9 @@ export global Api {
                         code: "",
                     }
                 }
-
             ]
-        },        {
+        },
+        {
             group-name: "Other",
             properties: [
                 {
@@ -441,28 +424,16 @@ export global Api {
                         kind: PropertyValueKind.string,
                     }
                 },
-                {
-                    name: "checkable",
-                    type-name: "bool",
-                    value: {
-                        kind: PropertyValueKind.boolean,
-                    }
-                },
-                {
-                    name: "icon",
-                    type-name: "image",
-                    value: {
-                        kind: PropertyValueKind.code,
-                    }
-                },
+                { name: "checkable", type-name: "bool", value: {
+                    kind: PropertyValueKind.boolean,
+                } },
+                { name: "icon", type-name: "image", value: {
+                    kind: PropertyValueKind.code,
+                } },
                 {
                     name: "color",
                     type-name: "brush",
-                    value: {
-                        kind: PropertyValueKind.brush,
-                        value-brush: Colors.magenta,
-                        value-string: "#ff00ff"
-                    },
+                    value: { kind: PropertyValueKind.brush, value-brush: Colors.magenta, value-string: "#ff00ff" },
                 },
                 {
                     name: "a-really-long-named-attribute",
@@ -478,7 +449,7 @@ export global Api {
                     value: {
                         kind: PropertyValueKind.code,
                         value-float: 10.5,
-                        code: 10/2,
+                        code: 10 / 2,
                     }
                 },
                 {
@@ -490,11 +461,10 @@ export global Api {
                         code: "",
                     }
                 }
-
             ]
         }
-
     ];
+    callback properties-search(string);
 
     // ## Outline
     in-out property <[OutlineTreeNode]> outline;
@@ -565,6 +535,7 @@ export global Api {
     pure callback test-code-binding(element-url: string, element-version: int, element-offset: int, property-name: string, property-value: string) -> bool;
     pure callback set-code-binding(element-url: string, element-version: int, element-offset: int, property-name: string, property-value: string);
     pure callback set-color-binding(element-url: string, element-version: int, element-offset: int, property-name: string, property-value: color);
+    callback set-element-id(element-url: string, element-version: int, element-offset: int, new-id: string);
 
     pure callback string-to-code(value: string, is_translatable: bool, tr_context: string, tr_plural: string, tr_plural_expression: string) -> string;
 
@@ -613,19 +584,19 @@ export global Api {
     // ## SlintPad related APIs
     in-out property <bool> runs-in-slintpad;
     in-out property <[{title: string, url: string}]> demos: [
-            { url: "", title: "Hello World!"},
-            { url: "examples/gallery/gallery.slint", title: "Gallery" },
-            { url: "demos/home-automation/ui/demo-debug.slint", title: "Home Automation" },
-            { url: "demos/usecases/ui/app.slint", title: "Use Cases Demo" },
-            { url: "demos/printerdemo/ui/printerdemo.slint", title: "Printer Demo" },
-            { url: "demos/energy-monitor/ui/desktop_window.slint", title: "Energy Monitor" },
-            { url: "examples/todo/ui/todo.slint", title: "Todo Demo" },
-            { url: "examples/iot-dashboard/main.slint", title: "IOT Dashboard" },
-            { url: "examples/fancy-switches/demo.slint", title: "Fancy Switches" },
-            { url: "examples/dial/dial.slint", title: "Fanncy Dial" },
-            { url: "examples/orbit-animation/demo.slint", title: "Fancy Animations" },
-            { url: "examples/repeater/demo.slint", title: "Fancy Repeater" },
-            { url: "examples/sprite-sheet/demo.slint", title: "Spritesheet Demo" },
+        { url: "", title: "Hello World!" },
+        { url: "examples/gallery/gallery.slint", title: "Gallery" },
+        { url: "demos/home-automation/ui/demo-debug.slint", title: "Home Automation" },
+        { url: "demos/usecases/ui/app.slint", title: "Use Cases Demo" },
+        { url: "demos/printerdemo/ui/printerdemo.slint", title: "Printer Demo" },
+        { url: "demos/energy-monitor/ui/desktop_window.slint", title: "Energy Monitor" },
+        { url: "examples/todo/ui/todo.slint", title: "Todo Demo" },
+        { url: "examples/iot-dashboard/main.slint", title: "IOT Dashboard" },
+        { url: "examples/fancy-switches/demo.slint", title: "Fancy Switches" },
+        { url: "examples/dial/dial.slint", title: "Fanncy Dial" },
+        { url: "examples/orbit-animation/demo.slint", title: "Fancy Animations" },
+        { url: "examples/repeater/demo.slint", title: "Fancy Repeater" },
+        { url: "examples/sprite-sheet/demo.slint", title: "Spritesheet Demo" },
     ];
     callback share-permalink-to-clipboard();
     callback load-demo(url: string);

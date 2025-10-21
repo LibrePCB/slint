@@ -130,6 +130,8 @@ pub enum BuiltinMacroFunction {
     Mod,
     /// Add the right conversion operations so that the return type is the same as the argument type
     Abs,
+    /// Equivalent to `x < 0 ? -1 : 1`
+    Sign,
     CubicBezier,
     /// The argument can be r,g,b,a or r,g,b and they can be percentages or integer.
     /// transform the argument so it is always rgb(r, g, b, a) with r, g, b between 0 and 255.
@@ -193,8 +195,8 @@ declare_builtin_function_types!(
     ClearFocusItem: (Type::ElementReference) -> Type::Void,
     ShowPopupWindow: (Type::ElementReference) -> Type::Void,
     ClosePopupWindow: (Type::ElementReference) -> Type::Void,
-    ShowPopupMenu: (Type::ElementReference, Type::ElementReference, typeregister::logical_point_type()) -> Type::Void,
-    ShowPopupMenuInternal: (Type::ElementReference, Type::Model, typeregister::logical_point_type()) -> Type::Void,
+    ShowPopupMenu: (Type::ElementReference, Type::ElementReference, typeregister::logical_point_type().into()) -> Type::Void,
+    ShowPopupMenuInternal: (Type::ElementReference, Type::Model, typeregister::logical_point_type().into()) -> Type::Void,
     SetSelectionOffsets: (Type::ElementReference, Type::Int32, Type::Int32) -> Type::Void,
     ItemFontMetrics: (Type::ElementReference) -> typeregister::font_metrics_type(),
     StringToFloat: (Type::String) -> Type::Float32,
@@ -203,7 +205,7 @@ declare_builtin_function_types!(
     StringCharacterCount: (Type::String) -> Type::Int32,
     StringToLowercase: (Type::String) -> Type::String,
     StringToUppercase: (Type::String) -> Type::String,
-    ImplicitLayoutInfo(..): (Type::ElementReference) -> Type::Struct(typeregister::layout_info_type()),
+    ImplicitLayoutInfo(..): (Type::ElementReference) -> typeregister::layout_info_type().into(),
     ColorRgbaStruct: (Type::Color) -> Type::Struct(Rc::new(Struct {
         fields: IntoIterator::into_iter([
             (SmolStr::new_static("red"), Type::Int32),
@@ -260,7 +262,7 @@ declare_builtin_function_types!(
     ValidDate: (Type::String, Type::String) -> Type::Bool,
     ParseDate: (Type::String, Type::String) -> Type::Array(Rc::new(Type::Int32)),
     SetTextInputFocused: (Type::Bool) -> Type::Void,
-    ItemAbsolutePosition: (Type::ElementReference) -> typeregister::logical_point_type(),
+    ItemAbsolutePosition: (Type::ElementReference) -> typeregister::logical_point_type().into(),
     RegisterCustomFontByPath: (Type::String) -> Type::Void,
     RegisterCustomFontByMemory: (Type::Int32) -> Type::Void,
     RegisterBitmapFont: (Type::Int32) -> Type::Void,
@@ -285,10 +287,12 @@ impl BuiltinFunction {
     }
 
     /// It is const if the return value only depends on its argument and has no side effect
-    fn is_const(&self) -> bool {
+    fn is_const(&self, global_analysis: Option<&crate::passes::GlobalAnalysis>) -> bool {
         match self {
             BuiltinFunction::GetWindowScaleFactor => false,
-            BuiltinFunction::GetWindowDefaultFontSize => false,
+            BuiltinFunction::GetWindowDefaultFontSize => {
+                global_analysis.is_some_and(|x| x.default_font_size.is_const())
+            }
             BuiltinFunction::AnimationTick => false,
             BuiltinFunction::ColorScheme => false,
             BuiltinFunction::SupportsNativeMenuBar => false,
@@ -582,7 +586,7 @@ pub enum MinMaxOp {
     Max,
 }
 
-/// The Expression is hold by properties, so it should not hold any strong references to node from the object_tree
+/// The Expression is held by properties, so it should not hold any strong references to node from the object_tree
 #[derive(Debug, Clone, Default)]
 pub enum Expression {
     /// Something went wrong (and an error will be reported)
@@ -1103,7 +1107,7 @@ impl Expression {
         self.visit_mut(|e| e.visit_recursive_mut(visitor));
     }
 
-    pub fn is_constant(&self) -> bool {
+    pub fn is_constant(&self, ga: Option<&crate::passes::GlobalAnalysis>) -> bool {
         match self {
             Expression::Invalid => true,
             Expression::Uncompiled(_) => false,
@@ -1116,61 +1120,66 @@ impl Expression {
             Expression::RepeaterModelReference { .. } => false,
             // Allow functions to be marked as const
             Expression::FunctionParameterReference { .. } => true,
-            Expression::StructFieldAccess { base, .. } => base.is_constant(),
-            Expression::ArrayIndex { array, index } => array.is_constant() && index.is_constant(),
-            Expression::Cast { from, .. } => from.is_constant(),
+            Expression::StructFieldAccess { base, .. } => base.is_constant(ga),
+            Expression::ArrayIndex { array, index } => {
+                array.is_constant(ga) && index.is_constant(ga)
+            }
+            Expression::Cast { from, .. } => from.is_constant(ga),
             // This is conservative: the return value is the last expression in the block, but
             // we kind of mean "pure" here too, so ensure the whole body is OK.
-            Expression::CodeBlock(sub) => sub.iter().all(|s| s.is_constant()),
+            Expression::CodeBlock(sub) => sub.iter().all(|s| s.is_constant(ga)),
             Expression::FunctionCall { function, arguments, .. } => {
                 let is_const = match function {
-                    Callable::Builtin(b) => b.is_const(),
+                    Callable::Builtin(b) => b.is_const(ga),
                     Callable::Function(nr) => nr.is_constant(),
                     Callable::Callback(..) => false,
                 };
-                is_const && arguments.iter().all(|a| a.is_constant())
+                is_const && arguments.iter().all(|a| a.is_constant(ga))
             }
             Expression::SelfAssignment { .. } => false,
             Expression::ImageReference { .. } => true,
             Expression::Condition { condition, false_expr, true_expr } => {
-                condition.is_constant() && false_expr.is_constant() && true_expr.is_constant()
+                condition.is_constant(ga) && false_expr.is_constant(ga) && true_expr.is_constant(ga)
             }
-            Expression::BinaryExpression { lhs, rhs, .. } => lhs.is_constant() && rhs.is_constant(),
-            Expression::UnaryOp { sub, .. } => sub.is_constant(),
+            Expression::BinaryExpression { lhs, rhs, .. } => {
+                lhs.is_constant(ga) && rhs.is_constant(ga)
+            }
+            Expression::UnaryOp { sub, .. } => sub.is_constant(ga),
             // Array will turn into model, and they can't be considered as constant if the model
             // is used and the model is changed. CF issue #5249
             //Expression::Array { values, .. } => values.iter().all(Expression::is_constant),
             Expression::Array { .. } => false,
-            Expression::Struct { values, .. } => values.iter().all(|(_, v)| v.is_constant()),
+            Expression::Struct { values, .. } => values.iter().all(|(_, v)| v.is_constant(ga)),
             Expression::PathData(data) => match data {
                 Path::Elements(elements) => elements
                     .iter()
-                    .all(|element| element.bindings.values().all(|v| v.borrow().is_constant())),
+                    .all(|element| element.bindings.values().all(|v| v.borrow().is_constant(ga))),
                 Path::Events(_, _) => true,
                 Path::Commands(_) => false,
             },
-            Expression::StoreLocalVariable { value, .. } => value.is_constant(),
+            Expression::StoreLocalVariable { value, .. } => value.is_constant(ga),
             // We only load what we store, and stores are alredy checked
             Expression::ReadLocalVariable { .. } => true,
             Expression::EasingCurve(_) => true,
             Expression::LinearGradient { angle, stops } => {
-                angle.is_constant() && stops.iter().all(|(c, s)| c.is_constant() && s.is_constant())
+                angle.is_constant(ga)
+                    && stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
             }
             Expression::RadialGradient { stops } => {
-                stops.iter().all(|(c, s)| c.is_constant() && s.is_constant())
+                stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
             }
             Expression::ConicGradient { stops } => {
-                stops.iter().all(|(c, s)| c.is_constant() && s.is_constant())
+                stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
             }
             Expression::EnumerationValue(_) => true,
             Expression::ReturnStatement(expr) => {
-                expr.as_ref().map_or(true, |expr| expr.is_constant())
+                expr.as_ref().map_or(true, |expr| expr.is_constant(ga))
             }
             // TODO:  detect constant property within layouts
             Expression::LayoutCacheAccess { .. } => false,
             Expression::ComputeLayoutInfo(..) => false,
             Expression::SolveLayout(..) => false,
-            Expression::MinMax { lhs, rhs, .. } => lhs.is_constant() && rhs.is_constant(),
+            Expression::MinMax { lhs, rhs, .. } => lhs.is_constant(ga) && rhs.is_constant(ga),
             Expression::EmptyComponentFactory => true,
             Expression::DebugHook { .. } => false,
         }

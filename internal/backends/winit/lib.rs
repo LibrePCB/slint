@@ -385,14 +385,14 @@ impl BackendBuilder {
             #[cfg(feature = "renderer-femtovg-wgpu")]
             (Some("femtovg-wgpu"), maybe_graphics_api) => {
                 if !maybe_graphics_api.is_some_and(|_api| {
-                    #[cfg(feature = "unstable-wgpu-26")]
-                    if matches!(_api, RequestedGraphicsAPI::WGPU26(..)) {
+                    #[cfg(feature = "unstable-wgpu-27")]
+                    if matches!(_api, RequestedGraphicsAPI::WGPU27(..)) {
                         return true;
                     }
                     false
                 }) {
                     return Err(
-                        "The FemtoVG WGPU renderer only supports the WGPU26 graphics API selection"
+                        "The FemtoVG WGPU renderer only supports the WGPU27 graphics API selection"
                             .into(),
                     );
                 }
@@ -410,16 +410,54 @@ impl BackendBuilder {
                 }
                 renderer::skia::WinitSkiaRenderer::new_opengl_suspended
             }
-            #[cfg(all(enable_skia_renderer, feature = "unstable-wgpu-26"))]
+            #[cfg(all(
+                enable_skia_renderer,
+                any(feature = "unstable-wgpu-26", feature = "unstable-wgpu-27")
+            ))]
             (Some("skia-wgpu"), maybe_graphics_api @ _) => {
-                if !maybe_graphics_api
-                    .map_or(true, |api| !matches!(api, RequestedGraphicsAPI::WGPU26(..)))
-                {
+                if let Some(factory) = maybe_graphics_api.map_or_else(
+                    || {
+                        let result;
+                        cfg_if::cfg_if!(
+                            if #[cfg(feature = "unstable-wgpu-27")]
+                        {
+                            result = Some(
+                                renderer::skia::WinitSkiaRenderer::new_wgpu_27_suspended
+                                    as RendererFactoryFn,
+                            );
+                        } else {
+                             result = Some(
+                                renderer::skia::WinitSkiaRenderer::new_wgpu_26_suspended
+                                    as RendererFactoryFn,
+                            );
+                        }
+                        );
+                        result
+                    },
+                    |api| {
+                        #[cfg(feature = "unstable-wgpu-26")]
+                        if matches!(api, RequestedGraphicsAPI::WGPU26(..)) {
+                            return Some(
+                                renderer::skia::WinitSkiaRenderer::new_wgpu_26_suspended
+                                    as RendererFactoryFn,
+                            );
+                        }
+                        #[cfg(feature = "unstable-wgpu-27")]
+                        if matches!(api, RequestedGraphicsAPI::WGPU27(..)) {
+                            return Some(
+                                renderer::skia::WinitSkiaRenderer::new_wgpu_27_suspended
+                                    as RendererFactoryFn,
+                            );
+                        }
+                        None
+                    },
+                ) {
+                    factory
+                } else {
                     return Err(
                         format!("Skia with WGPU doesn't support non-WGPU graphics API").into()
                     );
                 }
-                renderer::skia::WinitSkiaRenderer::new_wgpu_26_suspended
             }
             #[cfg(all(enable_skia_renderer, not(target_os = "android")))]
             (Some("skia-software"), None) => {
@@ -442,9 +480,13 @@ impl BackendBuilder {
             }
             #[cfg(feature = "unstable-wgpu-26")]
             (None, Some(RequestedGraphicsAPI::WGPU26(..))) => {
+                renderer::skia::WinitSkiaRenderer::new_wgpu_26_suspended
+            }
+            #[cfg(feature = "unstable-wgpu-27")]
+            (None, Some(RequestedGraphicsAPI::WGPU27(..))) => {
                 cfg_if::cfg_if! {
                     if #[cfg(enable_skia_renderer)] {
-                        renderer::skia::WinitSkiaRenderer::new_wgpu_26_suspended
+                        renderer::skia::WinitSkiaRenderer::new_wgpu_27_suspended
                     } else {
                         renderer::femtovg::WGPUFemtoVGRenderer::new_suspended
                     }
@@ -609,6 +651,9 @@ impl SharedBackendData {
     }
 }
 
+type RendererFactoryFn =
+    fn(&Rc<SharedBackendData>) -> Result<Box<dyn WinitCompatibleRenderer>, PlatformError>;
+
 #[i_slint_core_macros::slint_doc]
 /// This struct implements the Slint Platform trait.
 /// Use this in conjunction with [`slint::platform::set_platform`](slint:rust:slint/platform/fn.set_platform.html) to initialize.
@@ -619,8 +664,7 @@ impl SharedBackendData {
 /// slint::platform::set_platform(Box::new(Backend::new().unwrap()));
 /// ```
 pub struct Backend {
-    renderer_factory_fn:
-        fn(&Rc<SharedBackendData>) -> Result<Box<dyn WinitCompatibleRenderer>, PlatformError>,
+    renderer_factory_fn: RendererFactoryFn,
     event_loop_state: RefCell<Option<crate::event_loop::EventLoopState>>,
     shared_data: Rc<SharedBackendData>,
     custom_application_handler: RefCell<Option<Box<dyn crate::CustomApplicationHandler>>>,

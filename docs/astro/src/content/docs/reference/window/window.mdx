@@ -37,7 +37,7 @@ The font family to use as default in text elements inside this window, that don'
 </SlintProperty>
 
 ### default-font-size
-<SlintProperty propName="default-font-size" typeName="length" defaultValue="0" propertyVisibility="in-out">
+<SlintProperty propName="default-font-size" typeName="length" defaultValue="0" propertyVisibility="in">
 The font size to use as default in text elements inside this window, that don't have their `font-size` property set. The value of this property also forms the basis for relative font sizes.
 </SlintProperty>
 
@@ -54,6 +54,14 @@ The window icon shown in the title bar or the task bar on window managers suppor
 ### no-frame
 <SlintProperty propName="no-frame" typeName="bool" defaultValue="false">
 Whether the window should be borderless/frameless or not.
+</SlintProperty>
+
+### resize-border-width
+<SlintProperty propName="resize-border-width" typeName="length" defaultValue="0">
+    :::caution[Caution]
+    This property is `winit` only for now.
+    :::
+    Size of the resize border in borderless/frameless windows.
 </SlintProperty>
 
 ### title

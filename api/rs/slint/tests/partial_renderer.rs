@@ -138,7 +138,7 @@ impl WindowAdapter for SkiaTestWindow {
 #[derive(Default)]
 struct SkiaTestSoftwareBuffer {
     pixels: RefCell<Option<SharedPixelBuffer<slint::Rgba8Pixel>>>,
-    last_dirty_region: RefCell<Option<i_slint_core::item_rendering::DirtyRegion>>,
+    last_dirty_region: RefCell<Option<i_slint_core::partial_renderer::DirtyRegion>>,
 }
 
 impl i_slint_renderer_skia::software_surface::RenderBuffer for SkiaTestSoftwareBuffer {
@@ -153,7 +153,7 @@ impl i_slint_renderer_skia::software_surface::RenderBuffer for SkiaTestSoftwareB
             u8,
             &mut [u8],
         ) -> Result<
-            Option<i_slint_core::item_rendering::DirtyRegion>,
+            Option<i_slint_core::partial_renderer::DirtyRegion>,
             i_slint_core::platform::PlatformError,
         >,
     ) -> Result<(), i_slint_core::platform::PlatformError> {
@@ -244,6 +244,7 @@ fn visibility() {
     slint::slint! {
         export component Ui inherits Window {
             in property <bool> c : true;
+            in property <bool> another: false;
             background: black;
             Rectangle {
                 x: 10phx;
@@ -255,6 +256,13 @@ fn visibility() {
                     height: 13phx;
                     background: red;
                     visible: c;
+                    Rectangle {
+                        x: 3phx;
+                        y: 3phx;
+                        width: 3phx;
+                        height: 3phx;
+                        background: another ? blue: green;
+                    }
                 }
                 Rectangle {
                     x: 50phx;
@@ -263,6 +271,13 @@ fn visibility() {
                     height: 17phx;
                     background: gray;
                     visible: !c;
+                    Rectangle {
+                        x: 3phx;
+                        y: 3phx;
+                        width: 3phx;
+                        height: 3phx;
+                        background: another ? blue: green;
+                    }
                 }
             }
         }
@@ -277,14 +292,26 @@ fn visibility() {
         do_test_render_region(renderer, 0, 0, 180, 260);
     }));
     assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
     ui.set_c(false);
     assert!(window.draw_if_needed(|renderer| {
         do_test_render_region(renderer, 10 + 5, 19 + 8, 10 + 50 + 15, 19 + 80 + 13);
     }));
     assert!(!window.draw_if_needed(|_| { unreachable!() }));
+    ui.set_another(true);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10 + 50 + 3, 19 + 8 + 3, 10 + 50 + 6, 19 + 8 + 6);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
     ui.set_c(true);
     assert!(window.draw_if_needed(|renderer| {
         do_test_render_region(renderer, 10 + 5, 19 + 8, 10 + 50 + 15, 19 + 80 + 13);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+    ui.set_another(false);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10 + 5 + 3, 19 + 80 + 3, 10 + 5 + 6, 19 + 80 + 6);
     }));
     assert!(!window.draw_if_needed(|_| { unreachable!() }));
 }
@@ -419,7 +446,7 @@ fn scale_factor() {
 fn rotated_image() {
     slint::slint! {
         export component Ui inherits Window {
-            in property <angle> rotation <=> i.rotation-angle;
+            in property <angle> rotation <=> i.transform-rotation;
             in property <length> x-pos <=> i.x;
             background: black;
             i := Image {
@@ -680,4 +707,120 @@ fn text_alignment() {
         window.last_dirty_region_bounding_box_origin(),
         Some(slint::LogicalPosition { x: 10., y: 10. })
     );
+}
+
+#[test]
+fn nowrap_text_change_doesnt_change_height() {
+    slint::slint! {
+        export component Ui inherits Window {
+            in property <string> first-text: "First text";
+            out property <length> first-label-width: first-label.width;
+            out property <length> first-label-height: first-label.height;
+            background: black;
+            VerticalLayout {
+                first-label := Text {
+                    text: root.first-text;
+                }
+                Text {
+                    text: "Second text";
+                }
+            }
+        }
+    }
+
+    slint::platform::set_platform(Box::new(TestPlatform)).ok();
+    let ui = Ui::new().unwrap();
+    let window = WINDOW.with(|x| x.clone());
+    window.set_size(slint::PhysicalSize::new(180, 260));
+    ui.show().unwrap();
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 0, 0, 180, 260);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+    ui.set_first_text("Hello World longer".into());
+
+    let expected_width = ui.get_first_label_width().ceil() as _;
+    let expected_height = ui.get_first_label_height().ceil() as _;
+
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 0, 0, expected_width, expected_height);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+}
+
+#[test]
+fn create_item_tree_during_rendering() {
+    // This test has a `init` callback which will cause item tree to be changed during rendeiring,
+    // between the compute dirty region and the actual rendering.
+    slint::slint! {
+        export component Ui inherits Window {
+            in property <bool> cond1: false;
+            property <bool> cond2: false;
+            property <bool> cond3: false;
+
+            in property <length> foo: 5px;
+
+            if cond3: Rectangle {
+                x: 12px;
+                y: foo;
+                width: 10px;
+                height: 10px;
+                background: yellow;
+            }
+            if cond2: Rectangle {
+                x: 10px;
+                y: 10px;
+                width: 10px;
+                height: 10px;
+                background: red;
+                init => { cond3=true; }
+            }
+            if cond1: Rectangle {
+                x: 10px;
+                y: 15px;
+                width: 10px;
+                height: 10px;
+                background: blue;
+                init => { cond2=true; }
+            }
+            if cond2: Rectangle {
+                x: 12px;
+                y: 10px + foo;
+                width: 10px;
+                height: 10px;
+                background: green;
+            }
+        }
+    }
+
+    slint::platform::set_platform(Box::new(TestPlatform)).ok();
+    let ui = Ui::new().unwrap();
+    let window = WINDOW.with(|x| x.clone());
+    window.set_size(slint::PhysicalSize::new(180, 260));
+    ui.show().unwrap();
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 0, 0, 180, 260);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+    ui.set_cond1(true);
+
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10, 15, 22, 25);
+    }));
+    // FIXME: in this case, there is nothing done to trigger any redraw. Ideally this call shouldn't be necessary.
+    assert!(!window.draw_if_needed(|_| ()));
+    // So therefore force a redraw
+
+    ui.set_foo(4.0);
+
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10, 4, 22, 25);
+    }));
+
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    ui.set_foo(3.0);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 12, 3, 22, 24);
+    }));
 }

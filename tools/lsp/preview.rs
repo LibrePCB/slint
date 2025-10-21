@@ -593,6 +593,35 @@ fn set_binding(
     }
 }
 
+fn set_element_id(
+    element_url: slint::SharedString,
+    element_version: i32,
+    element_offset: i32,
+    new_id: slint::SharedString,
+) {
+    let Ok(element_url) = Url::parse(element_url.as_ref()) else { return };
+    let element_version = if element_version < 0 { None } else { Some(element_version) };
+    let element_offset = TextSize::from(element_offset as u32);
+
+    let Some(document_cache) = document_cache() else { return };
+    let Some(element) = document_cache.element_at_offset(&element_url, element_offset) else {
+        return;
+    };
+
+    let Some(edits) = element.with_element_node(|node| {
+        node.parent()
+            .and_then(syntax_nodes::SubElement::new)
+            .and_then(|node| common::rename_element_id::rename_element_id(node, &new_id))
+    }) else {
+        return;
+    };
+    send_workspace_edit(
+        "Rename element".to_string(),
+        common::create_workspace_edit(element_url, element_version, edits),
+        true,
+    );
+}
+
 fn show_component(name: slint::SharedString, url: slint::SharedString) {
     let name = name.to_string();
     let Ok(url) = Url::parse(url.as_ref()) else {
@@ -790,7 +819,7 @@ fn resize_selected_element_impl(
 
     // They all have the same size anyway:
     let (path, offset) = element_node.path_and_offset();
-    let geometry = element_node.geometries(&component_instance).get(instance_index).cloned()?;
+    let geometry = element_node.geometries(&component_instance).get(instance_index).cloned()?.rect;
 
     let position = rect.origin;
     let root_element = element_selection::root_element(&component_instance);
@@ -801,7 +830,7 @@ fn resize_selected_element_impl(
                 .element_positions(&parent_element)
                 .iter()
                 .find(|g| g.contains(position))
-                .map(|g| g.origin)
+                .map(|g| g.rect.origin)
         })
         .unwrap_or_default();
 

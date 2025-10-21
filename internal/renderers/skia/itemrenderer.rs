@@ -13,15 +13,14 @@ use i_slint_core::graphics::ApproxEq;
 use i_slint_core::item_rendering::{
     CachedRenderingData, ItemCache, ItemRenderer, ItemRendererFeatures, RenderImage, RenderText,
 };
-use i_slint_core::items::{
-    ImageFit, ImageRendering, ItemRc, Layer, Opacity, RenderingResult, TextStrokeStyle,
-};
+use i_slint_core::items::{ImageFit, ImageRendering, ItemRc, Layer, Opacity, RenderingResult};
 use i_slint_core::lengths::{
     LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalPx, LogicalRect, LogicalSize,
     LogicalVector, PhysicalPx, RectLengths, ScaleFactor, SizeLengths,
 };
+use i_slint_core::textlayout::sharedparley::{self, GlyphRenderer};
 use i_slint_core::window::WindowInner;
-use i_slint_core::{Brush, Color};
+use i_slint_core::{Brush, Color, SharedString};
 use skia_safe::{Matrix, TileMode};
 
 pub type SkiaBoxShadowCache = BoxShadowCache<skia_safe::Image>;
@@ -286,10 +285,11 @@ impl<'a> SkiaItemRenderer<'a> {
                             / skia_image.height() as f32,
                     ))
                     * Matrix::translate((-(tiled_offset.x as i32), -(tiled_offset.y as i32)));
-                if let Some(shader) =
-                    skia_image.make_subset(self.canvas.direct_context().as_mut(), &src).and_then(
-                        |i| i.to_shader((TileMode::Repeat, TileMode::Repeat), filter_mode, &matrix),
-                    )
+                if let Some(shader) = skia_image
+                    .make_subset(None, &src, skia_safe::image::RequiredProperties::default())
+                    .and_then(|i| {
+                        i.to_shader((TileMode::Repeat, TileMode::Repeat), filter_mode, &matrix)
+                    })
                 {
                     let mut paint = self.default_paint().unwrap_or_default();
                     paint.set_shader(shader);
@@ -297,7 +297,7 @@ impl<'a> SkiaItemRenderer<'a> {
                 }
             } else {
                 let transform =
-                    skia_safe::Matrix::rect_to_rect(skia_safe::Rect::from(src), dst, None)
+                    skia_safe::Matrix::rect_2_rect(skia_safe::Rect::from(src), dst, None)
                         .unwrap_or_default();
                 self.canvas.concat(&transform);
                 self.canvas.draw_image_with_sampling_options(
@@ -526,96 +526,7 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         size: LogicalSize,
         _cache: &CachedRenderingData,
     ) {
-        let max_width = size.width_length() * self.scale_factor;
-        let max_height = size.height_length() * self.scale_factor;
-
-        if max_width.get() <= 0. || max_height.get() <= 0. {
-            return;
-        }
-
-        let string = text.text();
-        let string = string.as_str();
-        let font_request = text.font_request(self_rc);
-
-        let paint = match self.brush_to_paint(text.color(), max_width, max_height) {
-            Some(paint) => paint,
-            None => return,
-        };
-
-        let mut text_style = skia_safe::textlayout::TextStyle::new();
-        text_style.set_foreground_paint(&paint);
-
-        let (stroke_brush, stroke_width, stroke_style) = text.stroke();
-        let (horizontal_alignment, vertical_alignment) = text.alignment();
-        let stroke_width = if stroke_width.get() != 0.0 {
-            (stroke_width * self.scale_factor).get()
-        } else {
-            // Hairline stroke
-            1.0
-        };
-        let stroke_width = match stroke_style {
-            TextStrokeStyle::Outside => stroke_width * 2.0,
-            TextStrokeStyle::Center => stroke_width,
-        };
-
-        let mut text_stroke_style = skia_safe::textlayout::TextStyle::new();
-        let stroke_layout = match self.brush_to_paint(stroke_brush.clone(), max_width, max_height) {
-            Some(mut stroke_paint) => {
-                if stroke_brush.is_transparent() {
-                    None
-                } else {
-                    stroke_paint.set_style(skia_safe::PaintStyle::Stroke);
-                    stroke_paint.set_stroke_width(stroke_width);
-                    // Set stroke cap/join/miter to match FemtoVG
-                    stroke_paint.set_stroke_cap(skia_safe::PaintCap::Butt);
-                    stroke_paint.set_stroke_join(skia_safe::PaintJoin::Miter);
-                    stroke_paint.set_stroke_miter(10.0);
-                    text_stroke_style.set_foreground_paint(&stroke_paint);
-                    Some(super::textlayout::create_layout(
-                        font_request.clone(),
-                        self.scale_factor,
-                        string,
-                        Some(text_stroke_style),
-                        Some(max_width),
-                        max_height,
-                        horizontal_alignment,
-                        vertical_alignment,
-                        text.wrap(),
-                        text.overflow(),
-                        None,
-                    ))
-                }
-            }
-            None => None,
-        };
-
-        let (layout, layout_top_left) = super::textlayout::create_layout(
-            font_request,
-            self.scale_factor,
-            string,
-            Some(text_style),
-            Some(max_width),
-            max_height,
-            horizontal_alignment,
-            vertical_alignment,
-            text.wrap(),
-            text.overflow(),
-            None,
-        );
-
-        match (stroke_style, stroke_layout) {
-            (TextStrokeStyle::Outside, Some((stroke_layout, stroke_layout_top_left))) => {
-                stroke_layout.paint(self.canvas, to_skia_point(stroke_layout_top_left));
-                layout.paint(self.canvas, to_skia_point(layout_top_left));
-            }
-            (TextStrokeStyle::Center, Some((stroke_layout, stroke_layout_top_left))) => {
-                layout.paint(self.canvas, to_skia_point(layout_top_left));
-                stroke_layout.paint(self.canvas, to_skia_point(stroke_layout_top_left));
-            }
-            _ => {
-                layout.paint(self.canvas, to_skia_point(layout_top_left));
-            }
-        };
+        sharedparley::draw_text(self, text, Some(text.font_request(self_rc)), size);
     }
 
     fn draw_text_input(
@@ -624,80 +535,13 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         self_rc: &i_slint_core::items::ItemRc,
         size: LogicalSize,
     ) {
-        let max_width = size.width_length() * self.scale_factor;
-        let max_height = size.height_length() * self.scale_factor;
-
-        if max_width.get() <= 0. || max_height.get() <= 0. {
-            return;
-        }
-
-        let font_request = text_input.font_request(self_rc);
-
-        let visual_representation = text_input.visual_representation(None);
-        let paint =
-            match self.brush_to_paint(visual_representation.text_color, max_width, max_height) {
-                Some(paint) => paint,
-                None => return,
-            };
-
-        let mut text_style = skia_safe::textlayout::TextStyle::new();
-        text_style.set_foreground_paint(&paint);
-
-        let selection = if !visual_representation.preedit_range.is_empty() {
-            Some(super::textlayout::Selection {
-                range: visual_representation.preedit_range,
-                foreground: None,
-                background: None,
-                underline: true,
-            })
-        } else if !visual_representation.selection_range.is_empty() {
-            Some(super::textlayout::Selection {
-                range: visual_representation.selection_range,
-                foreground: text_input.selection_foreground_color().into(),
-                background: text_input.selection_background_color().into(),
-                underline: false,
-            })
-        } else {
-            None
-        };
-
-        let (layout, layout_top_left) = super::textlayout::create_layout(
-            font_request,
-            self.scale_factor,
-            &visual_representation.text,
-            Some(text_style),
-            Some(max_width),
-            max_height,
-            text_input.horizontal_alignment(),
-            text_input.vertical_alignment(),
-            text_input.wrap(),
-            i_slint_core::items::TextOverflow::Clip,
-            selection.as_ref(),
+        sharedparley::draw_text_input(
+            self,
+            text_input,
+            Some(text_input.font_request(self_rc)),
+            size,
+            None,
         );
-
-        layout.paint(self.canvas, to_skia_point(layout_top_left));
-
-        if let Some(cursor_position) = visual_representation.cursor_position {
-            let cursor_rect = super::textlayout::cursor_rect(
-                &visual_representation.text,
-                cursor_position,
-                layout,
-                text_input.text_cursor_width() * self.scale_factor,
-                text_input.horizontal_alignment(),
-            )
-            .translate(layout_top_left.to_vector());
-
-            let cursor_paint = match self.brush_to_paint(
-                Brush::SolidColor(visual_representation.cursor_color),
-                cursor_rect.width_length(),
-                cursor_rect.height_length(),
-            ) {
-                Some(paint) => paint,
-                None => return,
-            };
-
-            self.canvas.draw_rect(to_skia_rect(&cursor_rect), &cursor_paint);
-        }
     }
 
     fn draw_path(
@@ -921,6 +765,10 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         self.canvas.rotate(angle_in_degrees, None);
     }
 
+    fn scale(&mut self, x_factor: f32, y_factor: f32) {
+        self.canvas.scale((x_factor, y_factor));
+    }
+
     fn apply_opacity(&mut self, opacity: f32) {
         self.current_state.alpha *= opacity;
     }
@@ -970,16 +818,12 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
     }
 
     fn draw_string(&mut self, string: &str, color: i_slint_core::Color) {
-        let mut paint = self.default_paint().unwrap_or_default();
-        paint.set_color(to_skia_color(&color));
-        if let Some(font) = super::textlayout::default_font(self.scale_factor.get()) {
-            self.canvas.draw_str(
-                string,
-                skia_safe::Point::new(0., 12. * self.scale_factor.get()), // Default text size is 12 pixels
-                &font,
-                &paint,
-            );
-        }
+        sharedparley::draw_text(
+            self,
+            std::pin::pin!((SharedString::from(string), Brush::from(color))),
+            None,
+            LogicalSize::new(1., 1.), // Non-zero size to avoid an early return
+        );
     }
 
     fn draw_image_direct(&mut self, image: i_slint_core::graphics::Image) {
@@ -1054,6 +898,107 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
             self.image_cache.release(self_rc);
             RenderingResult::ContinueRenderingChildren
         }
+    }
+}
+
+impl GlyphRenderer for SkiaItemRenderer<'_> {
+    type PlatformBrush = skia_safe::Paint;
+
+    fn platform_text_fill_brush(
+        &mut self,
+        brush: i_slint_core::Brush,
+        size: LogicalSize,
+    ) -> Option<Self::PlatformBrush> {
+        self.brush_to_paint(
+            brush,
+            size.width_length() * self.scale_factor,
+            size.height_length() * self.scale_factor,
+        )
+    }
+
+    fn platform_brush_for_color(
+        &mut self,
+        color: &i_slint_core::Color,
+    ) -> Option<Self::PlatformBrush> {
+        if color.alpha() == 0 {
+            None
+        } else {
+            let mut paint = self.default_paint().unwrap_or_default();
+            paint.set_shader(skia_safe::shaders::color(to_skia_color(&color)));
+            Some(paint)
+        }
+    }
+
+    fn platform_text_stroke_brush(
+        &mut self,
+        brush: i_slint_core::Brush,
+        physical_stroke_width: f32,
+        size: LogicalSize,
+    ) -> Option<Self::PlatformBrush> {
+        match self.brush_to_paint(
+            brush.clone(),
+            size.width_length() * self.scale_factor,
+            size.height_length() * self.scale_factor,
+        ) {
+            Some(mut stroke_paint) => {
+                stroke_paint.set_style(skia_safe::PaintStyle::Stroke);
+                stroke_paint.set_stroke_width(physical_stroke_width);
+                // Set stroke cap/join/miter to match FemtoVG
+                stroke_paint.set_stroke_cap(skia_safe::PaintCap::Butt);
+                stroke_paint.set_stroke_join(skia_safe::PaintJoin::Miter);
+                stroke_paint.set_stroke_miter(10.0);
+                Some(stroke_paint)
+            }
+            None => None,
+        }
+    }
+
+    fn draw_glyph_run(
+        &mut self,
+        font: &sharedparley::parley::FontData,
+        font_size: PhysicalLength,
+        brush: Self::PlatformBrush,
+        y_offset: sharedparley::PhysicalLength,
+        glyphs_it: &mut dyn Iterator<Item = sharedparley::parley::layout::Glyph>,
+    ) {
+        let Some(type_face) =
+            crate::font_cache::FONT_CACHE.with_borrow_mut(|font_cache| font_cache.font(font))
+        else {
+            return;
+        };
+        let font = skia_safe::Font::from_typeface(type_face, font_size.get());
+
+        let (glyph_ids, glyph_positions): (Vec<_>, Vec<_>) = glyphs_it
+            .into_iter()
+            .map(|g| (g.id as skia_safe::GlyphId, skia_safe::Point::new(g.x, g.y + y_offset.get())))
+            .unzip();
+
+        self.canvas.draw_glyphs_at(
+            &glyph_ids,
+            skia_safe::canvas::GlyphPositions::Points(&glyph_positions),
+            skia_safe::Point::default(),
+            &font,
+            &brush,
+        );
+    }
+
+    fn fill_rectangle(&mut self, physical_rect: sharedparley::PhysicalRect, color: Color) {
+        if color.alpha() == 0 {
+            return;
+        }
+
+        let mut paint = self.default_paint().unwrap_or_default();
+        paint.set_shader(skia_safe::shaders::color(to_skia_color(&color)));
+
+        self.canvas.draw_rect(
+            skia_safe::Rect::from_xywh(
+                physical_rect.min_x(),
+                physical_rect.min_y(),
+                physical_rect.width(),
+                physical_rect.height(),
+            ),
+            &paint,
+        );
     }
 }
 

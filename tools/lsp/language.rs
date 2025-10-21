@@ -34,6 +34,7 @@ use lsp_types::{
     SemanticTokensOptions, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextEdit,
     Url, WorkDoneProgressOptions,
 };
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -90,22 +91,18 @@ pub fn request_state(ctx: &std::rc::Rc<Context>) {
         }
         let version = document_cache.document_version(&url);
 
-        ctx.to_preview
-            .send(&common::LspToPreviewMessage::SetContents {
-                url: common::VersionedUrl::new(url, version),
-                contents: node.text().to_string(),
-            })
-            .unwrap();
+        ctx.to_preview.send(&common::LspToPreviewMessage::SetContents {
+            url: common::VersionedUrl::new(url, version),
+            contents: node.text().to_string(),
+        });
     }
 
-    ctx.to_preview
-        .send(&common::LspToPreviewMessage::SetConfiguration {
-            config: ctx.preview_config.borrow().clone(),
-        })
-        .unwrap();
+    ctx.to_preview.send(&common::LspToPreviewMessage::SetConfiguration {
+        config: ctx.preview_config.borrow().clone(),
+    });
 
     if let Some(c) = ctx.to_show.borrow().clone() {
-        ctx.to_preview.send(&common::LspToPreviewMessage::ShowPreview(c)).unwrap();
+        ctx.to_preview.send(&common::LspToPreviewMessage::ShowPreview(c));
     }
 }
 
@@ -431,12 +428,10 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
             {
                 let element = gp.as_ref().unwrap().child_node(SyntaxKind::Element).unwrap();
 
-                ctx.to_preview
-                    .send(&common::LspToPreviewMessage::HighlightFromEditor {
-                        url: Some(uri),
-                        offset: element.text_range().start().into(),
-                    })
-                    .unwrap();
+                ctx.to_preview.send(&common::LspToPreviewMessage::HighlightFromEditor {
+                    url: Some(uri),
+                    offset: element.text_range().start().into(),
+                });
 
                 let range = util::node_to_lsp_range(&p);
                 return Ok(Some(vec![lsp_types::DocumentHighlight { range, kind: None }]));
@@ -454,23 +449,19 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
                     .as_ref()
                     .is_some_and(|n| n.kind() != SyntaxKind::Component)
                 {
-                    ctx.to_preview
-                        .send(&common::LspToPreviewMessage::HighlightFromEditor {
-                            url: Some(uri),
-                            offset: gp.unwrap().text_range().start().into(),
-                        })
-                        .unwrap();
+                    ctx.to_preview.send(&common::LspToPreviewMessage::HighlightFromEditor {
+                        url: Some(uri),
+                        offset: gp.unwrap().text_range().start().into(),
+                    });
                 }
                 return Ok(Some(vec![lsp_types::DocumentHighlight { range, kind: None }]));
             }
 
-            if let Some(value) = find_element_id_for_highlight(&tk, &p) {
-                ctx.to_preview
-                    .send(&common::LspToPreviewMessage::HighlightFromEditor {
-                        url: None,
-                        offset: 0,
-                    })
-                    .unwrap();
+            if let Some(value) = common::rename_element_id::find_element_ids(&tk, &p) {
+                ctx.to_preview.send(&common::LspToPreviewMessage::HighlightFromEditor {
+                    url: None,
+                    offset: 0,
+                });
                 return Ok(Some(
                     value
                         .into_iter()
@@ -483,8 +474,7 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
             }
         }
         ctx.to_preview
-            .send(&common::LspToPreviewMessage::HighlightFromEditor { url: None, offset: 0 })
-            .unwrap();
+            .send(&common::LspToPreviewMessage::HighlightFromEditor { url: None, offset: 0 });
         Ok(None)
     });
     rh.register::<Rename, _>(|params, ctx| async move {
@@ -495,7 +485,7 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
         {
             let p = tk.parent();
             let version = document_cache.document_version(&uri);
-            if let Some(value) = find_element_id_for_highlight(&tk, &p) {
+            if let Some(value) = common::rename_element_id::find_element_ids(&tk, &p) {
                 let edits: Vec<_> = value
                     .into_iter()
                     .map(|r| TextEdit {
@@ -527,7 +517,7 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
         let mut document_cache = ctx.document_cache.borrow_mut();
         let uri = params.text_document.uri;
         if let Some((tk, _)) = token_descr(&mut document_cache, &uri, &params.position) {
-            if find_element_id_for_highlight(&tk, &tk.parent()).is_some() {
+            if common::rename_element_id::find_element_ids(&tk, &tk.parent()).is_some() {
                 return Ok(Some(PrepareRenameResponse::Range(util::token_to_lsp_range(&tk))));
             }
             if common::rename_component::find_declaration_node(&document_cache, &tk).is_some() {
@@ -580,7 +570,7 @@ pub fn show_preview_command(
 
     let c = common::PreviewComponent { url, component };
     ctx.to_show.replace(Some(c.clone()));
-    ctx.to_preview.send(&common::LspToPreviewMessage::ShowPreview(c)).unwrap();
+    ctx.to_preview.send(&common::LspToPreviewMessage::ShowPreview(c));
 
     Ok(())
 }
@@ -742,12 +732,10 @@ pub(crate) async fn reload_document_impl(
     let dependencies = match action {
         FileAction::ProcessContent(content) => {
             if let Some(ctx) = ctx {
-                ctx.to_preview
-                    .send(&common::LspToPreviewMessage::SetContents {
-                        url: common::VersionedUrl::new(url.clone(), version),
-                        contents: content.clone(),
-                    })
-                    .unwrap();
+                ctx.to_preview.send(&common::LspToPreviewMessage::SetContents {
+                    url: common::VersionedUrl::new(url.clone(), version),
+                    contents: content.clone(),
+                });
             }
             let dependencies = document_cache.invalidate_url(&url);
             let _ = document_cache.load_url(&url, version, content, &mut diag).await;
@@ -756,9 +744,7 @@ pub(crate) async fn reload_document_impl(
         FileAction::IgnoreFile => return Default::default(),
         FileAction::InvalidateFile => {
             if let Some(ctx) = ctx {
-                ctx.to_preview
-                    .send(&common::LspToPreviewMessage::ForgetFile { url: url.clone() })
-                    .unwrap();
+                ctx.to_preview.send(&common::LspToPreviewMessage::ForgetFile { url: url.clone() });
             }
             document_cache.invalidate_url(&url)
         }
@@ -854,16 +840,14 @@ fn send_diagnostics(
 
 pub async fn invalidate_document(ctx: &Rc<Context>, url: lsp_types::Url) -> common::Result<()> {
     // The preview cares about resources and slint files, so forward everything
-    ctx.to_preview
-        .send(&common::LspToPreviewMessage::InvalidateContents { url: url.clone() })
-        .unwrap();
+    ctx.to_preview.send(&common::LspToPreviewMessage::InvalidateContents { url: url.clone() });
 
     ctx.document_cache.borrow_mut().drop_document(&url)
 }
 
 pub async fn delete_document(ctx: &Rc<Context>, url: lsp_types::Url) -> common::Result<()> {
     // The preview cares about resources and slint files, so forward everything
-    ctx.to_preview.send(&common::LspToPreviewMessage::ForgetFile { url: url.clone() }).unwrap();
+    ctx.to_preview.send(&common::LspToPreviewMessage::ForgetFile { url: url.clone() });
 
     ctx.document_cache.borrow_mut().drop_document(&url)
 }
@@ -1373,72 +1357,6 @@ export component MainWindow inherits Window {
     (!result.is_empty()).then_some(result)
 }
 
-/// If the token is matching a Element ID, return the list of all element id in the same component
-fn find_element_id_for_highlight(
-    token: &SyntaxToken,
-    parent: &SyntaxNode,
-) -> Option<Vec<TextRange>> {
-    fn is_element_id(tk: &SyntaxToken, parent: &SyntaxNode) -> bool {
-        if tk.kind() != SyntaxKind::Identifier {
-            return false;
-        }
-        if parent.kind() == SyntaxKind::SubElement {
-            return true;
-        };
-        if parent.kind() == SyntaxKind::QualifiedName
-            && matches!(
-                parent.parent().map(|n| n.kind()),
-                Some(SyntaxKind::Expression | SyntaxKind::StatePropertyChange)
-            )
-        {
-            let mut c = parent.children_with_tokens();
-            if let Some(NodeOrToken::Token(first)) = c.next() {
-                return first.text_range() == tk.text_range()
-                    && matches!(c.next(), Some(NodeOrToken::Token(second)) if second.kind() == SyntaxKind::Dot);
-            }
-        }
-
-        false
-    }
-    if is_element_id(token, parent) {
-        // An id: search all use of the id in this Component
-        let mut candidate = parent.parent();
-        while let Some(c) = candidate {
-            if c.kind() == SyntaxKind::Component {
-                let mut ranges = Vec::new();
-                let mut found_definition = false;
-                recurse(&mut ranges, &mut found_definition, c, token.text());
-                fn recurse(
-                    ranges: &mut Vec<TextRange>,
-                    found_definition: &mut bool,
-                    c: SyntaxNode,
-                    text: &str,
-                ) {
-                    for x in c.children_with_tokens() {
-                        match x {
-                            NodeOrToken::Node(n) => recurse(ranges, found_definition, n, text),
-                            NodeOrToken::Token(tk) => {
-                                if is_element_id(&tk, &c) && tk.text() == text {
-                                    ranges.push(tk.text_range());
-                                    if c.kind() == SyntaxKind::SubElement {
-                                        *found_definition = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if !found_definition {
-                    return None;
-                }
-                return Some(ranges);
-            }
-            candidate = c.parent()
-        }
-    }
-    None
-}
-
 pub async fn startup_lsp(ctx: &Context) -> common::Result<()> {
     register_file_watcher(ctx).await?;
     load_configuration(ctx).await
@@ -1522,7 +1440,7 @@ pub async fn load_configuration(ctx: &Context) -> common::Result<()> {
         document_cache.reload_cached_file(url, &mut diag).await;
     }
 
-    ctx.to_preview.send(&common::LspToPreviewMessage::SetConfiguration { config }).unwrap();
+    ctx.to_preview.send(&common::LspToPreviewMessage::SetConfiguration { config });
 
     send_diagnostics(
         &ctx.server_notifier,

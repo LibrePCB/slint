@@ -52,6 +52,8 @@ component ImageItem inherits Empty {
     in property <ImageFit> image-fit;
     in property <ImageRendering> image-rendering;
     in property <brush> colorize;
+
+    in property <angle> rotation-angle <=> transform-rotation;
 }
 
 export component ClippedImage inherits ImageItem {
@@ -81,10 +83,11 @@ export component ComponentContainer inherits Empty {
     //-accepts_focus
 }
 
-export component Rotate inherits Empty {
-    in property <angle> rotation-angle;
-    in property <length> rotation-origin-x;
-    in property <length> rotation-origin-y;
+export component Transform inherits Empty {
+    in property <angle> transform-rotation;
+    in property <percent> transform-scale-x;
+    in property <percent> transform-scale-y;
+    in property <Point> transform-origin;
     //-default_size_binding:expands_to_parent_geometry
     //-is_internal
 }
@@ -99,6 +102,8 @@ component SimpleText inherits Empty {
     in property <TextHorizontalAlignment> horizontal-alignment;
     in property <TextVerticalAlignment> vertical-alignment;
     //-default_size_binding:implicit_size
+
+    in property <angle> rotation-angle <=> transform-rotation;
 }
 
 component ComplexText inherits SimpleText {
@@ -114,6 +119,27 @@ component ComplexText inherits SimpleText {
 }
 
 export { ComplexText as Text }
+
+export component MarkdownText inherits Empty {
+    in property <length> width;
+    in property <length> height;
+    in property <string> text;
+    in property <length> font-size;
+    in property <int> font-weight;
+    in property <brush> color;
+    in property <TextHorizontalAlignment> horizontal-alignment;
+    in property <TextVerticalAlignment> vertical-alignment;
+
+    in property <string> font-family;
+    in property <bool> font-italic;
+    in property <TextOverflow> overflow;
+    in property <TextWrap> wrap;
+    in property <length> letter-spacing;
+    in property <brush> stroke;
+    in property <length> stroke-width;
+    in property <TextStrokeStyle> stroke-style;
+    //-default_size_binding:implicit_size
+}
 
 export component TouchArea {
     in property <bool> enabled: true;
@@ -287,7 +313,7 @@ component WindowItem {
     in property <bool> always-on-top;
     in-out property <bool> full-screen;
     in property <string> default-font-family;
-    in-out property <length> default-font-size; // <=> StyleMetrics.default-font-size  set in apply_default_properties_from_style
+    in property <length> default-font-size;
     in property <int> default-font-weight;
     in property <image> icon;
 }
@@ -567,6 +593,7 @@ export component NativeButton {
     out property <bool> has-focus;
     in property <bool> primary;
     in property <bool> colorize-icon;
+    in property <length> icon-size;
     callback clicked;
     in property <bool> enabled: true;
     in property <StandardButtonKind> standard-button-kind;
@@ -655,6 +682,7 @@ export component NativeScrollView {
     in property <ScrollBarPolicy> vertical-scrollbar-policy;
     in property <ScrollBarPolicy> horizontal-scrollbar-policy;
     in property <bool> enabled: true;
+    callback scrolled;
     //-default_size_binding:expands_to_parent_geometry
     //-is_internal
 }

@@ -6,9 +6,6 @@
     Graphics Abstractions.
 
     This module contains the abstractions and convenience types used for rendering.
-
-    The run-time library also makes use of [RenderingCache] to store the rendering primitives
-    created by the backend in a type-erased manner.
 */
 extern crate alloc;
 use crate::api::PlatformError;
@@ -58,6 +55,8 @@ pub use border_radius::*;
 
 #[cfg(feature = "unstable-wgpu-26")]
 pub mod wgpu_26;
+#[cfg(feature = "unstable-wgpu-27")]
+pub mod wgpu_27;
 
 /// CachedGraphicsData allows the graphics backend to store an arbitrary piece of data associated with
 /// an item, which is typically computed by accessing properties. The dependency_tracker is used to allow
@@ -81,61 +80,6 @@ impl<T> CachedGraphicsData<T> {
     }
 }
 
-/// The RenderingCache, in combination with CachedGraphicsData, allows back ends to store data that's either
-/// intensive to compute or has bad CPU locality. Back ends typically keep a RenderingCache instance and use
-/// the item's cached_rendering_data() integer as index in the vec_arena::Arena.
-///
-/// This is used only for the [`crate::item_rendering::PartialRenderingCache`]
-pub struct RenderingCache<T> {
-    slab: slab::Slab<CachedGraphicsData<T>>,
-    generation: usize,
-}
-
-impl<T> Default for RenderingCache<T> {
-    fn default() -> Self {
-        Self { slab: Default::default(), generation: 1 }
-    }
-}
-
-impl<T> RenderingCache<T> {
-    /// Returns the generation of the cache. The generation starts at 1 and is increased
-    /// whenever the cache is cleared, for example when the GL context is lost.
-    pub fn generation(&self) -> usize {
-        self.generation
-    }
-
-    /// Retrieves a mutable reference to the cached graphics data at index.
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut CachedGraphicsData<T>> {
-        self.slab.get_mut(index)
-    }
-
-    /// Returns true if a cache entry exists for the given index.
-    pub fn contains(&self, index: usize) -> bool {
-        self.slab.contains(index)
-    }
-
-    /// Inserts data into the cache and returns the index for retrieval later.
-    pub fn insert(&mut self, data: CachedGraphicsData<T>) -> usize {
-        self.slab.insert(data)
-    }
-
-    /// Retrieves an immutable reference to the cached graphics data at index.
-    pub fn get(&self, index: usize) -> Option<&CachedGraphicsData<T>> {
-        self.slab.get(index)
-    }
-
-    /// Removes the cached graphics data at the given index.
-    pub fn remove(&mut self, index: usize) -> CachedGraphicsData<T> {
-        self.slab.remove(index)
-    }
-
-    /// Removes all entries from the cache and increases the cache's generation count, so
-    /// that stale index access can be avoided.
-    pub fn clear(&mut self) {
-        self.slab.clear();
-        self.generation += 1;
-    }
-}
 /// FontRequest collects all the developer-configurable properties for fonts, such as family, weight, etc.
 /// It is submitted as a request to the platform font system (i.e. CoreText on macOS) and in exchange the
 /// backend returns a `Box<dyn Font>`.
@@ -155,16 +99,51 @@ pub struct FontRequest {
     pub italic: bool,
 }
 
-#[cfg(feature = "shared-fontdb")]
+#[cfg(feature = "shared-fontique")]
 impl FontRequest {
-    /// Returns the relevant properties of this FontRequest propagated into a fontdb Query.
-    pub fn to_fontdb_query(&self) -> i_slint_common::sharedfontdb::fontdb::Query<'_> {
-        use i_slint_common::sharedfontdb::fontdb::{Query, Style, Weight};
-        Query {
-            style: if self.italic { Style::Italic } else { Style::Normal },
-            weight: Weight(self.weight.unwrap_or(/* CSS normal*/ 400) as _),
+    /// Attempts to query the fontique font collection for a matching font.
+    pub fn query_fontique(&self) -> Option<i_slint_common::sharedfontique::fontique::QueryFont> {
+        use i_slint_common::sharedfontique::{self, fontique};
+
+        let mut collection = sharedfontique::get_collection();
+
+        let mut query = collection.query();
+        query.set_families(
+            self.family
+                .as_ref()
+                .map(|family| fontique::QueryFamily::from(family.as_str()))
+                .into_iter()
+                .chain(
+                    [
+                        fontique::QueryFamily::Generic(fontique::GenericFamily::SansSerif),
+                        fontique::QueryFamily::Generic(fontique::GenericFamily::SystemUi),
+                    ]
+                    .into_iter(),
+                ),
+        );
+
+        query.set_attributes(fontique::Attributes {
+            weight: self
+                .weight
+                .as_ref()
+                .map(|&weight| fontique::FontWeight::new(weight as f32))
+                .unwrap_or_default(),
+            style: if self.italic {
+                fontique::FontStyle::Italic
+            } else {
+                fontique::FontStyle::Normal
+            },
             ..Default::default()
-        }
+        });
+
+        let mut font = None;
+
+        query.matches_with(|queried_font| {
+            font = Some(queried_font.clone());
+            fontique::QueryStatus::Stop
+        });
+
+        font
     }
 }
 
@@ -193,6 +172,9 @@ pub enum RequestedGraphicsAPI {
     #[cfg(feature = "unstable-wgpu-26")]
     /// WGPU 26.x
     WGPU26(wgpu_26::api::WGPUConfiguration),
+    #[cfg(feature = "unstable-wgpu-27")]
+    /// WGPU 27.x
+    WGPU27(wgpu_27::api::WGPUConfiguration),
 }
 
 impl TryFrom<&RequestedGraphicsAPI> for RequestedOpenGLVersion {
@@ -216,6 +198,10 @@ impl TryFrom<&RequestedGraphicsAPI> for RequestedOpenGLVersion {
             RequestedGraphicsAPI::WGPU26(..) => {
                 Err("WGPU 26.x rendering is not supported with an OpenGL renderer".into())
             }
+            #[cfg(feature = "unstable-wgpu-27")]
+            RequestedGraphicsAPI::WGPU27(..) => {
+                Err("WGPU 27.x rendering is not supported with an OpenGL renderer".into())
+            }
         }
     }
 }
@@ -235,6 +221,17 @@ pub fn create_graphics_api_wgpu_26(
     queue: wgpu_26::wgpu::Queue,
 ) -> crate::api::GraphicsAPI<'static> {
     crate::api::GraphicsAPI::WGPU26 { instance, device, queue }
+}
+
+/// Private API exposed to just the renderers to create GraphicsAPI instance with
+/// non-exhaustive enum variant.
+#[cfg(feature = "unstable-wgpu-27")]
+pub fn create_graphics_api_wgpu_27(
+    instance: wgpu_27::wgpu::Instance,
+    device: wgpu_27::wgpu::Device,
+    queue: wgpu_27::wgpu::Queue,
+) -> crate::api::GraphicsAPI<'static> {
+    crate::api::GraphicsAPI::WGPU27 { instance, device, queue }
 }
 
 /// Internal module for use by cbindgen and the C++ platform API layer.

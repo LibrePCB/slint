@@ -85,8 +85,8 @@ pub enum ComponentSelection {
 pub type FontCache = Rc<
     RefCell<
         std::collections::HashMap<
-            i_slint_common::sharedfontdb::fontdb::ID,
-            fontdue::FontResult<(Arc<fontdue::Font>, Arc<dyn AsRef<[u8]> + Send + Sync>, u32)>,
+            (i_slint_common::sharedfontique::fontique::FamilyId, usize),
+            fontdue::FontResult<Arc<fontdue::Font>>,
         >,
     >,
 >;
@@ -163,6 +163,12 @@ pub struct CompilerConfiguration {
 
     #[cfg(feature = "software-renderer")]
     pub font_cache: FontCache,
+
+    /// The name of the library when compiling as a library.
+    pub library_name: Option<String>,
+
+    /// Specify the Rust module to place the generated code in.
+    pub rust_module: Option<String>,
 }
 
 impl CompilerConfiguration {
@@ -249,41 +255,29 @@ impl CompilerConfiguration {
             translation_path_bundle: std::env::var("SLINT_BUNDLE_TRANSLATIONS")
                 .ok()
                 .map(|x| x.into()),
+            library_name: None,
+            rust_module: None,
         }
     }
 
     #[cfg(feature = "software-renderer")]
     fn load_font_by_id(
         &self,
-        face_id: i_slint_common::sharedfontdb::fontdb::ID,
-    ) -> fontdue::FontResult<(Arc<fontdue::Font>, Arc<dyn AsRef<[u8]> + Send + Sync>, u32)> {
+        font: &i_slint_common::sharedfontique::fontique::QueryFont,
+    ) -> fontdue::FontResult<Arc<fontdue::Font>> {
         self.font_cache
             .borrow_mut()
-            .entry(face_id)
+            .entry(font.family)
             .or_insert_with(|| {
-                i_slint_common::sharedfontdb::FONT_DB.with(|fontdb| {
-                    fontdb
-                        .borrow()
-                        .with_face_data(face_id, |font_data, face_index| {
-                            fontdue::Font::from_bytes(
-                                font_data,
-                                fontdue::FontSettings {
-                                    collection_index: face_index,
-                                    scale: 40.,
-                                    ..Default::default()
-                                },
-                            )
-                            .map(|fontdue_font| {
-                                (
-                                    Arc::new(fontdue_font),
-                                    Arc::new(font_data.to_vec())
-                                        as Arc<dyn AsRef<[u8]> + Send + Sync>,
-                                    face_index,
-                                )
-                            })
-                        })
-                        .unwrap_or_else(|| fontdue::FontResult::Err("internal error: corrupt font"))
-                })
+                fontdue::Font::from_bytes(
+                    font.blob.data(),
+                    fontdue::FontSettings {
+                        collection_index: font.index,
+                        scale: 40.,
+                        ..Default::default()
+                    },
+                )
+                .map(Arc::new)
             })
             .clone()
     }

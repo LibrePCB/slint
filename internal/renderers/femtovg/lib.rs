@@ -9,18 +9,20 @@ use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 
-use i_slint_common::sharedfontdb;
+use i_slint_common::sharedfontique;
 use i_slint_core::api::{RenderingNotifier, RenderingState, SetRenderingNotifierError};
 use i_slint_core::graphics::{euclid, rendering_metrics_collector::RenderingMetricsCollector};
 use i_slint_core::graphics::{BorderRadius, Rgba8Pixel};
 use i_slint_core::graphics::{FontRequest, SharedPixelBuffer};
 use i_slint_core::item_rendering::ItemRenderer;
+use i_slint_core::item_tree::ItemTreeWeak;
 use i_slint_core::items::TextWrap;
 use i_slint_core::lengths::{
     LogicalLength, LogicalPoint, LogicalRect, LogicalSize, PhysicalPx, ScaleFactor,
 };
 use i_slint_core::platform::PlatformError;
 use i_slint_core::renderer::RendererSealed;
+use i_slint_core::textlayout::sharedparley;
 use i_slint_core::window::{WindowAdapter, WindowInner};
 use i_slint_core::Brush;
 use images::TextureImporter;
@@ -33,12 +35,12 @@ type PhysicalBorderRadius = BorderRadius<f32, PhysicalPx>;
 
 use self::itemrenderer::CanvasRc;
 
-mod fonts;
+mod font_cache;
 mod images;
 mod itemrenderer;
 #[cfg(feature = "opengl")]
 pub mod opengl;
-#[cfg(feature = "wgpu-26")]
+#[cfg(feature = "wgpu-27")]
 pub mod wgpu;
 
 pub trait WindowSurface<R: femtovg::Renderer> {
@@ -86,8 +88,6 @@ pub struct FemtoVGRenderer<B: GraphicsBackend> {
     rendering_first_time: Cell<bool>,
     // Last field, so that it's dropped last and for example the OpenGL context exists and is current when destroying the FemtoVG canvas
     graphics_backend: B,
-    #[cfg(target_arch = "wasm32")]
-    canvas_id: RefCell<String>,
 }
 
 impl<B: GraphicsBackend> FemtoVGRenderer<B> {
@@ -225,12 +225,14 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                 }
 
                 for (component, origin) in components {
-                    i_slint_core::item_rendering::render_component_items(
-                        component,
-                        &mut item_renderer,
-                        *origin,
-                        &self.window_adapter()?,
-                    );
+                    if let Some(component) = ItemTreeWeak::upgrade(component) {
+                        i_slint_core::item_rendering::render_component_items(
+                            &component,
+                            &mut item_renderer,
+                            *origin,
+                            &self.window_adapter()?,
+                        );
+                    }
                 }
 
                 if let Some(cb) = post_render_cb.as_ref() {
@@ -238,7 +240,8 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                 }
 
                 if let Some(collector) = &self.rendering_metrics_collector.borrow().as_ref() {
-                    collector.measure_frame_rendered(&mut item_renderer);
+                    let metrics = item_renderer.metrics();
+                    collector.measure_frame_rendered(&mut item_renderer, metrics);
                 }
 
                 let commands = canvas.borrow_mut().flush_to_surface(surface.render_surface());
@@ -260,27 +263,11 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn with_graphics_api(
         &self,
         callback: impl FnOnce(i_slint_core::api::GraphicsAPI<'_>),
     ) -> Result<(), PlatformError> {
         self.graphics_backend.with_graphics_api(|api| callback(api.unwrap()))
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn with_graphics_api(
-        &self,
-        callback: impl FnOnce(i_slint_core::api::GraphicsAPI<'_>),
-    ) -> Result<(), PlatformError> {
-        use i_slint_core::api::GraphicsAPI;
-
-        let canvas_id = self.canvas_id.borrow();
-
-        let api =
-            GraphicsAPI::WebGL { canvas_element_id: canvas_id.as_str(), context_type: "webgl2" };
-        callback(api);
-        Ok(())
     }
 
     fn window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
@@ -303,9 +290,9 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         text: &str,
         max_width: Option<LogicalLength>,
         scale_factor: ScaleFactor,
-        _text_wrap: TextWrap, //TODO: Add support for char-wrap
+        text_wrap: TextWrap,
     ) -> LogicalSize {
-        crate::fonts::text_size(&font_request, scale_factor, text, max_width)
+        sharedparley::text_size(font_request, text, max_width, scale_factor, text_wrap)
     }
 
     fn font_metrics(
@@ -313,7 +300,7 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         font_request: i_slint_core::graphics::FontRequest,
         _scale_factor: ScaleFactor,
     ) -> i_slint_core::items::FontMetrics {
-        crate::fonts::font_metrics(font_request)
+        sharedparley::font_metrics(font_request)
     }
 
     fn text_input_byte_offset_for_position(
@@ -323,52 +310,12 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         font_request: FontRequest,
         scale_factor: ScaleFactor,
     ) -> usize {
-        let pos = pos * scale_factor;
-        let text = text_input.text();
-
-        let mut result = text.len();
-
-        let width = text_input.width() * scale_factor;
-        let height = text_input.height() * scale_factor;
-        if width.get() <= 0. || height.get() <= 0. || pos.y < 0. {
-            return 0;
-        }
-
-        let font = crate::fonts::FONT_CACHE
-            .with(|cache| cache.borrow_mut().font(font_request, scale_factor, &text_input.text()));
-
-        let visual_representation = text_input.visual_representation(None);
-
-        let paint = font.init_paint(text_input.letter_spacing() * scale_factor, Default::default());
-        let text_context =
-            crate::fonts::FONT_CACHE.with(|cache| cache.borrow().text_context.clone());
-        let font_height = text_context.measure_font(&paint).unwrap().height();
-        crate::fonts::layout_text_lines(
-            &visual_representation.text,
-            &font,
-            PhysicalSize::from_lengths(width, height),
-            (text_input.horizontal_alignment(), text_input.vertical_alignment()),
-            text_input.wrap(),
-            i_slint_core::items::TextOverflow::Clip,
-            text_input.single_line(),
-            None,
-            &paint,
-            |line_text, line_pos, start, metrics| {
-                if (line_pos.y..(line_pos.y + font_height)).contains(&pos.y) {
-                    let mut current_x = 0.;
-                    for glyph in &metrics.glyphs {
-                        if line_pos.x + current_x + glyph.advance_x / 2. >= pos.x {
-                            result = start + glyph.byte_index;
-                            return;
-                        }
-                        current_x += glyph.advance_x;
-                    }
-                    result = start + line_text.trim_end().len();
-                }
-            },
-        );
-
-        visual_representation.map_byte_offset_from_byte_offset_in_visual_text(result)
+        sharedparley::text_input_byte_offset_for_position(
+            text_input,
+            pos,
+            font_request,
+            scale_factor,
+        )
     }
 
     fn text_input_cursor_rect_for_byte_offset(
@@ -378,39 +325,11 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         font_request: FontRequest,
         scale_factor: ScaleFactor,
     ) -> LogicalRect {
-        let text = text_input.text();
-
-        let font_size = font_request.pixel_size.unwrap_or(fonts::DEFAULT_FONT_SIZE);
-
-        let width = text_input.width() * scale_factor;
-        let height = text_input.height() * scale_factor;
-        if width.get() <= 0. || height.get() <= 0. {
-            return LogicalRect::new(
-                LogicalPoint::default(),
-                LogicalSize::from_lengths(LogicalLength::new(1.0), font_size),
-            );
-        }
-
-        let font = crate::fonts::FONT_CACHE
-            .with(|cache| cache.borrow_mut().font(font_request, scale_factor, &text_input.text()));
-
-        let paint = font.init_paint(text_input.letter_spacing() * scale_factor, Default::default());
-        let cursor_point = fonts::layout_text_lines(
-            text.as_str(),
-            &font,
-            PhysicalSize::from_lengths(width, height),
-            (text_input.horizontal_alignment(), text_input.vertical_alignment()),
-            text_input.wrap(),
-            i_slint_core::items::TextOverflow::Clip,
-            text_input.single_line(),
-            Some(byte_offset),
-            &paint,
-            |_, _, _, _| {},
-        );
-
-        LogicalRect::new(
-            cursor_point.unwrap_or_default() / scale_factor,
-            LogicalSize::from_lengths(LogicalLength::new(1.0), font_size),
+        sharedparley::text_input_cursor_rect_for_byte_offset(
+            text_input,
+            byte_offset,
+            font_request,
+            scale_factor,
         )
     }
 
@@ -418,18 +337,22 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         &self,
         data: &'static [u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        sharedfontdb::register_font_from_memory(data)
+        sharedfontique::get_collection().register_fonts(data.to_vec().into(), None);
+        Ok(())
     }
 
     fn register_font_from_path(
         &self,
         path: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        sharedfontdb::register_font_from_path(path)
+        let requested_path = path.canonicalize().unwrap_or_else(|_| path.into());
+        let contents = std::fs::read(requested_path)?;
+        sharedfontique::get_collection().register_fonts(contents.into(), None);
+        Ok(())
     }
 
     fn default_font_size(&self) -> LogicalLength {
-        self::fonts::DEFAULT_FONT_SIZE
+        sharedparley::DEFAULT_FONT_SIZE
     }
 
     fn set_rendering_notifier(
@@ -493,6 +416,10 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
             ))
         })?
     }
+
+    fn supports_transformations(&self) -> bool {
+        true
+    }
 }
 
 impl<B: GraphicsBackend> Drop for FemtoVGRenderer<B> {
@@ -542,8 +469,6 @@ impl<B: GraphicsBackend> FemtoVGRendererExt for FemtoVGRenderer<B> {
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Cell::new(true),
             graphics_backend: B::new_suspended(),
-            #[cfg(target_arch = "wasm32")]
-            canvas_id: Default::default(),
         }
     }
 

@@ -16,7 +16,11 @@ from typing import Any
 import pathlib
 from .models import ListModel, Model
 from .slint import Image, Color, Brush, Timer, TimerMode
+from .loop import SlintEventLoop
 from pathlib import Path
+from collections.abc import Coroutine
+import asyncio
+import gettext
 
 Struct = native.PyStruct
 
@@ -30,8 +34,11 @@ class CompileError(Exception):
 
     def __init__(self, message: str, diagnostics: list[native.PyDiagnostic]):
         """@private"""
+        super().__init__(message)
         self.message = message
         self.diagnostics = diagnostics
+        for diag in self.diagnostics:
+            self.add_note(str(diag))
 
 
 class Component:
@@ -52,7 +59,9 @@ class Component:
 
     def run(self) -> None:
         """Shows the window, runs the event loop, hides it when the loop is quit, and returns."""
-        self.__instance__.run()
+        self.show()
+        run_event_loop()
+        self.hide()
 
 
 def _normalize_prop(name: str) -> str:
@@ -138,6 +147,20 @@ def _build_class(
             if hasattr(value, "slint.callback"):
                 callback_info = getattr(value, "slint.callback")
                 name = callback_info["name"]
+
+                is_async = getattr(value, "slint.async", False)
+                if is_async:
+                    if "global_name" in callback_info:
+                        global_name = callback_info["global_name"]
+                        if not compdef.global_callback_returns_void(global_name, name):
+                            raise RuntimeError(
+                                f"Callback '{name}' in global '{global_name}' cannot be used with a callback decorator for an async function, as it doesn't return void"
+                            )
+                    else:
+                        if not compdef.callback_returns_void(name):
+                            raise RuntimeError(
+                                f"Callback '{name}' cannot be used with a callback decorator for an async function, as it doesn't return void"
+                            )
 
                 def mk_callback(
                     self: Any, callback: typing.Callable[..., Any]
@@ -377,6 +400,22 @@ def _callback_decorator(
     if "name" not in info:
         info["name"] = callable.__name__
     setattr(callable, "slint.callback", info)
+
+    try:
+        import inspect
+
+        if inspect.iscoroutinefunction(callable):
+
+            def run_as_task(*args, **kwargs) -> None:  # type: ignore
+                loop = asyncio.get_event_loop()
+                loop.create_task(callable(*args, **kwargs))
+
+            setattr(run_as_task, "slint.callback", info)
+            setattr(run_as_task, "slint.async", True)
+            return run_as_task
+    except ImportError:
+        pass
+
     return callable
 
 
@@ -405,6 +444,9 @@ def callback(
     If your Python method has a different name from the Slint component's callback, use the `name` parameter to specify
     the correct name. Similarly, use the `global_name` parameter to specify the name of the correct global singleton in
     the Slint component.
+
+    **Note:** The callback decorator can also be used with async functions. They will be run as task in the asyncio event loop.
+    This is only supported for callbacks that don't return any value, and requires Python >= 3.13.
     """
 
     if callable(global_name):
@@ -426,6 +468,87 @@ def set_xdg_app_id(app_id: str) -> None:
     native.set_xdg_app_id(app_id)
 
 
+quit_event = asyncio.Event()
+
+
+def run_event_loop(
+    main_coro: typing.Optional[Coroutine[None, None, None]] = None,
+) -> None:
+    """Runs the main Slint event loop. If specified, the coroutine `main_coro` is run in parallel. The event loop doesn't
+    terminate when the coroutine finishes, it terminates when calling `quit_event_loop()`.
+
+    Example:
+    ```python
+    import slint
+
+    ...
+    image_model: slint.ListModel[slint.Image] = slint.ListModel()
+    ...
+
+    async def main_receiver(image_model: slint.ListModel) -> None:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("http://some.server/svg-image") as response:
+                svg = await response.read()
+                image = slint.Image.from_svg_data(svg)
+                image_model.append(image)
+
+    ...
+    slint.run_event_loop(main_receiver(image_model))
+    ```
+
+    """
+
+    async def run_inner() -> None:
+        global quit_event
+        loop = typing.cast(SlintEventLoop, asyncio.get_event_loop())
+
+        quit_task = asyncio.ensure_future(quit_event.wait(), loop=loop)
+
+        tasks: typing.List[asyncio.Task[typing.Any]] = [quit_task]
+
+        main_task = None
+        if main_coro:
+            main_task = loop.create_task(main_coro)
+            tasks.append(main_task)
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+        if main_task is not None and main_task in done:
+            main_task.result()  # propagate exception if thrown
+            if quit_task in pending:
+                await quit_event.wait()
+
+    global quit_event
+    quit_event = asyncio.Event()
+    asyncio.run(run_inner(), debug=False, loop_factory=SlintEventLoop)
+
+
+def quit_event_loop() -> None:
+    """Quits the running event loop in the next event processing cycle. This will make an earlier call to `run_event_loop()`
+    return."""
+    global quit_event
+    quit_event.set()
+
+
+def init_translations(translations: typing.Optional[gettext.GNUTranslations]) -> None:
+    """Installs the specified translations object to handle translations originating from the Slint code.
+
+    Example:
+    ```python
+    import gettext
+    import slint
+
+    translations_dir = os.path.join(os.path.dirname(__file__), "lang")
+    try:
+        translations = gettext.translation("my_app", translations_dir, ["de"])
+        slint.install_translations(translations)
+    except OSError:
+        pass
+    ```
+    """
+    native.init_translations(translations)
+
+
 __all__ = [
     "CompileError",
     "Component",
@@ -440,4 +563,7 @@ __all__ = [
     "TimerMode",
     "set_xdg_app_id",
     "callback",
+    "run_event_loop",
+    "quit_event_loop",
+    "init_translations",
 ]

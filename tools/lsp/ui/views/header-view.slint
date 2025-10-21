@@ -18,11 +18,6 @@ export component HeaderView {
     in-out property <bool> data-widget <=> shortcut-simulator-data.checked;
 
     callback style-selected();
-    callback edit-mode-toggled();
-    callback library-toggled(bool);
-    callback properties-toggled(bool);
-    callback outline-toggled(bool);
-    callback simulator-toggled(bool);
 
     background-layer := Rectangle {
         background: Palette.alternate-background;
@@ -68,9 +63,6 @@ export component HeaderView {
 
                     interaction-switch := Switch {
                         checked: true;
-                        toggled => {
-                            root.edit-mode-toggled();
-                        }
                     }
 
                     BodyText {
@@ -85,44 +77,32 @@ export component HeaderView {
                         horizontal-stretch: 0;
                         checkable: true;
                         icon: Icons.library;
-                        colorize-icon: true;
-                        clicked => {
-                            root.library-toggled(self.checked);
-                            library-widget = self.checked;
-                        }
+                        colorize-icon: !self.checked;
+                        primary: self.checked;
                     }
 
                     shortcut-properties := Button {
                         horizontal-stretch: 0;
                         checkable: true;
                         icon: Icons.properties;
-                        colorize-icon: true;
-                        clicked => {
-                            root.properties-toggled(self.checked);
-                            properties-widget = self.checked;
-                        }
+                        colorize-icon: !self.checked;
+                        primary: self.checked;
                     }
 
                     shortcut-outline := Button {
                         horizontal-stretch: 0;
                         checkable: true;
                         icon: Icons.outline;
-                        colorize-icon: true;
-                        clicked => {
-                            root.outline-toggled(self.checked);
-                            outline-widget = self.checked;
-                        }
+                        colorize-icon: !self.checked;
+                        primary: self.checked;
                     }
 
                     shortcut-simulator-data := Button {
                         horizontal-stretch: 0;
                         checkable: true;
                         icon: Icons.simulator;
-                        colorize-icon: true;
-                        clicked => {
-                            root.simulator-toggled(self.checked);
-                            data-widget = self.checked;
-                        }
+                        colorize-icon: !self.checked;
+                        primary: self.checked;
                     }
                 }
             }

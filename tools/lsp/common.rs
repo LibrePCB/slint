@@ -14,6 +14,7 @@ pub mod component_catalog;
 pub mod document_cache;
 pub use document_cache::{DocumentCache, SourceFileVersion};
 pub mod rename_component;
+pub mod rename_element_id;
 #[cfg(test)]
 pub mod test;
 #[cfg(any(test, feature = "preview-engine"))]
@@ -41,7 +42,7 @@ pub enum PreviewTarget {
 
 #[allow(dead_code)]
 pub trait LspToPreview {
-    fn send(&self, message: &LspToPreviewMessage) -> Result<()>;
+    fn send(&self, message: &LspToPreviewMessage);
     fn set_preview_target(&self, target: PreviewTarget) -> Result<()>;
     fn preview_target(&self) -> PreviewTarget;
 }
@@ -51,9 +52,7 @@ pub trait LspToPreview {
 pub struct DummyLspToPreview {}
 
 impl LspToPreview for DummyLspToPreview {
-    fn send(&self, _message: &LspToPreviewMessage) -> Result<()> {
-        Ok(())
-    }
+    fn send(&self, _message: &LspToPreviewMessage) {}
 
     fn preview_target(&self) -> PreviewTarget {
         PreviewTarget::Dummy

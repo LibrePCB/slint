@@ -7,6 +7,9 @@ use alloc::boxed::Box;
 use core::fmt::Display;
 pub use formatter::FormatArgs;
 
+#[cfg(feature = "tr")]
+pub use tr::Translator;
+
 mod formatter {
     use core::fmt::{Display, Formatter, Result};
 
@@ -231,7 +234,6 @@ fn translate_gettext(
     plural: &str,
 ) -> std::string::String {
     use std::string::String;
-    global_translation_property();
     fn mangle_context(ctx: &str, s: &str) -> String {
         std::format!("{ctx}\u{4}{s}")
     }

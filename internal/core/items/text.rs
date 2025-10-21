@@ -20,9 +20,7 @@ use crate::input::{
 };
 use crate::item_rendering::{CachedRenderingData, ItemRenderer, RenderText};
 use crate::layout::{LayoutInfo, Orientation};
-use crate::lengths::{
-    LogicalLength, LogicalPoint, LogicalRect, LogicalSize, ScaleFactor, SizeLengths,
-};
+use crate::lengths::{LogicalLength, LogicalPoint, LogicalRect, LogicalSize, ScaleFactor};
 use crate::platform::Clipboard;
 #[cfg(feature = "rtti")]
 use crate::rtti::*;
@@ -138,11 +136,11 @@ impl Item for ComplexText {
 
     fn bounding_rect(
         self: core::pin::Pin<&Self>,
-        window_adapter: &Rc<dyn WindowAdapter>,
-        self_rc: &ItemRc,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
         geometry: LogicalRect,
     ) -> LogicalRect {
-        self.text_bounding_rect(self_rc, window_adapter, geometry.cast()).cast()
+        geometry
     }
 
     fn clips_children(self: core::pin::Pin<&Self>) -> bool {
@@ -202,9 +200,196 @@ impl RenderText for ComplexText {
     fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) {
         (self.stroke(), self.stroke_width(), self.stroke_style())
     }
+
+    fn is_markdown(self: Pin<&Self>) -> bool {
+        false
+    }
 }
 
 impl ComplexText {
+    pub fn font_metrics(
+        self: Pin<&Self>,
+        window_adapter: &Rc<dyn WindowAdapter>,
+        self_rc: &ItemRc,
+    ) -> FontMetrics {
+        let window_inner = WindowInner::from_pub(window_adapter.window());
+        let scale_factor = ScaleFactor::new(window_inner.scale_factor());
+        let font_request = self.font_request(self_rc);
+        window_adapter.renderer().font_metrics(font_request, scale_factor)
+    }
+}
+
+/// The implementation of the `Text` element
+#[repr(C)]
+#[derive(FieldOffsets, Default, SlintElement)]
+#[pin]
+pub struct MarkdownText {
+    pub width: Property<LogicalLength>,
+    pub height: Property<LogicalLength>,
+    pub text: Property<SharedString>,
+    pub font_size: Property<LogicalLength>,
+    pub font_weight: Property<i32>,
+    pub color: Property<Brush>,
+    pub horizontal_alignment: Property<TextHorizontalAlignment>,
+    pub vertical_alignment: Property<TextVerticalAlignment>,
+
+    pub font_family: Property<SharedString>,
+    pub font_italic: Property<bool>,
+    pub wrap: Property<TextWrap>,
+    pub overflow: Property<TextOverflow>,
+    pub letter_spacing: Property<LogicalLength>,
+    pub stroke: Property<Brush>,
+    pub stroke_width: Property<LogicalLength>,
+    pub stroke_style: Property<TextStrokeStyle>,
+    pub cached_rendering_data: CachedRenderingData,
+}
+
+impl Item for MarkdownText {
+    fn init(self: Pin<&Self>, _self_rc: &ItemRc) {}
+
+    fn layout_info(
+        self: Pin<&Self>,
+        orientation: Orientation,
+        window_adapter: &Rc<dyn WindowAdapter>,
+        self_rc: &ItemRc,
+    ) -> LayoutInfo {
+        text_layout_info(
+            self,
+            &self_rc,
+            window_adapter,
+            orientation,
+            Self::FIELD_OFFSETS.width.apply_pin(self),
+        )
+    }
+
+    fn input_event_filter_before_children(
+        self: Pin<&Self>,
+        _: &MouseEvent,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+    ) -> InputEventFilterResult {
+        InputEventFilterResult::ForwardAndIgnore
+    }
+
+    fn input_event(
+        self: Pin<&Self>,
+        _: &MouseEvent,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+    ) -> InputEventResult {
+        InputEventResult::EventIgnored
+    }
+
+    fn capture_key_event(
+        self: Pin<&Self>,
+        _: &KeyEvent,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+    ) -> KeyEventResult {
+        KeyEventResult::EventIgnored
+    }
+
+    fn key_event(
+        self: Pin<&Self>,
+        _: &KeyEvent,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+    ) -> KeyEventResult {
+        KeyEventResult::EventIgnored
+    }
+
+    fn focus_event(
+        self: Pin<&Self>,
+        _: &FocusEvent,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+    ) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
+
+    fn render(
+        self: Pin<&Self>,
+        backend: &mut &mut dyn ItemRenderer,
+        self_rc: &ItemRc,
+        size: LogicalSize,
+    ) -> RenderingResult {
+        (*backend).draw_text(self, self_rc, size, &self.cached_rendering_data);
+        RenderingResult::ContinueRenderingChildren
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: Pin<&Self>) -> bool {
+        false
+    }
+}
+
+impl ItemConsts for MarkdownText {
+    const cached_rendering_data_offset: const_field_offset::FieldOffset<
+        MarkdownText,
+        CachedRenderingData,
+    > = MarkdownText::FIELD_OFFSETS.cached_rendering_data.as_unpinned_projection();
+}
+
+impl RenderText for MarkdownText {
+    fn target_size(self: Pin<&Self>) -> LogicalSize {
+        LogicalSize::from_lengths(self.width(), self.height())
+    }
+
+    fn text(self: Pin<&Self>) -> SharedString {
+        self.text()
+    }
+
+    fn font_request(self: Pin<&Self>, self_rc: &ItemRc) -> FontRequest {
+        WindowItem::resolved_font_request(
+            self_rc,
+            self.font_family(),
+            self.font_weight(),
+            self.font_size(),
+            self.letter_spacing(),
+            self.font_italic(),
+        )
+    }
+
+    fn color(self: Pin<&Self>) -> Brush {
+        self.color()
+    }
+
+    fn alignment(
+        self: Pin<&Self>,
+    ) -> (super::TextHorizontalAlignment, super::TextVerticalAlignment) {
+        (self.horizontal_alignment(), self.vertical_alignment())
+    }
+
+    fn wrap(self: Pin<&Self>) -> TextWrap {
+        self.wrap()
+    }
+
+    fn overflow(self: Pin<&Self>) -> TextOverflow {
+        self.overflow()
+    }
+
+    fn letter_spacing(self: Pin<&Self>) -> LogicalLength {
+        self.letter_spacing()
+    }
+
+    fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) {
+        (self.stroke(), self.stroke_width(), self.stroke_style())
+    }
+
+    fn is_markdown(self: Pin<&Self>) -> bool {
+        true
+    }
+}
+
+impl MarkdownText {
     pub fn font_metrics(
         self: Pin<&Self>,
         window_adapter: &Rc<dyn WindowAdapter>,
@@ -309,11 +494,11 @@ impl Item for SimpleText {
 
     fn bounding_rect(
         self: core::pin::Pin<&Self>,
-        window_adapter: &Rc<dyn WindowAdapter>,
-        self_rc: &ItemRc,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
         geometry: LogicalRect,
     ) -> LogicalRect {
-        self.text_bounding_rect(self_rc, window_adapter, geometry.cast()).cast()
+        geometry
     }
 
     fn clips_children(self: core::pin::Pin<&Self>) -> bool {
@@ -372,6 +557,10 @@ impl RenderText for SimpleText {
 
     fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) {
         Default::default()
+    }
+
+    fn is_markdown(self: Pin<&Self>) -> bool {
+        false
     }
 }
 
@@ -776,6 +965,15 @@ impl Item for TextInput {
                             );
                             return KeyEventResult::EventAccepted;
                         }
+                        TextShortcut::DeleteToStartOfLine => {
+                            TextInput::select_and_delete(
+                                self,
+                                TextCursorDirection::StartOfLine,
+                                window_adapter,
+                                self_rc,
+                            );
+                            return KeyEventResult::EventAccepted;
+                        }
                     },
                     Some(_) => {
                         return KeyEventResult::EventIgnored;
@@ -821,11 +1019,11 @@ impl Item for TextInput {
                         StandardShortcut::Paste | StandardShortcut::Cut => {
                             return KeyEventResult::EventIgnored;
                         }
-                        StandardShortcut::Undo => {
+                        StandardShortcut::Undo if !self.read_only() => {
                             self.undo(window_adapter, self_rc);
                             return KeyEventResult::EventAccepted;
                         }
-                        StandardShortcut::Redo => {
+                        StandardShortcut::Redo if !self.read_only() => {
                             self.redo(window_adapter, self_rc);
                             return KeyEventResult::EventAccepted;
                         }
@@ -1021,22 +1219,10 @@ impl Item for TextInput {
 
     fn bounding_rect(
         self: core::pin::Pin<&Self>,
-        window_adapter: &Rc<dyn WindowAdapter>,
-        self_rc: &ItemRc,
-        mut geometry: LogicalRect,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
     ) -> LogicalRect {
-        let window_inner = WindowInner::from_pub(window_adapter.window());
-        let text_string = self.text();
-        let font_request = self.font_request(self_rc);
-        let scale_factor = crate::lengths::ScaleFactor::new(window_inner.scale_factor());
-        let max_width = geometry.size.width_length();
-        geometry.size = geometry.size.max(window_adapter.renderer().text_size(
-            font_request.clone(),
-            text_string.as_str(),
-            Some(max_width),
-            scale_factor,
-            self.wrap(),
-        ));
         geometry
     }
 
@@ -1505,15 +1691,22 @@ impl TextInput {
         let cursor_relative =
             self.cursor_rect_for_byte_offset(cursor_position, window_adapter, self_rc);
         let geometry = self_rc.geometry();
-        let origin = self_rc.map_to_window(geometry.origin).to_vector();
+        let origin = self_rc.map_to_window(geometry.origin);
+        let origin_vector = origin.to_vector();
         let cursor_rect_origin =
-            crate::api::LogicalPosition::from_euclid(cursor_relative.origin + origin);
+            crate::api::LogicalPosition::from_euclid(cursor_relative.origin + origin_vector);
         let cursor_rect_size = crate::api::LogicalSize::from_euclid(cursor_relative.size);
         let anchor_point = crate::api::LogicalPosition::from_euclid(
             self.cursor_rect_for_byte_offset(anchor_position, window_adapter, self_rc).origin
-                + origin
+                + origin_vector
                 + cursor_relative.size,
         );
+        let maybe_parent =
+            self_rc.parent_item(crate::item_tree::ParentItemTraversalMode::StopAtPopups);
+        let clip_rect = maybe_parent.map(|parent| {
+            let geom = parent.geometry();
+            LogicalRect::new(parent.map_to_window(geom.origin), geom.size)
+        });
 
         InputMethodProperties {
             text,
@@ -1525,6 +1718,7 @@ impl TextInput {
             cursor_rect_size,
             anchor_point,
             input_type: self.input_type(),
+            clip_rect,
         }
     }
 

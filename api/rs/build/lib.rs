@@ -7,6 +7,8 @@ It is meant to allow you to compile the `.slint` files from your `build.rs` scri
 
 The main entry point of this crate is the [`compile()`] function
 
+The generated code must be included in your crate by using the `slint::include_modules!()` macro.
+
 ## Example
 
 In your Cargo.toml:
@@ -17,11 +19,11 @@ In your Cargo.toml:
 build = "build.rs"
 
 [dependencies]
-slint = "1.12"
+slint = "1.14"
 ...
 
 [build-dependencies]
-slint-build = "1.12"
+slint-build = "1.14"
 ```
 
 In the `build.rs` file:
@@ -205,6 +207,30 @@ impl CompilerConfiguration {
         Self { config }
     }
 
+    /// Configures the compiler to treat the Slint as part of a library.
+    ///
+    /// Use this when the components and types of the Slint code need
+    /// to be accessible from other modules.
+    ///
+    /// **Note**: This feature is experimental and may change or be removed in the future.
+    #[cfg(feature = "experimental-module-builds")]
+    #[must_use]
+    pub fn as_library(self, library_name: &str) -> Self {
+        let mut config = self.config;
+        config.library_name = Some(library_name.to_string());
+        Self { config }
+    }
+
+    /// Specify the Rust module to place the generated code in.
+    ///
+    /// **Note**: This feature is experimental and may change or be removed in the future.
+    #[cfg(feature = "experimental-module-builds")]
+    #[must_use]
+    pub fn rust_module(self, rust_module: &str) -> Self {
+        let mut config = self.config;
+        config.rust_module = Some(rust_module.to_string());
+        Self { config }
+    }
     /// Configures the compiler to use Signed Distance Field (SDF) encoding for fonts.
     ///
     /// This flag only takes effect when `embed_resources` is set to [`EmbedResourcesKind::EmbedForSoftwareRenderer`],
@@ -220,6 +246,28 @@ impl CompilerConfiguration {
     pub fn with_sdf_fonts(self, enable: bool) -> Self {
         let mut config = self.config;
         config.use_sdf_fonts = enable;
+        Self { config }
+    }
+
+    /// Converts any relative include_paths or library_paths to absolute paths relative to the manifest_dir.
+    #[must_use]
+    fn with_absolute_paths(self, manifest_dir: &std::path::Path) -> Self {
+        let mut config = self.config;
+
+        let to_absolute_path = |path: &mut std::path::PathBuf| {
+            if path.is_relative() {
+                *path = manifest_dir.join(&path);
+            }
+        };
+
+        for path in config.library_paths.values_mut() {
+            to_absolute_path(path);
+        }
+
+        for path in config.include_paths.iter_mut() {
+            to_absolute_path(path);
+        }
+
         Self { config }
     }
 }
@@ -401,6 +449,8 @@ fn formatter_test() {
 /// about how to use the generated code.
 ///
 /// This function can only be called within a build script run by cargo.
+///
+/// See also [`compile_with_config()`] if you want to specify a configuration.
 pub fn compile(path: impl AsRef<std::path::Path>) -> Result<(), CompileError> {
     compile_with_config(path, CompilerConfiguration::default())
 }
@@ -418,8 +468,12 @@ pub fn compile_with_config(
     relative_slint_file_path: impl AsRef<std::path::Path>,
     config: CompilerConfiguration,
 ) -> Result<(), CompileError> {
-    let path = Path::new(&env::var_os("CARGO_MANIFEST_DIR").ok_or(CompileError::NotRunViaCargo)?)
-        .join(relative_slint_file_path.as_ref());
+    let manifest_path = std::path::PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR").ok_or(CompileError::NotRunViaCargo)?,
+    );
+    let config = config.with_absolute_paths(&manifest_path);
+
+    let path = manifest_path.join(relative_slint_file_path.as_ref());
 
     let absolute_rust_output_file_path =
         Path::new(&env::var_os("OUT_DIR").ok_or(CompileError::NotRunViaCargo)?).join(
@@ -429,6 +483,18 @@ pub fn compile_with_config(
                 .with_extension("rs"),
         );
 
+    #[cfg(feature = "experimental-module-builds")]
+    if let Some(library_name) = config.config.library_name.clone() {
+        println!("cargo::metadata=SLINT_LIBRARY_NAME={}", library_name);
+        println!(
+            "cargo::metadata=SLINT_LIBRARY_PACKAGE={}",
+            std::env::var("CARGO_PKG_NAME").ok().unwrap_or_default()
+        );
+        println!("cargo::metadata=SLINT_LIBRARY_SOURCE={}", path.display());
+        if let Some(rust_module) = &config.config.rust_module {
+            println!("cargo::metadata=SLINT_LIBRARY_MODULE={}", rust_module);
+        }
+    }
     let paths_dependencies =
         compile_with_output_path(path, absolute_rust_output_file_path.clone(), config)?;
 
@@ -559,4 +625,51 @@ pub fn print_rustc_flags() -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+fn root_path_prefix() -> std::path::PathBuf {
+    #[cfg(windows)]
+    return std::path::PathBuf::from("C:/");
+    #[cfg(not(windows))]
+    return std::path::PathBuf::from("/");
+}
+
+#[test]
+fn with_absolute_library_paths_test() {
+    use std::path::PathBuf;
+
+    let library_paths = std::collections::HashMap::from([
+        ("relative".to_string(), PathBuf::from("some/relative/path")),
+        ("absolute".to_string(), root_path_prefix().join("some/absolute/path")),
+    ]);
+    let config = CompilerConfiguration::new().with_library_paths(library_paths);
+
+    let manifest_path = root_path_prefix().join("path/to/manifest");
+    let absolute_config = config.clone().with_absolute_paths(&manifest_path);
+    let relative = &absolute_config.config.library_paths["relative"];
+    assert!(relative.is_absolute());
+    assert!(relative.starts_with(&manifest_path));
+
+    assert!(!absolute_config.config.library_paths["absolute"].starts_with(&manifest_path));
+}
+
+#[test]
+fn with_absolute_include_paths_test() {
+    use std::path::PathBuf;
+
+    let config = CompilerConfiguration::new().with_include_paths(Vec::from([
+        root_path_prefix().join("some/absolute/path"),
+        PathBuf::from("some/relative/path"),
+    ]));
+
+    let manifest_path = root_path_prefix().join("path/to/manifest");
+    let absolute_config = config.clone().with_absolute_paths(&manifest_path);
+    assert_eq!(
+        absolute_config.config.include_paths,
+        Vec::from([
+            root_path_prefix().join("some/absolute/path"),
+            manifest_path.join("some/relative/path"),
+        ])
+    )
 }

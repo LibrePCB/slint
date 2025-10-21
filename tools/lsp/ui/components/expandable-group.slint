@@ -17,7 +17,7 @@ export component ExpandableGroup {
 
     group-layer := Rectangle {
         content-layer := VerticalLayout {
-            if text != "": Rectangle {
+            Rectangle {
                 touch-area := TouchArea {
                     clicked => {
                         root.open = !root.open;
@@ -40,19 +40,17 @@ export component ExpandableGroup {
                         width: EditorSizeSettings.default-icon-width;
                         colorize: Palette.alternate-foreground.transparentize(0.7);
                         source: Icons.chevron-down;
-                        rotation-origin-x: self.width / 2;
-                        rotation-origin-y: self.height / 2;
                         states [
                             closed when !root.open: {
-                                rotation-angle: -0.25turn;
+                                transform-rotation: -0.25turn;
                             }
                         ]
 
-                        animate rotation-angle { duration: EditorAnimationSettings.rotation-duration; }
+                        animate transform-rotation { duration: EditorAnimationSettings.rotation-duration; }
                     }
 
                     t := BodyStrongText {
-                        text: root.text;
+                        text: root.text != "" ? root.text : @tr("User Properties");
                     }
                 }
             }

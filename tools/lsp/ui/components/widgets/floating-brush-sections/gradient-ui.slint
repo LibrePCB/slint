@@ -85,7 +85,7 @@ component GradientSlider {
             height: 0;
             Image {
                 width: 10px;
-                rotation-angle: 45deg;
+                transform-rotation: 45deg;
                 source: Icons.black-square;
                 colorize: active ? PickerStyles.focused-color : PickerStyles.slider-color;
             }
@@ -336,17 +336,17 @@ export component GradientPicker inherits SimpleColumn {
         cb := ComboBox {
             x: EditorSizeSettings.standard-margin;
             width: 160px;
-            model: ["Linear", "Radial"];
-            current-index: PickerData.current-brush-kind == BrushKind.linear ? 0 : 1;
+            model: ["Conic", "Linear", "Radial"];
+            current-index: PickerData.current-brush-kind == BrushKind.conic ? 0 : PickerData.current-brush-kind == BrushKind.linear ? 1 : 2;
             selected(value) => {
-                PickerData.set-gradient-type(value == "Linear" ? GradientType.linear : GradientType.radial);
+                PickerData.set-gradient-type(value == "Linear" ? GradientType.linear : value == "Radial" ? GradientType.radial : GradientType.conic );
             }
         }
 
         degrees := CustomLineEdit {
             x: parent.width - self.width - EditorSizeSettings.standard-margin;
             width: 40px;
-            visible: cb.current-index == 0;
+            visible: cb.current-index == 1;
             Rectangle {
                 x: parent.width - self.width;
                 width: 48px;

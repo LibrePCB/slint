@@ -10,6 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
+use i_slint_common::sharedfontique;
 use i_slint_core::api::{
     GraphicsAPI, PhysicalSize as PhysicalWindowSize, RenderingNotifier, RenderingState,
     SetRenderingNotifierError, Window,
@@ -18,11 +19,14 @@ use i_slint_core::graphics::euclid::{self, Vector2D};
 use i_slint_core::graphics::rendering_metrics_collector::RenderingMetricsCollector;
 use i_slint_core::graphics::RequestedGraphicsAPI;
 use i_slint_core::graphics::{BorderRadius, FontRequest, SharedPixelBuffer};
-use i_slint_core::item_rendering::{DirtyRegion, ItemCache, ItemRenderer, PartialRenderingState};
+use i_slint_core::item_rendering::{ItemCache, ItemRenderer};
+use i_slint_core::item_tree::ItemTreeWeak;
 use i_slint_core::lengths::{
     LogicalLength, LogicalPoint, LogicalRect, LogicalSize, PhysicalPx, ScaleFactor,
 };
+use i_slint_core::partial_renderer::{DirtyRegion, PartialRenderingState};
 use i_slint_core::platform::PlatformError;
+use i_slint_core::textlayout::sharedparley;
 use i_slint_core::window::{WindowAdapter, WindowInner};
 use i_slint_core::Brush;
 
@@ -33,8 +37,8 @@ type PhysicalPoint = euclid::Point2D<f32, PhysicalPx>;
 type PhysicalBorderRadius = BorderRadius<f32, PhysicalPx>;
 
 mod cached_image;
+mod font_cache;
 mod itemrenderer;
-mod textlayout;
 
 #[cfg(skia_backend_software)]
 pub mod software_surface;
@@ -53,6 +57,8 @@ pub mod opengl_surface;
 
 #[cfg(feature = "unstable-wgpu-26")]
 mod wgpu_26_surface;
+#[cfg(feature = "unstable-wgpu-27")]
+mod wgpu_27_surface;
 
 use i_slint_core::items::TextWrap;
 use itemrenderer::to_skia_rect;
@@ -129,7 +135,7 @@ fn create_partial_renderer_state(
             || std::env::var("SLINT_SKIA_PARTIAL_RENDERING").as_deref().is_ok(),
             |surface| surface.use_partial_rendering(),
         )
-        .then(|| PartialRenderingState::default())
+        .then(PartialRenderingState::default)
 }
 
 #[derive(Default)]
@@ -390,6 +396,39 @@ impl SkiaRenderer {
         }
     }
 
+    #[cfg(feature = "unstable-wgpu-27")]
+    /// Creates a new SkiaRenderer that will always use Skia's Vulkan renderer.
+    pub fn default_wgpu_27(context: &SkiaSharedContext) -> Self {
+        Self {
+            maybe_window_adapter: Default::default(),
+            rendering_notifier: Default::default(),
+            image_cache: Default::default(),
+            path_cache: Default::default(),
+            rendering_metrics_collector: Default::default(),
+            rendering_first_time: Default::default(),
+            surface: Default::default(),
+            surface_factory: |context,
+                              window_handle,
+                              display_handle,
+                              size,
+                              requested_graphics_api| {
+                wgpu_27_surface::WGPUSurface::new(
+                    context,
+                    window_handle,
+                    display_handle,
+                    size,
+                    requested_graphics_api,
+                )
+                .map(|r| Box::new(r) as Box<dyn Surface>)
+            },
+            pre_present_callback: Default::default(),
+            partial_rendering_state: create_partial_renderer_state(None),
+            dirty_region_debug_mode: Default::default(),
+            dirty_region_history: Default::default(),
+            shared_context: context.clone(),
+        }
+    }
+
     /// Creates a new renderer is associated with the provided window adapter.
     pub fn new(
         context: &SkiaSharedContext,
@@ -408,7 +447,7 @@ impl SkiaRenderer {
         context: &SkiaSharedContext,
         surface: Box<dyn Surface + 'static>,
     ) -> Self {
-        let partial_rendering_state = create_partial_renderer_state(Some(surface.as_ref())).into();
+        let partial_rendering_state = create_partial_renderer_state(Some(surface.as_ref()));
         Self {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
@@ -593,7 +632,7 @@ impl SkiaRenderer {
         surface: Option<&dyn Surface>,
         window: &i_slint_core::api::Window,
         post_render_cb: Option<&dyn Fn(&mut dyn ItemRenderer)>,
-        components: &[(&i_slint_core::item_tree::ItemTreeRc, LogicalPoint)],
+        components: &[(ItemTreeWeak, LogicalPoint)],
     ) -> Option<DirtyRegion> {
         let window_inner = WindowInner::from_pub(window);
         let window_adapter = window_inner.window_adapter();
@@ -654,7 +693,7 @@ impl SkiaRenderer {
 
                 for dirty_rect in partial_renderer.dirty_region.iter() {
                     let physical_rect = (dirty_rect * scale_factor).to_rect().round_out();
-                    clip_path.add_rect(&to_skia_rect(&physical_rect), None);
+                    clip_path.add_rect(to_skia_rect(&physical_rect), None);
                 }
 
                 if matches!(self.dirty_region_debug_mode, DirtyRegionDebugMode::Log) {
@@ -717,17 +756,19 @@ impl SkiaRenderer {
             }
 
             for (component, origin) in components {
-                i_slint_core::item_rendering::render_component_items(
-                    component,
-                    item_renderer,
-                    *origin,
-                    &window_adapter,
-                );
+                if let Some(component) = ItemTreeWeak::upgrade(component) {
+                    i_slint_core::item_rendering::render_component_items(
+                        &component,
+                        item_renderer,
+                        *origin,
+                        &window_adapter,
+                    );
+                }
             }
 
             if let Some(path) = dirty_region_to_visualize {
                 let mut paint = skia_safe::Paint::new(
-                    &skia_safe::Color4f { a: 0.5, r: 1.0, g: 0., b: 0. },
+                    skia_safe::Color4f { a: 0.5, r: 1.0, g: 0., b: 0. },
                     None,
                 );
                 paint.set_style(skia_safe::PaintStyle::Stroke);
@@ -735,7 +776,7 @@ impl SkiaRenderer {
             }
 
             if let Some(collector) = &self.rendering_metrics_collector.borrow_mut().as_ref() {
-                collector.measure_frame_rendered(item_renderer);
+                collector.measure_frame_rendered(item_renderer, Default::default());
                 if collector.refresh_mode()
                     == i_slint_core::graphics::rendering_metrics_collector::RefreshMode::FullSpeed
                 {
@@ -786,32 +827,17 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
         text: &str,
         max_width: Option<LogicalLength>,
         scale_factor: ScaleFactor,
-        _text_wrap: TextWrap, //TODO: Add support for char-wrap
+        text_wrap: TextWrap,
     ) -> LogicalSize {
-        let (layout, _) = textlayout::create_layout(
-            font_request,
-            scale_factor,
-            text,
-            None,
-            max_width.map(|w| w * scale_factor),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            TextWrap::WordWrap,
-            Default::default(),
-            None,
-        );
-
-        PhysicalSize::new(layout.max_intrinsic_width().ceil(), layout.height().ceil())
-            / scale_factor
+        sharedparley::text_size(font_request, text, max_width, scale_factor, text_wrap)
     }
 
     fn font_metrics(
         &self,
         font_request: i_slint_core::graphics::FontRequest,
-        scale_factor: ScaleFactor,
+        _scale_factor: ScaleFactor,
     ) -> i_slint_core::items::FontMetrics {
-        textlayout::font_metrics(font_request, scale_factor)
+        sharedparley::font_metrics(font_request)
     }
 
     fn text_input_byte_offset_for_position(
@@ -821,45 +847,12 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
         font_request: FontRequest,
         scale_factor: ScaleFactor,
     ) -> usize {
-        let max_width = text_input.width() * scale_factor;
-        let max_height = text_input.height() * scale_factor;
-        let pos = pos * scale_factor;
-
-        if max_width.get() <= 0. || max_height.get() <= 0. {
-            return 0;
-        }
-
-        let visual_representation = text_input.visual_representation(None);
-
-        let (layout, layout_top_left) = textlayout::create_layout(
+        sharedparley::text_input_byte_offset_for_position(
+            text_input,
+            pos,
             font_request,
             scale_factor,
-            &visual_representation.text,
-            None,
-            Some(max_width),
-            max_height,
-            text_input.horizontal_alignment(),
-            text_input.vertical_alignment(),
-            text_input.wrap(),
-            i_slint_core::items::TextOverflow::Clip,
-            None,
-        );
-
-        let utf16_index =
-            layout.get_glyph_position_at_coordinate((pos.x, pos.y - layout_top_left.y)).position;
-        let mut utf16_count = 0;
-        let byte_offset = visual_representation
-            .text
-            .char_indices()
-            .find(|(_, x)| {
-                let r = utf16_count >= utf16_index;
-                utf16_count += x.len_utf16() as i32;
-                r
-            })
-            .unwrap_or((visual_representation.text.len(), '\0'))
-            .0;
-
-        visual_representation.map_byte_offset_from_byte_offset_in_visual_text(byte_offset)
+        )
     }
 
     fn text_input_cursor_rect_for_byte_offset(
@@ -869,53 +862,30 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
         font_request: FontRequest,
         scale_factor: ScaleFactor,
     ) -> LogicalRect {
-        let max_width = text_input.width() * scale_factor;
-        let max_height = text_input.height() * scale_factor;
-
-        if max_width.get() <= 0. || max_height.get() <= 0. {
-            return Default::default();
-        }
-
-        let string = text_input.text();
-        let string = string.as_str();
-
-        let (layout, layout_top_left) = textlayout::create_layout(
+        sharedparley::text_input_cursor_rect_for_byte_offset(
+            text_input,
+            byte_offset,
             font_request,
             scale_factor,
-            string,
-            None,
-            Some(max_width),
-            max_height,
-            text_input.horizontal_alignment(),
-            text_input.vertical_alignment(),
-            text_input.wrap(),
-            i_slint_core::items::TextOverflow::Clip,
-            None,
-        );
-
-        let physical_cursor_rect = textlayout::cursor_rect(
-            string,
-            byte_offset,
-            layout,
-            text_input.text_cursor_width() * scale_factor,
-            text_input.horizontal_alignment(),
-        );
-
-        physical_cursor_rect.translate(layout_top_left.to_vector()) / scale_factor
+        )
     }
 
     fn register_font_from_memory(
         &self,
         data: &'static [u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        textlayout::register_font_from_memory(data)
+        sharedfontique::get_collection().register_fonts(data.to_vec().into(), None);
+        Ok(())
     }
 
     fn register_font_from_path(
         &self,
         path: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        textlayout::register_font_from_path(path)
+        let requested_path = path.canonicalize().unwrap_or_else(|_| path.into());
+        let contents = std::fs::read(requested_path)?;
+        sharedfontique::get_collection().register_fonts(contents.into(), None);
+        Ok(())
     }
 
     fn set_rendering_notifier(
@@ -931,7 +901,7 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
     }
 
     fn default_font_size(&self) -> LogicalLength {
-        self::textlayout::DEFAULT_FONT_SIZE
+        sharedparley::DEFAULT_FONT_SIZE
     }
 
     fn free_graphics_resources(
@@ -996,10 +966,14 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
         Ok(target_buffer)
     }
 
-    fn mark_dirty_region(&self, region: i_slint_core::item_rendering::DirtyRegion) {
+    fn mark_dirty_region(&self, region: DirtyRegion) {
         if let Some(partial_rendering_state) = self.partial_rendering_state() {
             partial_rendering_state.mark_dirty_region(region);
         }
+    }
+
+    fn supports_transformations(&self) -> bool {
+        true
     }
 }
 
@@ -1068,7 +1042,7 @@ pub trait Surface {
         None
     }
 
-    #[cfg(feature = "unstable-wgpu-26")]
+    #[cfg(any(feature = "unstable-wgpu-26", feature = "unstable-wgpu-27"))]
     fn import_wgpu_texture(
         &self,
         _canvas: &skia_safe::Canvas,

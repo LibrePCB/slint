@@ -24,6 +24,7 @@ pub mod log_messages;
 pub mod palette;
 mod property_view;
 mod recent_colors;
+pub mod search_model;
 
 slint::include_modules!();
 
@@ -120,6 +121,7 @@ pub fn create_ui(
     api.on_test_code_binding(super::test_code_binding);
     api.on_set_code_binding(super::set_code_binding);
     api.on_set_color_binding(super::set_color_binding);
+    api.on_set_element_id(super::set_element_id);
     api.on_property_declaration_ranges(super::property_declaration_ranges);
 
     api.on_get_property_value(get_property_value);
@@ -263,12 +265,19 @@ pub fn ui_set_known_components(
         }
     }
 
+    type ComponentModel = search_model::SearchModel<ComponentItem>;
+    fn make_component_model(vec: Vec<ComponentItem>) -> ComponentModel {
+        ComponentModel::new(VecModel::from(vec), |i, search_str| {
+            search_model::contains(i.name.as_str(), search_str)
+        })
+    }
+
     fn sort_subset(mut input: HashMap<String, Vec<ComponentItem>>) -> Vec<ComponentListItem> {
         let mut output = input
             .drain()
             .map(|(k, mut v)| {
                 v.sort_by_key(|i| i.name.clone());
-                let model = Rc::new(VecModel::from(v));
+                let model = Rc::new(make_component_model(v));
                 ComponentListItem {
                     category: k.into(),
                     file_url: SharedString::new(),
@@ -283,11 +292,12 @@ pub fn ui_set_known_components(
     let builtin_components = sort_subset(builtins_map);
     let std_widgets_components = sort_subset(std_widgets_map);
     let library_components = sort_subset(library_map);
+
     let mut file_components = path_map
         .drain()
         .map(|(p, (file_url, mut v))| {
             v.sort_by_key(|i| i.name.clone());
-            let model = Rc::new(VecModel::from(v));
+            let model = Rc::new(make_component_model(v));
             let name = if p == longest_path_prefix {
                 p.file_name().unwrap_or_default().to_string_lossy().to_string()
             } else {
@@ -306,9 +316,34 @@ pub fn ui_set_known_components(
     all_components.extend_from_slice(&library_components[..]);
     all_components.extend_from_slice(&file_components[..]);
 
-    let result = Rc::new(VecModel::from(all_components));
+    let result = Rc::new(search_model::SearchModel::new(
+        VecModel::from(all_components),
+        |category, search_str| {
+            let mut yes = search_str.is_empty();
+            if let Some(sub_filter) = category.components.as_any().downcast_ref::<ComponentModel>()
+            {
+                sub_filter.set_search_text(search_str.clone());
+                yes = yes || sub_filter.row_count() > 0;
+            }
+            yes
+        },
+    ));
     let api = ui.global::<Api>();
-    api.set_known_components(result.into());
+
+    let old_search_text = api
+        .get_known_components()
+        .as_any()
+        .downcast_ref::<search_model::SearchModel<ComponentListItem>>()
+        .map(|x| x.search_text())
+        .filter(|x| !x.is_empty());
+    if let Some(search_text) = old_search_text {
+        result.set_search_text(search_text.clone());
+    }
+
+    api.set_known_components(result.clone().into());
+    api.on_library_search(move |term| {
+        result.set_search_text(term.into());
+    });
 }
 
 fn to_ui_range(r: TextRange) -> Option<Range> {
@@ -696,6 +731,25 @@ fn map_value_and_type(
                         value_brush: slint::Brush::RadialGradient(rg.clone()),
                         gradient_stops: Rc::new(VecModel::from(
                             rg.stops()
+                                .map(|gs| GradientStop { color: gs.color, position: gs.position })
+                                .collect::<Vec<_>>(),
+                        ))
+                        .into(),
+                        accessor_path: mapping.name_prefix.clone(),
+                        code: get_code(value),
+                        ..Default::default()
+                    });
+                }
+                slint::Brush::ConicGradient(cg) => {
+                    mapping.headers.push(mapping.name_prefix.clone());
+                    mapping.current_values.push(PropertyValue {
+                        display_string: SharedString::from("Conic Gradient"),
+                        kind: PropertyValueKind::Brush,
+                        value_kind: PropertyValueKind::Brush,
+                        brush_kind: BrushKind::Conic,
+                        value_brush: slint::Brush::ConicGradient(cg.clone()),
+                        gradient_stops: Rc::new(VecModel::from(
+                            cg.stops()
                                 .map(|gs| GradientStop { color: gs.color, position: gs.position })
                                 .collect::<Vec<_>>(),
                         ))
@@ -1297,8 +1351,19 @@ fn update_properties(
     for (c, n) in std::iter::zip(current_model.iter(), next_model.iter()) {
         debug_assert_eq!(c.group_name, n.group_name);
 
-        let cvg = c.properties.as_any().downcast_ref::<VecModel<PropertyInformation>>().unwrap();
-        let nvg = n.properties.as_any().downcast_ref::<VecModel<PropertyInformation>>().unwrap();
+        fn extract_inner_model<'a>(m: &'a PropertyGroup) -> &'a VecModel<PropertyInformation> {
+            m.properties
+                .as_any()
+                .downcast_ref::<search_model::SearchModel<PropertyInformation>>()
+                .unwrap()
+                .source_model()
+                .as_any()
+                .downcast_ref::<VecModel<PropertyInformation>>()
+                .unwrap()
+        }
+
+        let cvg = extract_inner_model(&c);
+        let nvg = extract_inner_model(&n);
 
         update_grouped_properties(cvg, nvg);
     }
@@ -1312,31 +1377,36 @@ pub fn ui_set_properties(
     properties: Option<properties::QueryPropertyResponse>,
 ) -> PropertyDeclarations {
     let win = i_slint_core::window::WindowInner::from_pub(ui.window()).window_adapter();
-    let (next_element, declarations, next_model) =
-        property_view::map_properties_to_ui(document_cache, properties, &win).unwrap_or((
-            ElementInformation {
-                id: "".into(),
-                type_name: "".into(),
-                source_uri: "".into(),
-                source_version: 0,
-                offset: 0,
-            },
-            HashMap::new(),
-            Rc::new(VecModel::from(Vec::<PropertyGroup>::new())).into(),
-        ));
+    let Some((next_element, declarations, next_model)) =
+        property_view::map_properties_to_ui(document_cache, properties, &win)
+    else {
+        let api = ui.global::<Api>();
+        api.set_properties(ModelRc::default());
+        api.set_current_element(ElementInformation::default());
+        return Default::default();
+    };
 
     let api = ui.global::<Api>();
     let current_model = api.get_properties();
 
     let element = api.get_current_element();
     if !is_equal_element(&element, &next_element) {
-        api.set_properties(next_model);
-    } else if current_model.row_count() > 0 {
-        update_properties(current_model, next_model);
-    } else {
-        api.set_properties(next_model);
-    }
+        let old_search_text = current_model
+            .as_any()
+            .downcast_ref::<search_model::SearchModel<PropertyGroup>>()
+            .map(|x| x.search_text())
+            .filter(|x| !x.is_empty());
+        if let Some(search_text) = old_search_text {
+            next_model.set_search_text(search_text.clone());
+        }
 
+        api.set_properties(next_model.clone().into());
+        api.on_properties_search(move |search_text| {
+            next_model.set_search_text(search_text);
+        });
+    } else {
+        update_properties(current_model, next_model.into());
+    }
     api.set_current_element(next_element);
 
     declarations
@@ -1723,8 +1793,8 @@ export component Tester {{
                 ..Default::default()
             },
             super::PropertyValue {
-                display_string: "#aabbccff".into(),
-                code: "\"#aabbccff\"".into(),
+                display_string: "#aabbcc".into(),
+                code: "\"#aabbcc\"".into(),
                 kind: super::PropertyValueKind::Color,
                 value_brush: slint::Brush::SolidColor(slint::Color::from_argb_u8(
                     0xff, 0xaa, 0xbb, 0xcc,

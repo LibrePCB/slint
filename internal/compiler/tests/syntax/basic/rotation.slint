@@ -6,23 +6,24 @@ export Ex1 := Rectangle {
     Rectangle {
         rotation-origin-x: width / 2;
         rotation-angle: 45deg;
-//                      ^error{rotation properties can only be applied to the Image or Text element}
+//      ^error{Unknown property rotation-angle in Rectangle}
         rotation-origin-y: width / 2;
     }
     Rectangle {
-//  ^error{rotation properties can only be applied to the Image or Text element}
         rotation-origin-x: width / 2;
         rotation-origin-y: width / 2;
     }
 
     Text {
         rotation-angle: 90deg;
+//      ^warning{The property 'rotation-angle' has been deprecated. Please use 'transform-rotation' instead}
     }
 }
 
 RotImg := Image {
 //     ^warning{':=' to declare a component is deprecated. The new syntax declare components with 'component MyComponent {'. Read the documentation for more info}
     rotation-angle: 45deg;
+//  ^warning{The property 'rotation-angle' has been deprecated. Please use 'transform-rotation' instead}
 }
 
 JustAnImage := Image {}
@@ -36,21 +37,19 @@ ImageWithChild := Image {
 export Ex2 := Rectangle {
 //         ^warning{':=' to declare a component is deprecated. The new syntax declare components with 'component MyComponent {'. Read the documentation for more info}
     Image {
-//  ^error{Elements with rotation properties cannot have children elements}
         rotation-angle: 45deg;
+//      ^warning{The property 'rotation-angle' has been deprecated. Please use 'transform-rotation' instead}
         Rectangle {}
     }
     RotImg {
-//  ^error{Elements with rotation properties cannot have children elements}
         Rectangle {}
     }
     ImageWithChild {
-//  ^error{Elements with rotation properties cannot have children elements}
         rotation-origin-x: 45px;
     }
     JustAnImage {
-//  ^error{Elements with rotation properties cannot have children elements}
         rotation-angle: 45deg;
+//      ^warning{The property 'rotation-angle' has been deprecated. Please use 'transform-rotation' instead}
         Rectangle {}
     }
 }
@@ -59,23 +58,36 @@ export Ex2 := Rectangle {
 export Ex3 := Rectangle {
 //         ^warning{':=' to declare a component is deprecated. The new syntax declare components with 'component MyComponent {'. Read the documentation for more info}
     i1 := Image {
-//        ^error{Elements with rotation properties cannot have children elements}
         Rectangle {}
     }
     i2 := Rectangle {}
-//        ^error{rotation properties can only be applied to the Image or Text element}
 
     TouchArea {
         clicked => {
             i1.rotation-angle = 60deg;
+//             ^warning{The property 'rotation-angle' has been deprecated. Please use 'transform-rotation' instead}
             i2.rotation-origin-x = 10px;
+//             ^warning{The property 'rotation-origin-x' has been deprecated. Please use 'transform-origin.x' instead}
         }
     }
 }
 
 export component Ex4  {
     in property rot <=> rect . rotation-angle;
+//  ^error{Could not infer type of property 'rot'}
+//                             ^^error{Element 'Rectangle' does not have a property 'rotation-angle'}
 
     rect := Rectangle {}
-//          ^error{rotation properties can only be applied to the Image or Text element}
+}
+
+
+export component Ex5 {
+    property <int>  transform-origin;
+//                  ^error{Cannot override property 'transform-origin'}
+
+    // Even if the property is deprecated and was never allowed in a non-Image/Text, it is still not allowed to override it
+    property <string> rotation-origin-x;
+//                    ^error{Cannot override property 'rotation-origin-x'}
+    Image { property <string> rotation-origin-y; }
+//                            ^error{Cannot override property 'rotation-origin-y'}
 }

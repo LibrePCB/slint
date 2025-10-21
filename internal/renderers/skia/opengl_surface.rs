@@ -13,7 +13,7 @@ use glutin::{
 };
 use i_slint_core::api::{GraphicsAPI, PhysicalSize as PhysicalWindowSize, Window};
 use i_slint_core::graphics::{BorrowedOpenGLTexture, RequestedGraphicsAPI, RequestedOpenGLVersion};
-use i_slint_core::item_rendering::DirtyRegion;
+use i_slint_core::partial_renderer::DirtyRegion;
 use i_slint_core::platform::PlatformError;
 
 use crate::SkiaSharedContext;
@@ -413,11 +413,7 @@ impl OpenGLSurface {
         }) = _window_handle.as_raw()
         {
             let ns_view: &objc2_app_kit::NSView = unsafe { ns_view.cast().as_ref() };
-            unsafe {
-                ns_view.setLayerContentsPlacement(
-                    objc2_app_kit::NSViewLayerContentsPlacement::TopLeft,
-                );
-            }
+            ns_view.setLayerContentsPlacement(objc2_app_kit::NSViewLayerContentsPlacement::TopLeft);
         }
 
         // Sanity check, as all this might succeed on Windows without working GL drivers, but this will fail:

@@ -3,7 +3,7 @@
 
 use i_slint_core::api::{GraphicsAPI, PhysicalSize as PhysicalWindowSize, Window};
 use i_slint_core::graphics::RequestedGraphicsAPI;
-use i_slint_core::item_rendering::DirtyRegion;
+use i_slint_core::partial_renderer::DirtyRegion;
 use i_slint_core::platform::PlatformError;
 
 use std::cell::RefCell;
@@ -91,8 +91,17 @@ impl super::Surface for WGPUSurface {
     }
 
     fn resize_event(&self, size: PhysicalWindowSize) -> Result<(), PlatformError> {
+        {
+            let gr_context = &mut self.gr_context.borrow_mut();
+            // This is brute force, but for the lack of access to the fences this seems to work: Avoid any pending work so that
+            // IDXGISwapChain::ResizeBuffers doesn't complain that the surface is still in use.
+            gr_context.flush_submit_and_sync_cpu();
+        }
+
         let mut surface_config = self.surface_config.borrow_mut();
 
+        // Prefer FIFO modes over possible Mailbox setting for frame pacing and better energy efficiency.
+        surface_config.present_mode = wgpu::PresentMode::AutoVsync;
         surface_config.width = size.width;
         surface_config.height = size.height;
 
@@ -177,6 +186,8 @@ impl super::Surface for WGPUSurface {
     ) -> Option<skia_safe::Image> {
         let texture = match any_wgpu_texture {
             i_slint_core::graphics::WGPUTexture::WGPU26Texture(texture) => texture.clone(),
+            #[cfg(feature = "unstable-wgpu-27")]
+            i_slint_core::graphics::WGPUTexture::WGPU27Texture(..) => return None,
         };
 
         // Skia won't submit commands right away, so remember the texture and transition before

@@ -130,6 +130,24 @@ impl BackendSelector {
     }
 
     #[i_slint_core_macros::slint_doc]
+    /// Adds the requirement to the selector that the backend must render using [WGPU](http://wgpu.rs).
+    /// Use this when you integrate other WGPU-based renderers with a Slint UI.
+    ///
+    /// *Note*: This function is behind the [`unstable-wgpu-27` feature flag](slint:rust:slint/docs/cargo_features/#backends)
+    ///         and may be removed or changed in future minor releases, as new major WGPU releases become available.
+    ///
+    /// See also the [`slint::wgpu_27`](slint:rust:slint/wgpu_27) module.
+    #[cfg(feature = "unstable-wgpu-27")]
+    #[must_use]
+    pub fn require_wgpu_27(
+        mut self,
+        configuration: i_slint_core::graphics::wgpu_27::api::WGPUConfiguration,
+    ) -> Self {
+        self.requested_graphics_api = Some(RequestedGraphicsAPI::WGPU27(configuration));
+        self
+    }
+
+    #[i_slint_core_macros::slint_doc]
     /// Configures this builder to use the specified winit hook that will be called before a Window is created.
     ///
     /// It can be used to adjust settings of window that will be created.
@@ -242,6 +260,7 @@ impl BackendSelector {
         self.select_internal()
     }
 
+    #[cfg(not(target_os = "android"))]
     fn select_internal(&mut self) -> Result<(), PlatformError> {
         self.selected = true;
 
@@ -352,6 +371,30 @@ impl BackendSelector {
         };
 
         i_slint_core::platform::set_platform(backend).map_err(PlatformError::SetPlatformError)
+    }
+
+    #[cfg(target_os = "android")]
+    fn select_internal(&mut self) -> Result<(), PlatformError> {
+        self.selected = true;
+        if self.backend.as_ref().is_some_and(|b| !b.starts_with("android-activity-")) {
+            return Err(
+                format!("Only the android-activity-* backend is supported on Android").into()
+            );
+        }
+        if self.renderer.as_ref().is_some_and(|r| r != "skia") {
+            return Err(format!("Only the Skia renderer is supported on Android").into());
+        }
+
+        if cfg!(feature = "backend-android-activity") {
+            i_slint_backend_android_activity::set_requested_graphics_api(
+                self.requested_graphics_api.clone(),
+            )
+        } else {
+            Err(format!(
+                "The BackendSelector is only supported with the backend-android-activity backend"
+            )
+            .into())
+        }
     }
 }
 

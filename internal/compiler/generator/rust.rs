@@ -20,6 +20,7 @@ use crate::llr::{
     TypeResolutionContext as _,
 };
 use crate::object_tree::Document;
+use crate::typeloader::LibraryInfo;
 use crate::CompilerConfiguration;
 use itertools::Either;
 use lyon_path::geom::euclid::approxeq::ApproxEq;
@@ -32,7 +33,7 @@ use std::str::FromStr;
 
 #[derive(Clone)]
 struct RustGeneratorContext {
-    /// Path to the SharedGlobals structure that contains the global and the WindowAdaptor
+    /// Path to the SharedGlobals structure that contains the global and the WindowAdapter
     global_access: TokenStream,
 }
 
@@ -160,6 +161,39 @@ pub fn generate(
         return super::rust_live_preview::generate(doc, compiler_config);
     }
 
+    let module_header = generate_module_header();
+    let qualified_name_ident = |symbol: &SmolStr, library_info: &LibraryInfo| {
+        let symbol = ident(symbol);
+        let package = ident(&library_info.package);
+        if let Some(module) = &library_info.module {
+            let module = ident(module);
+            quote!(#package :: #module :: #symbol)
+        } else {
+            quote!(#package :: #symbol)
+        }
+    };
+
+    let library_imports = {
+        let doc_used_types = doc.used_types.borrow();
+        doc_used_types
+            .library_types_imports
+            .iter()
+            .map(|(symbol, library_info)| {
+                let ident = qualified_name_ident(symbol, library_info);
+                quote!(
+                    #[allow(unused_imports)]
+                    pub use #ident;
+                )
+            })
+            .chain(doc_used_types.library_global_imports.iter().map(|(symbol, library_info)| {
+                let ident = qualified_name_ident(symbol, library_info);
+                let inner_symbol_name = smol_str::format_smolstr!("Inner{}", symbol);
+                let inner_ident = qualified_name_ident(&inner_symbol_name, library_info);
+                quote!(pub use #ident, #inner_ident;)
+            }))
+            .collect::<Vec<_>>()
+    };
+
     let (structs_and_enums_ids, inner_module) =
         generate_types(&doc.used_types.borrow().structs_and_enums);
 
@@ -180,12 +214,22 @@ pub fn generate(
     let popup_menu =
         llr.popup_menu.as_ref().map(|p| generate_item_tree(&p.item_tree, &llr, None, None, true));
 
-    let globals = llr
+    let mut global_exports = Vec::<TokenStream>::new();
+    if let Some(library_name) = &compiler_config.library_name {
+        // Building as a library, SharedGlobals needs to be exported
+        let ident = format_ident!("{}SharedGlobals", library_name);
+        global_exports.push(quote!(SharedGlobals as #ident));
+    }
+    let globals =
+        llr.globals.iter_enumerated().filter(|(_, glob)| glob.must_generate()).map(
+            |(idx, glob)| generate_global(idx, glob, &llr, compiler_config, &mut global_exports),
+        );
+    let library_globals_getters = llr
         .globals
         .iter_enumerated()
-        .filter(|(_, glob)| glob.must_generate())
-        .map(|(idx, glob)| generate_global(idx, glob, &llr));
-    let shared_globals = generate_shared_globals(&llr, compiler_config);
+        .filter(|(_, glob)| glob.from_library)
+        .map(|(_idx, glob)| generate_global_getters(glob, &llr));
+    let shared_globals = generate_shared_globals(doc, &llr, compiler_config);
     let globals_ids = llr.globals.iter().filter(|glob| glob.exported).flat_map(|glob| {
         std::iter::once(ident(&glob.name)).chain(glob.aliases.iter().map(|x| ident(x)))
     });
@@ -207,8 +251,11 @@ pub fn generate(
 
     Ok(quote! {
         mod #generated_mod {
+            #module_header
+            #(#library_imports)*
             #inner_module
             #(#globals)*
+            #(#library_globals_getters)*
             #(#sub_compos)*
             #popup_menu
             #(#public_components)*
@@ -217,10 +264,23 @@ pub fn generate(
             #translations
         }
         #[allow(unused_imports)]
-        pub use #generated_mod::{#(#compo_ids,)* #(#structs_and_enums_ids,)* #(#globals_ids,)* #(#named_exports,)*};
+        pub use #generated_mod::{#(#compo_ids,)* #(#structs_and_enums_ids,)* #(#globals_ids,)* #(#named_exports,)* #(#global_exports,)*};
         #[allow(unused_imports)]
         pub use slint::{ComponentHandle as _, Global as _, ModelExt as _};
     })
+}
+
+pub(super) fn generate_module_header() -> TokenStream {
+    quote! {
+        #![allow(non_snake_case, non_camel_case_types)]
+        #![allow(unused_braces, unused_parens)]
+        #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
+        #![allow(unknown_lints, if_let_rescope, tail_expr_drop_order)] // We don't have fancy Drop
+
+        use slint::private_unstable_api::re_exports as sp;
+        #[allow(unused_imports)]
+        use sp::{RepeatedItemTree as _, ModelExt as _, Model as _, Float as _};
+    }
 }
 
 /// Generate the struct and enums. Return a vector of names to import and a token stream with the inner module
@@ -247,14 +307,6 @@ pub fn generate_types(used_types: &[Type]) -> (Vec<Ident>, TokenStream) {
     );
 
     let inner_module = quote! {
-        #![allow(non_snake_case, non_camel_case_types)]
-        #![allow(unused_braces, unused_parens)]
-        #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
-        #![allow(unknown_lints, if_let_rescope, tail_expr_drop_order)] // We don't have fancy Drop
-
-        use slint::private_unstable_api::re_exports as sp;
-        #[allow(unused_imports)]
-        use sp::{RepeatedItemTree as _, ModelExt as _, Model as _, Float as _};
         #(#structs_and_enum_def)*
         const _THE_SAME_VERSION_MUST_BE_USED_FOR_THE_COMPILER_AND_THE_RUNTIME : slint::#version_check = slint::#version_check;
     };
@@ -361,6 +413,7 @@ fn generate_public_component(
 }
 
 fn generate_shared_globals(
+    doc: &Document,
     llr: &llr::CompilationUnit,
     compiler_config: &CompilerConfiguration,
 ) -> TokenStream {
@@ -377,6 +430,15 @@ fn generate_shared_globals(
         .map(global_inner_name)
         .collect::<Vec<_>>();
 
+    let from_library_global_names = llr
+        .globals
+        .iter()
+        .filter(|g| g.from_library)
+        .map(|g| format_ident!("global_{}", ident(&g.name)))
+        .collect::<Vec<_>>();
+
+    let from_library_global_types =
+        llr.globals.iter().filter(|g| g.from_library).map(global_inner_name).collect::<Vec<_>>();
     let apply_constant_scale_factor = if !compiler_config.const_scale_factor.approx_eq(&1.0) {
         let factor = compiler_config.const_scale_factor as f32;
         Some(
@@ -386,18 +448,59 @@ fn generate_shared_globals(
         None
     };
 
+    let library_global_vars = llr
+        .globals
+        .iter()
+        .filter(|g| g.from_library)
+        .map(|g| {
+            let library_info = doc.library_exports.get(g.name.as_str()).unwrap();
+            let shared_globals_var_name =
+                format_ident!("library_{}_shared_globals", library_info.name);
+            let global_name = format_ident!("global_{}", ident(&g.name));
+            quote!( #shared_globals_var_name.#global_name )
+        })
+        .collect::<Vec<_>>();
+    let pub_token = if compiler_config.library_name.is_some() { quote!(pub) } else { quote!() };
+
+    let (library_shared_globals_names, library_shared_globals_types): (Vec<_>, Vec<_>) = doc
+        .imports
+        .iter()
+        .filter_map(|import| import.library_info.clone())
+        .map(|library_info| {
+            let struct_name = format_ident!("{}SharedGlobals", library_info.name);
+            let shared_globals_var_name =
+                format_ident!("library_{}_shared_globals", library_info.name);
+            let shared_globals_type_name = if let Some(module) = library_info.module {
+                let package = ident(&library_info.package);
+                let module = ident(&module);
+                //(quote!(#shared_gloabls_var_name),quote!(let #shared_globals_var_name = #package::#module::#shared_globals_type_name::new(root_item_tree_weak.clone());))
+                quote!(#package::#module::#struct_name)
+            } else {
+                let package = ident(&library_info.package);
+                quote!(#package::#struct_name)
+            };
+            (quote!(#shared_globals_var_name), shared_globals_type_name)
+        })
+        .unzip();
+
     quote! {
-        struct SharedGlobals {
-            #(#global_names : ::core::pin::Pin<sp::Rc<#global_types>>,)*
+        #pub_token struct SharedGlobals {
+            #(#pub_token #global_names : ::core::pin::Pin<sp::Rc<#global_types>>,)*
+            #(#pub_token #from_library_global_names : ::core::pin::Pin<sp::Rc<#from_library_global_types>>,)*
             window_adapter : sp::OnceCell<sp::WindowAdapterRc>,
             root_item_tree_weak : sp::VWeak<sp::ItemTreeVTable>,
+            #(#[allow(dead_code)]
+            #library_shared_globals_names : sp::Rc<#library_shared_globals_types>,)*
         }
         impl SharedGlobals {
-            fn new(root_item_tree_weak : sp::VWeak<sp::ItemTreeVTable>) -> sp::Rc<Self> {
+            #pub_token fn new(root_item_tree_weak : sp::VWeak<sp::ItemTreeVTable>) -> sp::Rc<Self> {
+                #(let #library_shared_globals_names = #library_shared_globals_types::new(root_item_tree_weak.clone());)*
                 let _self = sp::Rc::new(Self {
                     #(#global_names : #global_types::new(),)*
+                    #(#from_library_global_names : #library_global_vars.clone(),)*
                     window_adapter : ::core::default::Default::default(),
                     root_item_tree_weak,
+                    #(#library_shared_globals_names,)*
                 });
                 #(_self.#global_names.clone().init(&_self);)*
                 _self
@@ -1340,6 +1443,8 @@ fn generate_global(
     global_idx: llr::GlobalIdx,
     global: &llr::GlobalComponent,
     root: &llr::CompilationUnit,
+    compiler_config: &CompilerConfiguration,
+    global_exports: &mut Vec<TokenStream>,
 ) -> TokenStream {
     let mut declared_property_vars = vec![];
     let mut declared_property_types = vec![];
@@ -1442,6 +1547,13 @@ fn generate_global(
         }
     }));
 
+    let pub_token = if compiler_config.library_name.is_some() {
+        global_exports.push(quote! (#inner_component_id));
+        quote!(pub)
+    } else {
+        quote!()
+    };
+
     let public_interface = global.exported.then(|| {
         let property_and_callback_accessors = public_api(
             &global.public_properties,
@@ -1450,26 +1562,17 @@ fn generate_global(
             &ctx,
         );
         let aliases = global.aliases.iter().map(|name| ident(name));
-        let getters = root.public_components.iter().map(|c| {
-            let root_component_id = ident(&c.name);
-            quote! {
-                impl<'a> slint::Global<'a, #root_component_id> for #public_component_id<'a> {
-                    fn get(component: &'a #root_component_id) -> Self {
-                        Self(&component.0.globals.get().unwrap().#global_id)
-                    }
-                }
-            }
-        });
+        let getters = generate_global_getters(global, root);
 
         quote!(
             #[allow(unused)]
-            pub struct #public_component_id<'a>(&'a ::core::pin::Pin<sp::Rc<#inner_component_id>>);
+            pub struct #public_component_id<'a>(#pub_token &'a ::core::pin::Pin<sp::Rc<#inner_component_id>>);
 
             impl<'a> #public_component_id<'a> {
                 #property_and_callback_accessors
             }
             #(pub type #aliases<'a> = #public_component_id<'a>;)*
-            #(#getters)*
+            #getters
         )
     });
 
@@ -1478,10 +1581,10 @@ fn generate_global(
         #[const_field_offset(sp::const_field_offset)]
         #[repr(C)]
         #[pin]
-        struct #inner_component_id {
-            #(#declared_property_vars: sp::Property<#declared_property_types>,)*
-            #(#declared_callbacks: sp::Callback<(#(#declared_callbacks_types,)*), #declared_callbacks_ret>,)*
-            #(#change_tracker_names : sp::ChangeTracker,)*
+        #pub_token struct #inner_component_id {
+            #(#pub_token  #declared_property_vars: sp::Property<#declared_property_types>,)*
+            #(#pub_token  #declared_callbacks: sp::Callback<(#(#declared_callbacks_types,)*), #declared_callbacks_ret>,)*
+            #(#pub_token  #change_tracker_names : sp::ChangeTracker,)*
             globals : sp::OnceCell<sp::Weak<SharedGlobals>>,
         }
 
@@ -1501,6 +1604,29 @@ fn generate_global(
         }
 
         #public_interface
+    )
+}
+
+fn generate_global_getters(
+    global: &llr::GlobalComponent,
+    root: &llr::CompilationUnit,
+) -> TokenStream {
+    let public_component_id = ident(&global.name);
+    let global_id = format_ident!("global_{}", public_component_id);
+
+    let getters = root.public_components.iter().map(|c| {
+        let root_component_id = ident(&c.name);
+        quote! {
+            impl<'a> slint::Global<'a, #root_component_id> for #public_component_id<'a> {
+                fn get(component: &'a #root_component_id) -> Self {
+                    Self(&component.0.globals.get().unwrap().#global_id)
+                }
+            }
+        }
+    });
+
+    quote! (
+        #(#getters)*
     )
 }
 
@@ -1537,8 +1663,7 @@ fn generate_item_tree(
         quote!(false)
     };
 
-    let parent_item_expression = parent_ctx.and_then(|parent| {
-        Some(parent.repeater_index.map_or_else(|| {
+    let parent_item_expression = parent_ctx.map(|parent| parent.repeater_index.map_or_else(|| {
             // No repeater index, this could be a PopupWindow
             quote!(if let Some(parent_rc) = self.parent.clone().upgrade() {
                        let parent_origin = sp::VRcMapped::origin(&parent_rc);
@@ -1558,8 +1683,7 @@ fn generate_item_tree(
                 *_result = sp::ItemRc::new(parent_component, parent_index + #sub_component_offset - 1)
                     .downgrade();
             })
-        }))
-    });
+        }));
     let mut item_tree_array = vec![];
     let mut item_array = vec![];
     sub_tree.tree.visit_in_array(&mut |node, children_offset, parent_index| {
@@ -2289,7 +2413,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                     quote!(sp::PathData::Commands(#f))
                 }
                 (_, Type::Void) => {
-                    quote!(#f;)
+                    quote!({#f;})
                 }
                 _ => f,
             }
@@ -2745,11 +2869,18 @@ fn compile_builtin_function_call(
                 arguments
             {
                 let mut parent_ctx = ctx;
-                let mut component_access_tokens = quote!(_self);
+                let mut component_access_tokens = MemberAccess::Direct(quote!(_self));
                 if let llr::PropertyReference::InParent { level, .. } = parent_ref {
                     for _ in 0..level.get() {
-                        component_access_tokens =
-                            quote!(#component_access_tokens.parent.upgrade().unwrap().as_pin_ref());
+                        component_access_tokens = match component_access_tokens {
+                            MemberAccess::Option(token_stream) => MemberAccess::Option(
+                                quote!(#token_stream.and_then(|a| a.as_pin_ref().parent.upgrade())),
+                            ),
+                            MemberAccess::Direct(token_stream) => {
+                                MemberAccess::Option(quote!(#token_stream.parent.upgrade()))
+                            }
+                            _ => unreachable!(),
+                        };
                         parent_ctx = parent_ctx.parent.as_ref().unwrap().ctx;
                     }
                 }
@@ -2770,7 +2901,7 @@ fn compile_builtin_function_call(
                 let close_policy = compile_expression(close_policy, ctx);
                 let window_adapter_tokens = access_window_adapter_field(ctx);
                 let popup_id_name = internal_popup_id(*popup_index as usize);
-                quote!({
+                component_access_tokens.then(|component_access_tokens| quote!({
                     let popup_instance = #popup_window_id::new(#component_access_tokens.self_weak.get().unwrap().clone()).unwrap();
                     let popup_instance_vrc = sp::VRc::map(popup_instance.clone(), |x| x);
                     let position = { let _self = popup_instance_vrc.as_pin_ref(); #position };
@@ -2787,7 +2918,7 @@ fn compile_builtin_function_call(
                         ))
                     );
                     #popup_window_id::user_init(popup_instance_vrc.clone());
-                })
+                }))
             } else {
                 panic!("internal error: invalid args to ShowPopupWindow {arguments:?}")
             }
@@ -2797,18 +2928,34 @@ fn compile_builtin_function_call(
                 arguments
             {
                 let mut parent_ctx = ctx;
-                let mut component_access_tokens = quote!(_self);
+                let mut component_access_tokens = MemberAccess::Direct(quote!(_self));
                 if let llr::PropertyReference::InParent { level, .. } = parent_ref {
                     for _ in 0..level.get() {
-                        component_access_tokens =
-                            quote!(#component_access_tokens.parent.upgrade().unwrap().as_pin_ref());
+                        component_access_tokens = match component_access_tokens {
+                            MemberAccess::Option(token_stream) => MemberAccess::Option(
+                                quote!(#token_stream.and_then(|a| a.parent.upgrade())),
+                            ),
+                            MemberAccess::Direct(token_stream) => {
+                                MemberAccess::Option(quote!(#token_stream.parent.upgrade()))
+                            }
+                            _ => unreachable!(),
+                        };
                         parent_ctx = parent_ctx.parent.as_ref().unwrap().ctx;
                     }
                 }
                 let window_adapter_tokens = access_window_adapter_field(ctx);
                 let popup_id_name = internal_popup_id(*popup_index as usize);
+                let current_id_tokens = match component_access_tokens {
+                    MemberAccess::Option(token_stream) => quote!(
+                        #token_stream.and_then(|a| a.as_pin_ref().#popup_id_name.take())
+                    ),
+                    MemberAccess::Direct(token_stream) => {
+                        quote!(#token_stream.as_ref().#popup_id_name.take())
+                    }
+                    _ => unreachable!(),
+                };
                 quote!(
-                    if let Some(current_id) = #component_access_tokens.#popup_id_name.take() {
+                    if let Some(current_id) = #current_id_tokens {
                         sp::WindowInner::from_pub(#window_adapter_tokens.window()).close_popup(current_id);
                     }
                 )
@@ -3284,7 +3431,7 @@ fn compile_builtin_function_call(
                 let ident = format_ident!("timer{}", *timer_index as usize);
                 quote!(_self.#ident.restart())
             } else {
-                panic!("internal error: invalid args to RetartTimer {arguments:?}")
+                panic!("internal error: invalid args to RestartTimer {arguments:?}")
             }
         }
     }
@@ -3535,7 +3682,7 @@ pub fn generate_named_exports(exports: &crate::object_tree::Exports) -> Vec<Toke
 fn compile_expression_no_parenthesis(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
     fn extract_single_group(stream: &TokenStream) -> Option<TokenStream> {
         let mut iter = stream.clone().into_iter();
-        let Some(elem) = iter.next() else { return None };
+        let elem = iter.next()?;
         let TokenTree::Group(elem) = elem else { return None };
         if elem.delimiter() != proc_macro2::Delimiter::Parenthesis {
             return None;

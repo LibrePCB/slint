@@ -37,6 +37,21 @@ impl From<PyTimerMode> for i_slint_core::timers::TimerMode {
 /// The timer will automatically stop when garbage collected. You must keep the Timer object
 /// around for as long as you want the timer to keep firing.
 ///
+/// ```python
+/// class AppWindow(...)
+///     def __init__(self):
+///         super().__init__()
+///         self.my_timer = None
+///
+///     @slint.callback
+///     def button_clicked(self):
+///         self.my_timer = slint.Timer()
+///         self.my_timer.start(timedelta(seconds=1), self.do_something)
+///
+///     def do_something(self):
+///         pass
+/// ```
+///
 /// Timers can only be used in the thread that runs the Slint event loop. They don't
 /// fire if used in another thread.
 #[gen_stub_pyclass]
@@ -65,14 +80,20 @@ impl PyTimer {
         &self,
         mode: PyTimerMode,
         interval: chrono::Duration,
-        callback: PyObject,
+        callback: Py<PyAny>,
     ) -> PyResult<()> {
         let interval = interval
             .to_std()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         self.timer.start(mode.into(), interval, move || {
-            Python::with_gil(|py| {
-                callback.call0(py).expect("unexpected failure running python timer callback");
+            Python::attach(|py| {
+                if let Err(err) = callback.call0(py) {
+                    crate::handle_unraisable(
+                        py,
+                        "unexpected failure running python timer callback".into(),
+                        err,
+                    );
+                }
             });
         });
         Ok(())
@@ -85,13 +106,19 @@ impl PyTimer {
     /// * `duration`: The duration from now until when the timer should fire.
     /// * `callback`: The function to call when the time has been reached or exceeded.
     #[staticmethod]
-    fn single_shot(duration: chrono::Duration, callback: PyObject) -> PyResult<()> {
+    fn single_shot(duration: chrono::Duration, callback: Py<PyAny>) -> PyResult<()> {
         let duration = duration
             .to_std()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         i_slint_core::timers::Timer::single_shot(duration, move || {
-            Python::with_gil(|py| {
-                callback.call0(py).expect("unexpected failure running python timer callback");
+            Python::attach(|py| {
+                if let Err(err) = callback.call0(py) {
+                    crate::handle_unraisable(
+                        py,
+                        "unexpected failure running python singleshot timer callback".into(),
+                        err,
+                    );
+                }
             });
         });
         Ok(())

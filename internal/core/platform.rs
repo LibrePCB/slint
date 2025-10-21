@@ -94,7 +94,9 @@ pub trait Platform {
         #[cfg(feature = "std")]
         {
             let the_beginning = *INITIAL_INSTANT.get_or_init(time::Instant::now);
-            time::Instant::now() - the_beginning
+            let now = time::Instant::now();
+            assert!(now >= the_beginning, "The platform's clock is not monotonic!");
+            now - the_beginning
         }
         #[cfg(not(feature = "std"))]
         unimplemented!("The platform abstraction must implement `duration_since_start`")
@@ -106,6 +108,16 @@ pub trait Platform {
     fn click_interval(&self) -> core::time::Duration {
         // 500ms is the default delay according to https://en.wikipedia.org/wiki/Double-click#Speed_and_timing
         core::time::Duration::from_millis(500)
+    }
+
+    /// Returns the current rate at which the text cursor should flash or blink.
+    ///
+    /// This is the length of the entire visible-hidden-visible cycle, so for a duration of 1000ms
+    /// it is visible for 500ms then hidden for 500ms, then visible again.
+    ///
+    /// If this value is `Duration::ZERO` then the cycle is disabled.
+    fn cursor_flash_cycle(&self) -> core::time::Duration {
+        core::time::Duration::from_millis(1000)
     }
 
     /// Sends the given text into the system clipboard.

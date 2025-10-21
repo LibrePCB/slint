@@ -26,6 +26,7 @@ jobs:
       outputs:
         slint: ${{ steps.filter.outputs.slint }}
         figma_inspector : ${{ steps.filter.outputs.figma_inspector }}
+        material_components : ${{ steps.filter.outputs.material_components }}
       steps:
         - uses: actions/checkout@v5
         - uses: dorny/paths-filter@v3
@@ -48,7 +49,7 @@ jobs:
         strategy:
             matrix:
                 os: [ubuntu-22.04, macos-14, windows-2022]
-                rust_version: [stable, "1.85"]
+                rust_version: [stable, "1.88"]
                 include:
                     - os: windows-2022
                       extra_args: "--exclude ffmpeg --exclude gstreamer-player"
@@ -59,13 +60,11 @@ jobs:
                       extra_args: "--exclude ffmpeg --exclude gstreamer-player"
                     - os: ubuntu-22.04
                       rust_version: "nightly"
-                    # Bevy requires 1.86, won't compile with 1.85
-                    - rust_version: "1.85"
-                      maybe_exclude_bevy: "--exclude bevy-example"
                 exclude:
+                    # There is only a limited amount of mac worker machine allocated and this is currently the bottleneck, so disable it
                     - os: macos-14
-                      rust_version: "1.85"
-                    # We already test 1.85 and nightly. Stable is in the middle and already covered by other jobs
+                      rust_version: "1.88"
+                    # We already test 1.88 and nightly. Stable is in the middle and already covered by other jobs
                     - os: ubuntu-22.04
                       rust_version: "stable"
 
@@ -76,7 +75,7 @@ jobs:
             - uses: ./.github/actions/install-linux-dependencies
             - uses: ./.github/actions/install-skia-dependencies
             - uses: ilammy/msvc-dev-cmd@v1
-            - uses: actions/setup-python@v5
+            - uses: actions/setup-python@v6
               with:
                 python-version: '3.10'
             - name: Install Qt
@@ -139,13 +138,14 @@ jobs:
             - uses: ./.github/actions/install-skia-dependencies
             - name: Setup headless display
               uses: pyvista/setup-headless-display-action@v4
-            - uses: actions/setup-node@v4
+            - uses: actions/setup-node@v6
               with:
                 node-version: 20
+                package-manager-cache: false
               id: node-install
-            - uses: pnpm/action-setup@v4.1.0
+            - uses: pnpm/action-setup@v4.2.0
               with:
-                version: 10.14.0
+                version: 10.18.2
             - uses: ./.github/actions/setup-rust
               with:
                   key: x-napi-v2-${{ steps.node-install.outputs.node-version }} # the cache key consists of a manually bumpable version and the node version, as the cached rustc artifacts contain linking information where to find node.lib, which is in a versioned directory.
@@ -176,6 +176,7 @@ jobs:
             CARGO_PROFILE_DEV_DEBUG: 0
             CARGO_INCREMENTAL: false
             RUST_BACKTRACE: full
+            SLINT_BACKEND: winit
         strategy:
             matrix:
                 os: [ubuntu-22.04, macos-14, windows-2022]
@@ -197,11 +198,11 @@ jobs:
             - uses: ./.github/actions/setup-rust
               with:
                   key: x-napi-v2-${{ steps.node-install.outputs.node-version }} # the cache key consists of a manually bumpable version and the node version, as the cached rustc artifacts contain linking information where to find node.lib, which is in a versioned directory.
-            - uses: actions/setup-python@v5
+            - uses: actions/setup-python@v6
               with:
                   python-version: "3.12"
             - name: Install uv
-              uses: astral-sh/setup-uv@v6
+              uses: astral-sh/setup-uv@v7
             - uses: fjwillemsen/setup-nox2@v3.0.0
             - name: Run python tests
               working-directory: api/python/slint
@@ -231,7 +232,7 @@ jobs:
             CARGO_PROFILE_DEV_DEBUG: 0
         strategy:
             matrix:
-                os: [ubuntu-22.04, macos-13, windows-2022]
+                os: [ubuntu-22.04, macos-14, windows-2022]
         runs-on: ${{ matrix.os }}
 
         steps:
@@ -240,7 +241,7 @@ jobs:
               with:
                   force-gcc-10: true
             - name: Install Qt
-              if: runner.os != 'Windows'
+              if: runner.os == 'Linux'
               uses: jurplel/install-qt-action@v4
               with:
                   version: "5.15.2"
@@ -271,7 +272,7 @@ jobs:
             matrix:
                 include:
                     - os: macos-14
-                      rust_version: "1.85"
+                      rust_version: "1.88"
                     - os: windows-2022
                       rust_version: "nightly"
                     - os: ubuntu-22.04
@@ -360,16 +361,17 @@ jobs:
         runs-on: ubuntu-22.04
         steps:
             - uses: actions/checkout@v5
-            - uses: pnpm/action-setup@v4.1.0
+            - uses: pnpm/action-setup@v4.2.0
               with:
-                version: 10.14.0
+                version: 10.18.2
             - uses: Swatinem/rust-cache@v2
               with:
                 key: "vsce_1" # increment this to bust the cache if needed
             - uses: ./.github/actions/install-linux-dependencies
-            - uses: actions/setup-node@v4
+            - uses: actions/setup-node@v6
               with:
                   node-version: 20
+                  package-manager-cache: false
             - name: Install wasm-pack
               run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
             - name: Fake slint-lsp build
@@ -612,6 +614,11 @@ jobs:
         runs-on: ubuntu-22.04
         container: espressif/idf:release-v5.2
         steps:
+            - name: Fix up pydantic regression (https://github.com/espressif/idf-component-manager/issues/97#issuecomment-3380777944)
+              run: |
+                  . ${IDF_PATH}/export.sh
+                  cd $IDF_PYTHON_ENV_PATH
+                  bin/pip install pydantic==2.11.10
             - uses: actions/checkout@v5
             - uses: dtolnay/rust-toolchain@stable
             - uses: esp-rs/xtensa-toolchain@v1.6
@@ -684,13 +691,14 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v5
-            - uses: actions/setup-node@v4
+            - uses: actions/setup-node@v6
               with:
                 node-version: 20
+                package-manager-cache: false
               id: node-install
-            - uses: pnpm/action-setup@v4.1.0
+            - uses: pnpm/action-setup@v4.2.0
               with:
-                version: 10.14.0
+                version: 10.18.2
             - name: Run pnpm install
               working-directory: tools/figma-inspector
               run: pnpm install --frozen-lockfile
@@ -711,3 +719,16 @@ jobs:
               with:
                   name: figma-plugin
                   path: tools/figma-inspector/zip
+
+    material-components:
+        needs: files-changed
+        if: needs.files-changed.outputs.material_components == 'true'
+        permissions:
+            contents: read
+            deployments: write
+        uses: ./.github/workflows/material.yaml
+        secrets:
+            CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+            CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+            ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+            ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}

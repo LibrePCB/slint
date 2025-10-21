@@ -6,17 +6,18 @@ mod binding_analysis;
 mod border_radius;
 mod check_expressions;
 mod check_public_api;
-mod check_rotation;
 mod clip;
 mod collect_custom_fonts;
 mod collect_globals;
 mod collect_init_code;
+mod collect_libraries;
 mod collect_structs_and_enums;
 mod collect_subcomponents;
 mod compile_paths;
 mod const_propagation;
 mod deduplicate_property_read;
 mod default_geometry;
+mod deprecated_rotation_origin;
 #[cfg(feature = "software-renderer")]
 mod embed_glyphs;
 mod embed_images;
@@ -55,8 +56,9 @@ mod visible;
 mod z_order;
 
 use crate::expression_tree::Expression;
-use crate::namedreference::NamedReference;
 use smol_str::SmolStr;
+
+pub use binding_analysis::GlobalAnalysis;
 
 pub fn ignore_debug_hooks(expr: &Expression) -> &Expression {
     let mut expr = expr;
@@ -100,6 +102,7 @@ pub async fn run_passes(
     let raw_type_loader =
         keep_raw.then(|| crate::typeloader::snapshot_with_extra_doc(type_loader, doc).unwrap());
 
+    collect_libraries::collect_libraries(doc);
     collect_subcomponents::collect_subcomponents(doc);
     lower_tabwidget::lower_tabwidget(doc, type_loader, diag).await;
     lower_menus::lower_menus(doc, type_loader, diag).await;
@@ -140,6 +143,7 @@ pub async fn run_passes(
 
     doc.visit_all_used_components(|component| {
         border_radius::handle_border_radius(component, diag);
+        deprecated_rotation_origin::handle_rotation_origin(component, diag);
         flickable::handle_flickable(component, &global_type_registry.borrow());
         lower_layout::lower_layouts(component, type_loader, &style_metrics, diag);
         default_geometry::default_geometry(component, diag);
@@ -147,7 +151,7 @@ pub async fn run_passes(
         z_order::reorder_by_z_order(component, diag);
         lower_property_to_element::lower_property_to_element(
             component,
-            "opacity",
+            core::iter::once("opacity"),
             core::iter::empty(),
             None,
             &SmolStr::new_static("Opacity"),
@@ -156,7 +160,7 @@ pub async fn run_passes(
         );
         lower_property_to_element::lower_property_to_element(
             component,
-            "cache-rendering-hint",
+            core::iter::once("cache-rendering-hint"),
             core::iter::empty(),
             None,
             &SmolStr::new_static("Layer"),
@@ -165,27 +169,8 @@ pub async fn run_passes(
         );
         visible::handle_visible(component, &global_type_registry.borrow(), diag);
         lower_shadows::lower_shadow_properties(component, &doc.local_registry, diag);
-        lower_property_to_element::lower_property_to_element(
+        lower_property_to_element::lower_transform_properties(
             component,
-            crate::typeregister::RESERVED_ROTATION_PROPERTIES[0].0,
-            crate::typeregister::RESERVED_ROTATION_PROPERTIES[1..]
-                .iter()
-                .map(|(prop_name, _)| *prop_name),
-            Some(&|e, prop| Expression::BinaryExpression {
-                lhs: Expression::PropertyReference(NamedReference::new(
-                    e,
-                    match prop {
-                        "rotation-origin-x" => SmolStr::new_static("width"),
-                        "rotation-origin-y" => SmolStr::new_static("height"),
-                        "rotation-angle" => return Expression::Invalid,
-                        _ => unreachable!(),
-                    },
-                ))
-                .into(),
-                op: '/',
-                rhs: Expression::NumberLiteral(2., Default::default()).into(),
-            }),
-            &SmolStr::new_static("Rotate"),
             &global_type_registry.borrow(),
             diag,
         );
@@ -205,7 +190,9 @@ pub async fn run_passes(
         doc.used_types.borrow_mut().sub_components.clear();
     }
 
-    binding_analysis::binding_analysis(doc, &type_loader.compiler_config, diag);
+    let global_analysis =
+        binding_analysis::binding_analysis(doc, &type_loader.compiler_config, diag);
+    collect_globals::mark_library_globals(doc);
     unique_id::assign_unique_id(doc);
 
     doc.visit_all_used_components(|component| {
@@ -227,7 +214,7 @@ pub async fn run_passes(
     doc.visit_all_used_components(|component| {
         if !diag.has_errors() {
             // binding loop causes panics in const_propagation
-            const_propagation::const_propagation(component);
+            const_propagation::const_propagation(component, &global_analysis);
         }
         deduplicate_property_read::deduplicate_property_read(component);
         if !component.is_global() {
@@ -331,6 +318,5 @@ pub fn run_import_passes(
     purity_check::purity_check(doc, diag);
     focus_handling::replace_forward_focus_bindings_with_focus_functions(doc, diag);
     check_expressions::check_expressions(doc, diag);
-    check_rotation::check_rotation(doc, diag);
     unique_id::check_unique_id(doc, diag);
 }

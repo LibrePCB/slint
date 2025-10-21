@@ -1,6 +1,6 @@
 {
   "name": "slint-ui",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "homepage": "https://github.com/slint-ui/slint",
@@ -21,14 +21,14 @@
   "description": "Slint is a declarative GUI toolkit to build native user interfaces for desktop and embedded applications.",
   "devDependencies": {
     "@ava/typescript": "6.0.0",
-    "@biomejs/biome": "2.2.2",
+    "@biomejs/biome": "catalog:",
     "@types/capture-console": "1.0.5",
-    "@types/node": "20.16.10",
+    "@types/node": "catalog:",
     "ava": "6.4.1",
     "capture-console": "1.0.2",
     "jimp": "1.6.0",
-    "typedoc": "0.28.11",
-    "typescript": "5.9.2"
+    "typedoc": "0.28.14",
+    "typescript": "catalog:"
   },
   "engines": {
     "node": ">= 10"

@@ -80,6 +80,7 @@ pub struct PropertyInformation {
 #[derive(Clone, Debug)]
 pub struct ElementInformation {
     pub id: SmolStr,
+    pub component_name: SmolStr,
     pub type_name: SmolStr,
     pub offset: TextSize,
 }
@@ -96,7 +97,8 @@ pub struct QueryPropertyResponse {
 const HIGH_PRIORITY: u32 = 100;
 const DEFAULT_PRIORITY: u32 = 1000;
 
-// This gets defined accessibility properties...
+// This returns defined reserved properties such as x, y, width, height,
+// accessiblity properties or layout properties
 fn get_reserved_properties<'a>(
     group: &'a str,
     group_priority: u32,
@@ -466,15 +468,15 @@ pub(super) fn get_properties(
                     group_priority: depth,
                 });
 
-                if b.name == "Image" || b.name == "Text" {
-                    result.extend(get_reserved_properties(
-                        &b.name,
-                        depth,
-                        i_slint_compiler::typeregister::RESERVED_ROTATION_PROPERTIES
-                            .iter()
-                            .cloned(),
-                    ));
-                }
+                let transform_origin = i_slint_compiler::typeregister::transform_origin_property();
+                result.extend(get_reserved_properties(
+                    &b.name,
+                    depth,
+                    i_slint_compiler::typeregister::RESERVED_TRANSFORM_PROPERTIES
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once((transform_origin.0, transform_origin.1.into()))),
+                ));
 
                 if matches!(b.name.as_str(), "GridLayout" | "HorizontalLayout" | "VerticalLayout") {
                     // Add the padding that is otherwise filtered out
@@ -591,12 +593,19 @@ fn find_block_range(element: &common::ElementRcNode) -> Option<TextRange> {
 fn get_element_information(element: &common::ElementRcNode) -> ElementInformation {
     let offset = element.with_element_node(|n| n.text_range().start());
     let e = element.element.borrow();
+    let component_name = element.with_element_node(|n| {
+        if let Some(c) = n.parent().and_then(|p| syntax_nodes::Component::new(p.clone())) {
+            c.DeclaredIdentifier().text().to_smolstr()
+        } else {
+            SmolStr::default()
+        }
+    });
     let type_name = if matches!(&e.base_type, ElementType::Builtin(b) if b.name == "Empty") {
         SmolStr::default()
     } else {
         e.base_type.to_smolstr()
     };
-    ElementInformation { id: e.id.clone(), type_name, offset }
+    ElementInformation { id: e.id.clone(), component_name, type_name, offset }
 }
 
 pub(crate) fn query_properties(
@@ -827,65 +836,79 @@ pub fn remove_binding(
 ) -> Result<lsp_types::WorkspaceEdit> {
     let source_file = element.with_element_node(|node| node.source_file.clone());
 
-    let range = find_property_binding_offset(element, property_name)
+    let token = find_property_binding_offset(element, property_name)
         .and_then(|offset| {
             element.with_element_node(|node| node.token_at_offset(offset.into()).right_biased())
         })
-        .and_then(|token| {
-            for ancestor in token.parent_ancestors() {
-                if (ancestor.kind() == SyntaxKind::Binding)
-                    || (ancestor.kind() == SyntaxKind::PropertyDeclaration)
-                {
-                    let start = {
-                        let token = left_extend(ancestor.first_token()?);
-                        let start = token.text_range().start();
-                        token
-                            .prev_token()
-                            .and_then(|t| {
-                                if t.kind() == SyntaxKind::Whitespace && t.text().contains('\n') {
-                                    let to_sub =
-                                        t.text().split('\n').next_back().unwrap_or_default().len()
-                                            as u32;
-                                    start.checked_sub(to_sub.into())
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(start)
-                    };
-                    let end = {
-                        let token = right_extend(ancestor.last_token()?);
-                        let end = token.text_range().end();
-                        token
-                            .next_token()
-                            .and_then(|t| {
-                                if t.kind() == SyntaxKind::Whitespace && t.text().contains('\n') {
-                                    let to_add =
-                                        t.text().split('\n').next().unwrap_or_default().len()
-                                            as u32;
-                                    end.checked_add((to_add + 1/* <cr> */).into())
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(end)
-                    };
+        .ok_or("Could not find property to delete.")?;
 
-                    return Some(util::text_range_to_lsp_range(
-                        &source_file,
-                        TextRange::new(start, end),
-                    ));
-                }
-                if ancestor.kind() == SyntaxKind::Element {
-                    // There should have been a binding before the element!
-                    break;
-                }
+    for ancestor in token.parent_ancestors() {
+        if ancestor.kind() == SyntaxKind::PropertyDeclaration {
+            let prop_decl = syntax_nodes::PropertyDeclaration::from(ancestor.clone());
+            let binding =
+                prop_decl.BindingExpression().ok_or("property declaration has no binding")?;
+            let colon = ancestor
+                .child_token(SyntaxKind::Colon)
+                .ok_or("property peclaration has no colon")?;
+            let start = colon.text_range().start();
+            if let Some(semi_colon) = binding.child_token(SyntaxKind::Semicolon) {
+                let end = semi_colon.text_range().start();
+                let range = util::text_range_to_lsp_range(&source_file, TextRange::new(start, end));
+                let edit = lsp_types::TextEdit { range, new_text: String::new() };
+                return Ok(common::create_workspace_edit(uri.clone(), version, vec![edit]));
+            } else if let Some(closing_brace) =
+                binding.CodeBlock().and_then(|cb| cb.child_token(SyntaxKind::RBrace))
+            {
+                let end = closing_brace.text_range().end();
+                let range = util::text_range_to_lsp_range(&source_file, TextRange::new(start, end));
+                let edit = lsp_types::TextEdit { range, new_text: ";".into() };
+                return Ok(common::create_workspace_edit(uri.clone(), version, vec![edit]));
+            } else {
+                return Err("Could not find end of range to delete.".into());
             }
-            None
-        })
-        .ok_or_else(|| Into::<common::Error>::into("Could not find range to delete."))?;
+        } else if ancestor.kind() == SyntaxKind::Binding {
+            let start = {
+                let token = left_extend(ancestor.first_token().ok_or("empty binding")?);
+                let start = token.text_range().start();
+                token
+                    .prev_token()
+                    .and_then(|t| {
+                        if t.kind() == SyntaxKind::Whitespace && t.text().contains('\n') {
+                            let to_sub =
+                                t.text().split('\n').next_back().unwrap_or_default().len() as u32;
+                            start.checked_sub(to_sub.into())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(start)
+            };
+            let end = {
+                let token = right_extend(ancestor.last_token().ok_or("empty binding")?);
+                let end = token.text_range().end();
+                token
+                    .next_token()
+                    .and_then(|t| {
+                        if t.kind() == SyntaxKind::Whitespace && t.text().contains('\n') {
+                            let to_add =
+                                t.text().split('\n').next().unwrap_or_default().len() as u32;
+                            end.checked_add((to_add + 1/* <cr> */).into())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(end)
+            };
 
-    Ok(create_workspace_edit_for_remove_binding(uri, version, range))
+            let range = util::text_range_to_lsp_range(&source_file, TextRange::new(start, end));
+            return Ok(create_workspace_edit_for_remove_binding(uri, version, range));
+        }
+        if ancestor.kind() == SyntaxKind::Element {
+            // There should have been a binding before the element!
+            break;
+        }
+    }
+    Err("Could not find range to delete.".into())
 }
 
 #[cfg(test)]
@@ -1910,5 +1933,112 @@ component MyComp {
         assert_eq!(&tc.new_text, "5px");
         assert_eq!(tc.range.start, lsp_types::Position { line: 17, character: 27 });
         assert_eq!(tc.range.end, lsp_types::Position { line: 17, character: 32 });
+    }
+
+    #[test]
+    fn test_remove_binding() {
+        let source = r#"
+component Foo inherits Window {
+    width: 30px;
+    background: red;
+    Foo { background: blue; }
+}
+"#;
+        let (dc, uri, _) = crate::language::test::loaded_document_cache(source.into());
+        let elem = dc
+            .element_at_offset(&uri, TextSize::new(source.find("Window").unwrap() as u32))
+            .unwrap();
+        let edit = remove_binding(uri.clone(), None, &elem, "background").unwrap();
+
+        let applied = crate::common::text_edit::apply_workspace_edit(&dc, &edit).unwrap();
+        assert_eq!(
+            applied.first().unwrap().contents,
+            r#"
+component Foo inherits Window {
+    width: 30px;
+    Foo { background: blue; }
+}
+"#
+        );
+
+        let elem = dc
+            .element_at_offset(&uri, TextSize::new(source.find("Foo {").unwrap() as u32))
+            .unwrap();
+        let edit = remove_binding(uri.clone(), None, &elem, "background").unwrap();
+
+        let applied = crate::common::text_edit::apply_workspace_edit(&dc, &edit).unwrap();
+        assert_eq!(
+            applied.first().unwrap().contents,
+            r#"
+component Foo inherits Window {
+    width: 30px;
+    background: red;
+    Foo {  }
+}
+"#
+        );
+    }
+
+    #[test]
+    fn test_remove_binding_in_declaration() {
+        let source = r#"
+component Foo inherits Window {
+    property <int> test1: 45 + 78; // comment
+    property <int> test2: {
+        return 4;
+    }
+    property <{x: int}> test3: { return { x: 0 }; };
+    background: violet;
+}
+"#;
+        let (dc, uri, _) = crate::language::test::loaded_document_cache(source.into());
+        let elem = dc
+            .element_at_offset(&uri, TextSize::new(source.find("Window").unwrap() as u32))
+            .unwrap();
+        let edit = remove_binding(uri.clone(), None, &elem, "test1").unwrap();
+        let applied = crate::common::text_edit::apply_workspace_edit(&dc, &edit).unwrap();
+        assert_eq!(
+            applied.first().unwrap().contents,
+            r#"
+component Foo inherits Window {
+    property <int> test1; // comment
+    property <int> test2: {
+        return 4;
+    }
+    property <{x: int}> test3: { return { x: 0 }; };
+    background: violet;
+}
+"#
+        );
+
+        let edit = remove_binding(uri.clone(), None, &elem, "test2").unwrap();
+        let applied = crate::common::text_edit::apply_workspace_edit(&dc, &edit).unwrap();
+        assert_eq!(
+            applied.first().unwrap().contents,
+            r#"
+component Foo inherits Window {
+    property <int> test1: 45 + 78; // comment
+    property <int> test2;
+    property <{x: int}> test3: { return { x: 0 }; };
+    background: violet;
+}
+"#
+        );
+
+        let edit = remove_binding(uri.clone(), None, &elem, "test3").unwrap();
+        let applied = crate::common::text_edit::apply_workspace_edit(&dc, &edit).unwrap();
+        assert_eq!(
+            applied.first().unwrap().contents,
+            r#"
+component Foo inherits Window {
+    property <int> test1: 45 + 78; // comment
+    property <int> test2: {
+        return 4;
+    }
+    property <{x: int}> test3;
+    background: violet;
+}
+"#
+        );
     }
 }

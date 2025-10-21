@@ -48,7 +48,7 @@ else()
         FetchContent_Declare(
             Slint
             GIT_REPOSITORY https://github.com/slint-ui/slint
-            GIT_TAG v1.13.0
+            GIT_TAG v1.14.0
             SOURCE_SUBDIR api/cpp
         )
         FetchContent_MakeAvailable(Slint)
@@ -56,3 +56,4 @@ else()
 endif()
 
 target_link_libraries(${COMPONENT_LIB} PUBLIC Slint::Slint)
+target_linker_script(${COMPONENT_LIB} INTERFACE "esp-println.x")

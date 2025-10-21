@@ -570,6 +570,10 @@ pub fn solve_box_layout(data: &BoxLayoutData, repeater_indexes: Slice<u32>) -> S
             let spacing = (size_without_padding - pref_size) / (num_spacings + 1 as Coord);
             Some((data.padding.begin + spacing / 2 as Coord, spacing))
         }
+        LayoutAlignment::SpaceEvenly => {
+            let spacing = (size_without_padding - pref_size) / (num_spacings + 2 as Coord);
+            Some((data.padding.begin + spacing, spacing))
+        }
     };
     if let Some((mut pos, spacing)) = align {
         for it in &mut layout_data {
@@ -624,10 +628,16 @@ pub fn box_layout_info(
     alignment: LayoutAlignment,
 ) -> LayoutInfo {
     let count = cells.len();
-    if count < 1 {
-        return LayoutInfo { max: 0 as _, ..LayoutInfo::default() };
-    };
     let is_stretch = alignment == LayoutAlignment::Stretch;
+    if count < 1 {
+        let mut info = LayoutInfo::default();
+        info.min = padding.begin + padding.end;
+        info.preferred = info.min;
+        if is_stretch {
+            info.max = info.min;
+        }
+        return info;
+    };
     let extra_w = padding.begin + padding.end + spacing * (count - 1) as Coord;
     let min = cells.iter().map(|c| c.constraint.min).sum::<Coord>() + extra_w;
     let max = if is_stretch {
@@ -641,12 +651,7 @@ pub fn box_layout_info(
 }
 
 pub fn box_layout_info_ortho(cells: Slice<BoxLayoutCellData>, padding: &Padding) -> LayoutInfo {
-    let count = cells.len();
-    if count < 1 {
-        return LayoutInfo { max: 0 as _, ..LayoutInfo::default() };
-    };
     let extra_w = padding.begin + padding.end;
-
     let mut fold =
         cells.iter().fold(LayoutInfo { stretch: f32::MAX, ..Default::default() }, |a, b| {
             a.merge(&b.constraint)
@@ -680,7 +685,7 @@ pub fn reorder_dialog_button_layout(cells: &mut [GridLayoutCellData], roles: &[D
 
     #[cfg(feature = "std")]
     fn is_kde() -> bool {
-        // assume some unix check if XDG_CURRENT_DESKTOP stats with K
+        // assume some Unix, check if XDG_CURRENT_DESKTOP starts with K
         std::env::var("XDG_CURRENT_DESKTOP")
             .ok()
             .and_then(|v| v.as_bytes().first().copied())

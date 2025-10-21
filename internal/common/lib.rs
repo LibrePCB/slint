@@ -3,14 +3,14 @@
 
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
-#![cfg_attr(not(feature = "shared-fontdb"), no_std)]
+#![cfg_attr(not(feature = "shared-fontique"), no_std)]
 
 pub mod builtin_structs;
 pub mod enums;
 pub mod key_codes;
 
-#[cfg(feature = "shared-fontdb")]
-pub mod sharedfontdb;
+#[cfg(feature = "shared-fontique")]
+pub mod sharedfontique;
 
 /// Detect the native style depending on the platform
 pub fn get_native_style(has_qt: bool, target: &str) -> &'static str {

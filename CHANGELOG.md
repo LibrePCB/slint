@@ -3,7 +3,90 @@
 # Changelog
 All notable changes to this project are documented in this file.
 
-## [1.13.0] - Unreleased
+## [1.14.0] - 2025-10-21
+
+### General
+
+ - Fixed panic when clicking outside of a menu for a ContextMenuArea that is in a condition
+ - Close active sibling popups before creating a new one (#9178)
+ - Skia/WGPU/DX12: Fixed crash when resizing window (#9320)
+ - Skia: Upgrade to skia-safe 0.88
+ - Android: Hide Android selection handles when scrolled out of view
+ - Wasm: fix mac-specific shortcut when detecting macOs via browser User-Agent
+ - macOs: Implement Cmd+Backspace to delete to the start of a line in a TextInput
+ - muda: On Windows, force the menu bar to be redrawn after menus are rebuilt (#9435)
+ - use `fontique` and `parley` crate for text layout
+ - Fixed maximum size of empty layout with alignment
+ - partial renderer: Don't mark region dirty if the geometry is dirty but hasn't changed
+ - Close PopupWindow when their parent is destroyed
+ - Fixed scrolling of ListView with varying item heights (#9208)
+ - Display the dirty region when running the software renderer with `SLINT_DEBUG_PERFORMANCE`.
+
+### Slint Language
+
+ - Added support for rotation and scaling of all elements and their children
+ - GridLayout: allow access to row/col/rowspan/colspan properties from other bindings
+ - Added `Math.sign()` (#9444)
+ - The slint compiler now emits a warning if a statement is without effect (#9474)
+ - Addded `LayoutAlignment.space-evenly` (#9545)
+
+### Widgets
+
+ - TextInput: don't allow undo/redo when read-only (#9609)
+ - Added Button::icon-size (#9279)
+ - Fixed TimePickerPopup placement logic (#9262)
+ - LineEdit: implemented show-password icon for the Qt style
+ - Slider: Fixed track geometry to account for handle size (#9449)
+ - Menu: fixed menu separator appearence (#8339)
+ - LineEdit: call `edited` callback when the "x" button is pressed
+ - ScrollView: Fixed scrolled callback with Qt style (#9574)
+ - TextEdit: made `has-focus` an `out` property
+
+### Rust
+
+ - Minimum Supported Rust Version (MSRV) is 1.88
+ - Slint macro: Use new Rust 1.88 API proc_macro API to be able to access file relative to the .rs file
+ - Fixed error in generated Rust code when convering some expressions to void
+ - Upgraded WGPU dependency to version 27: The `unstable-wgpu-27` Cargo feature exists next to the old `unstable-wgpu-26` feature,
+   alongside the `slint::wgpu_27` module.
+ - Added support for `unstable-wgpu-*` and `BackendSelector`'s `require_wgpu_*` on Android.
+
+### Python
+
+ - Added support for asyncio by making the Slint event loop act as asyncio event loop.
+ - Added suport for translations via `slint.init_translations()` accepting a `gettext.GNUTranslation`.
+ - Added support for using the `@slint.callback()` decorator with `async` functions, as long as they don't return any value.
+
+### Tools:
+
+ - SlintPad: add a way to load libraries with `?lib=...`
+ - live-preview: Added a context menu to the library panel to rename or preview components
+ - live-preview: Added search in the properties list
+ - live-preview: Fixed resizing elements not in layout
+ - live-preview: Fixed resetting binding of declared properties
+ - live-preview: Added a way to always see the code of properties
+ - live-preview: Added support for editing `@conical-gradient` in the color picker
+ - formatter: Format `import` statements
+
+## [1.13.1] - 2025-09-11
+
+ - Windows: Fixed flickering when updating the menu bar.
+ - LinuxKMS: Fixed build with just renderer-femtovg
+ - LinuxKMS: Fixed GPU based rendering on systems where the driver reported no DRM planes.
+ - Qt: use the cursor flash time from the config
+ - Fixed spurious Slint compiler error when using `ContextMenuArea` in component within a `if` or `for`
+ - C++: fixed the live preview feature missing the `slint_live_preview.h` header (#9335)
+ - FemtoVG: added support for conical gradients (#9334)
+ - FemtoVG: Fixed panic when using rendering notifiers in Wasm with WebGL.
+ - `SwipeGestureHandler`: improved thresholds and destection of move when embedded in another `SwipeGestureHandler`
+ - MCU: fix timer not starting if started before first call to `update_timers_and_animations`
+ - wasm: Fix sizing of the window based on the canvas size or the preferred size
+ - LSP: fix renaming elements id that have a `-` or `_` mismatch.
+ - live-preivew: allow to edit element id
+ - live-preview: search line edit for the library
+ - Slintpad: compress the snippet in the URL
+
+## [1.13.0] - 2025-09-03
 
 ### General
 
@@ -2030,3 +2113,5 @@ as well as the [Rust migration guide for the `sixtyfps` crate](api/rs/slint/migr
 [1.11.0]: https://github.com/slint-ui/slint/releases/tag/v1.11.0
 [1.12.0]: https://github.com/slint-ui/slint/releases/tag/v1.12.0
 [1.12.1]: https://github.com/slint-ui/slint/releases/tag/v1.12.1
+[1.13.0]: https://github.com/slint-ui/slint/releases/tag/v1.13.0
+[1.13.1]: https://github.com/slint-ui/slint/releases/tag/v1.13.1

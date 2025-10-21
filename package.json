@@ -1,6 +1,6 @@
 {
   "name": "slint_repository",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -10,16 +10,12 @@
     "lint:fix": "pnpm --stream -r lint:fix",
     "type-check": "pnpm --stream -r type-check"
   },
-  "packageManager": "pnpm@10.14.0",
+  "packageManager": "pnpm@10.18.2",
   "pnpm": {
     "onlyBuiltDependencies": [
       "@biomejs/biome",
       "esbuild",
       "sharp"
-    ],
-    "overrides": {
-      "brace-expansion@>=1.0.0 <=1.1.11": ">=1.1.12",
-      "brace-expansion@>=2.0.0 <=2.0.1": ">=2.0.2"
-    }
+    ]
   }
 }

@@ -1,13 +1,13 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-import { Palette, ScrollView }  from "std-widgets.slint";
+import { Palette, ScrollView, LineEdit }  from "std-widgets.slint";
 
 import { ExpandableGroup } from "../components/expandable-group.slint";
-
+import { ViewHeader } from "../components/widgets/basics.slint";
 import { Api, ElementInformation, PropertyGroup, PropertyInformation } from "../api.slint";
-import { EditorSpaceSettings, EditorSizeSettings, ConsoleStyles, Icons } from "../components/styling.slint";
-
+import { EditorSpaceSettings, EditorFontSettings, EditorSizeSettings, ConsoleStyles, Icons } from "../components/styling.slint";
+import { StringWidget } from "../components/widgets/string-widget.slint";
 import { PropertyInformationWidget } from "../components/property-widgets.slint";
 
 export component PropertyView inherits VerticalLayout {
@@ -17,52 +17,18 @@ export component PropertyView inherits VerticalLayout {
     in-out property <bool> properties-visible: false;
 
     property <length> key-width: self.width / 2.5;
-    property <bool> element-loaded: root.properties.length > 0;
+    property <bool> element-loaded: element-information.source-uri != "";
     in-out property <bool> enabled <=> sv.enabled;
     visible: root.properties-visible;
-    header := Rectangle {
-        height: ConsoleStyles.header-height;
-        background: ConsoleStyles.header-background;
-        Rectangle {
-            y: 0;
-            width: 100%;
-            height: 1px;
-            background: ConsoleStyles.divider-line;
-            opacity: 50%;
+    ViewHeader {
+        header-text: @tr("Properties");
+        hide-parent() => {
+            root.properties-visible = false;
         }
-
-        Rectangle {
-            y: parent.height - self.height;
-            width: 100%;
-            height: 1px;
-            background: ConsoleStyles.divider-line;
-        }
-
-        HorizontalLayout {
-            alignment: space-between;
-            padding-left: EditorSpaceSettings.default-padding;
-            padding-right: EditorSpaceSettings.default-padding;
-            label := Text {
-                horizontal-alignment: left;
-                vertical-alignment: center;
-                color: ConsoleStyles.text-color;
-                font-family: "Inter";
-                font-size: 12px;
-                text: @tr("Properties");
-            }
-
-            Image {
-                source: Icons.close;
-                colorize: ita.has-hover ? Palette.foreground : Palette.foreground.transparentize(0.5);
-                ita := TouchArea {
-                    clicked => {
-                        root.properties-visible = false;
-                    }
-                }
-            }
+        search-edited(text) => {
+            Api.properties-search(text);
         }
     }
-
     sv := ScrollView {
         vertical-scrollbar-policy: ScrollBarPolicy.always-on;
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -79,6 +45,35 @@ export component PropertyView inherits VerticalLayout {
                 alignment: start;
                 spacing: EditorSpaceSettings.default-spacing;
                 padding-top: EditorSpaceSettings.default-padding;
+                if element-information.id != "root": VerticalLayout {
+                    padding: EditorSpaceSettings.default-padding;
+                    spacing: EditorSpaceSettings.default-spacing / 4;
+                    Text {
+                        text: "id";
+                        font-weight: element-information.id != "" ? EditorFontSettings.regular-font-weight : EditorFontSettings.light-font-weight;
+                        font-italic: element-information.id != "" ? false : true;
+                        opacity: element-information.id != "" ? 1.0 : 0.5;
+                    }
+
+                    LineEdit {
+                        enabled: sv.enabled;
+                        property <string> id: element-information.id;
+                        changed id => {
+                            self.text = id;
+                        }
+                        text: id;
+                        accepted(text) => {
+                            Api.set-element-id(
+                                element-information.source-uri,
+                                element-information.source-version,
+                                element-information.offset,
+                                text,
+                            );
+                            // Resets to the original, and the updated name will be updated after we recompiled
+                            self.text = id;
+                        }
+                    }
+                }
                 for group in root.properties: VerticalLayout {
 
                     eg := ExpandableGroup {
@@ -86,7 +81,7 @@ export component PropertyView inherits VerticalLayout {
 
                         enabled: sv.enabled;
 
-                        text: group.group-name;
+                        text: group.group-name != "" ? group.group-name : root.element-information.component-name;
                         panel-width: root.width;
 
                         VerticalLayout {

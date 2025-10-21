@@ -26,9 +26,6 @@ jobs:
 #                    - runner: windows-11-arm
 #                      target: aarch64
 #                      container: auto
-                    - runner: macos-13
-                      target: x86_64
-                      container: auto
                     - runner: macos-14
                       target: aarch64
                       container: auto
@@ -46,7 +43,7 @@ jobs:
             - uses: actions/checkout@v5
             - uses: ./.github/actions/install-linux-dependencies
               if: runner.os == 'Linux'
-            - uses: actions/setup-python@v5
+            - uses: actions/setup-python@v6
               with:
                 python-version: '3.12'
             - uses: ./.github/actions/setup-rust
@@ -101,7 +98,7 @@ jobs:
             - uses: ./.github/actions/setup-rust
               with:
                   target: aarch64-apple-ios
-            - uses: actions/setup-python@v5
+            - uses: actions/setup-python@v6
               with:
                 python-version: '3.12'
             - uses: baptiste0928/cargo-install@v3

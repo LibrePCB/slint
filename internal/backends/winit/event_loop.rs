@@ -197,28 +197,19 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                     .err();
             }
             WindowEvent::Focused(have_focus) => {
+                // Work around https://github.com/rust-windowing/winit/issues/4371
+                let have_focus = if cfg!(target_os = "macos") {
+                    window.winit_window().map_or(have_focus, |w| w.has_focus())
+                } else {
+                    have_focus
+                };
                 self.loop_error = window.activation_changed(have_focus).err();
             }
 
             WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
                 let key_code = event.logical_key;
                 // For now: Match Qt's behavior of mapping command to control and control to meta (LWin/RWin).
-                cfg_if::cfg_if!(
-                    if #[cfg(target_vendor = "apple")] {
-                        let swap_cmd_ctrl = true;
-                    } else if #[cfg(target_family = "wasm")] {
-                        let swap_cmd_ctrl = web_sys::window()
-                            .and_then(|window| window.navigator().platform().ok())
-                            .is_some_and(|platform| {
-                                let platform = platform.to_ascii_lowercase();
-                                platform.contains("mac")
-                                    || platform.contains("iphone")
-                                    || platform.contains("ipad")
-                            });
-                    } else {
-                        let swap_cmd_ctrl = false;
-                    }
-                );
+                let swap_cmd_ctrl = i_slint_core::is_apple_platform();
 
                 let key_code = if swap_cmd_ctrl {
                     match key_code {

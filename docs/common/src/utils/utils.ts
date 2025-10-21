@@ -17,7 +17,7 @@ export async function getEnumContent(enumName: string | undefined) {
     if (enumName) {
         try {
             const module = await import(
-                `../content/collections/enums/${enumName}.md`
+                `../../../astro/src/content/collections/enums/${enumName}.md`
             );
             return module.compiledContent();
         } catch (error) {
@@ -39,7 +39,7 @@ export async function getStructContent(
     if (baseStruct === "Time" || baseStruct === "Date") {
         try {
             const module = await import(
-                `../content/collections/std-widgets/${baseStruct}.md`
+                `../../../astro/src/content/collections/std-widgets/${baseStruct}.md`
             );
             return module.compiledContent();
         } catch (error) {
@@ -51,7 +51,7 @@ export async function getStructContent(
     if (baseStruct) {
         try {
             const module = await import(
-                `../content/collections/structs/${baseStruct}.md`
+                `../../../astro/src/content/collections/structs/${baseStruct}.md`
             );
             return module.compiledContent();
         } catch (error) {
@@ -126,7 +126,7 @@ export function getTypeInfo(typeName: KnownType): TypeInfo {
             };
         case "enum":
             return {
-                href: "", // No need to link here!
+                href: linkMap.EnumType.href,
                 defaultValue: "the first enum value",
             };
         case "float":

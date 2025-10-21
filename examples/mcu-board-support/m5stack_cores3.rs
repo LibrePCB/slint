@@ -6,6 +6,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     esp_println::println!("Panic: {:?}", info);
     loop {}
 }
+esp_bootloader_esp_idf::esp_app_desc!();
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;

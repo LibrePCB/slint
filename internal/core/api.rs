@@ -285,6 +285,23 @@ pub enum GraphicsAPI<'a> {
         /// The WGPU queue for used for command submission.
         queue: wgpu_26::Queue,
     },
+    /// The rendering is based on WGPU 27.x. Use the provided fields to submit commits to the provided
+    /// WGPU command queue.
+    ///
+    /// *Note*: This function is behind the [`unstable-wgpu-27` feature flag](slint:rust:slint/docs/cargo_features/#backends)
+    ///         and may be removed or changed in future minor releases, as new major WGPU releases become available.
+    ///
+    /// See also the [`slint::wgpu_27`](slint:rust:slint/wgpu_27) module.
+    #[cfg(feature = "unstable-wgpu-27")]
+    #[non_exhaustive]
+    WGPU27 {
+        /// The WGPU instance used for rendering.
+        instance: wgpu_27::Instance,
+        /// The WGPU device used for rendering.
+        device: wgpu_27::Device,
+        /// The WGPU queue for used for command submission.
+        queue: wgpu_27::Queue,
+    },
 }
 
 impl core::fmt::Debug for GraphicsAPI<'_> {
@@ -296,6 +313,8 @@ impl core::fmt::Debug for GraphicsAPI<'_> {
             }
             #[cfg(feature = "unstable-wgpu-26")]
             GraphicsAPI::WGPU26 { .. } => write!(f, "GraphicsAPI::WGPU26"),
+            #[cfg(feature = "unstable-wgpu-27")]
+            GraphicsAPI::WGPU27 { .. } => write!(f, "GraphicsAPI::WGPU27"),
         }
     }
 }
@@ -679,7 +698,14 @@ impl Window {
     }
 
     /// Returns a struct that implements the raw window handle traits to access the windowing system specific window
-    /// and display handles. This function is only accessible if you enable the `raw-window-handle-06` crate feature.
+    /// and display handles.
+    ///
+    /// Note that the window handle may only become available after the window has been created by the window manager,
+    /// which typically occurs after at least one iteration of the event loop following a call to `show()`.
+    ///
+    /// Support for this function depends on the platform backend.
+    ///
+    /// This function is only accessible if you enable the `raw-window-handle-06` crate feature.
     #[cfg(feature = "raw-window-handle-06")]
     pub fn window_handle(&self) -> WindowHandle {
         let adapter = self.0.window_adapter();

@@ -12,7 +12,7 @@ use i_slint_compiler::{
     parser::{syntax_nodes, SyntaxKind, TextRange},
 };
 
-use slint::{SharedString, VecModel};
+use slint::{Model as _, SharedString, VecModel};
 
 use crate::{
     common,
@@ -207,7 +207,7 @@ pub fn map_properties_to_ui(
 ) -> Option<(
     ui::ElementInformation,
     HashMap<SmolStr, ui::PropertyDeclaration>,
-    ui::PropertyGroupModel,
+    Rc<ui::search_model::SearchModel<ui::PropertyGroup>>,
 )> {
     use std::cmp::Ordering;
 
@@ -265,33 +265,57 @@ pub fn map_properties_to_ui(
         .cloned()
         .collect::<Vec<_>>();
 
+    type InnerGroupModel = ui::search_model::SearchModel<ui::PropertyInformation>;
+
     Some((
         ui::ElementInformation {
             id: element.id.as_str().into(),
+            component_name: element.component_name.as_str().into(),
             type_name: element.type_name.as_str().into(),
             source_uri,
             source_version,
             offset: u32::from(element.offset) as i32,
         },
         declarations,
-        Rc::new(VecModel::from(
-            keys.iter()
-                .map(|k| ui::PropertyGroup {
-                    group_name: k.0.as_str().into(),
-                    properties: Rc::new(VecModel::from({
-                        let mut v = property_groups.remove(k).unwrap();
-                        v.sort_by(|a, b| match a.display_priority.cmp(&b.display_priority) {
-                            Ordering::Less => Ordering::Less,
-                            Ordering::Equal => a.name.cmp(&b.name),
-                            Ordering::Greater => Ordering::Greater,
-                        });
-                        v
-                    }))
-                    .into(),
-                })
-                .collect::<Vec<_>>(),
-        ))
-        .into(),
+        Rc::new(ui::search_model::SearchModel::new(
+            VecModel::from(
+                keys.iter()
+                    .map(|k| ui::PropertyGroup {
+                        group_name: k.0.as_str().into(),
+                        properties: Rc::new(InnerGroupModel::new(
+                            VecModel::from({
+                                let mut v = property_groups.remove(k).unwrap();
+                                v.sort_by(|a, b| {
+                                    match a.display_priority.cmp(&b.display_priority) {
+                                        Ordering::Less => Ordering::Less,
+                                        Ordering::Equal => a.name.cmp(&b.name),
+                                        Ordering::Greater => Ordering::Greater,
+                                    }
+                                });
+                                v
+                            }),
+                            |i, search_str| ui::search_model::contains(&i.name, search_str),
+                        ))
+                        .into(),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            |group, search_str| {
+                let yes = search_str.is_empty()
+                    || ui::search_model::contains(&group.group_name, search_str);
+                if let Some(sub_filter) =
+                    group.properties.as_any().downcast_ref::<InnerGroupModel>()
+                {
+                    if yes {
+                        sub_filter.set_search_text(Default::default());
+                    } else {
+                        sub_filter.set_search_text(search_str.clone());
+                        return sub_filter.row_count() > 0;
+                    }
+                }
+                yes
+            },
+        )),
     ))
 }
 
@@ -946,6 +970,7 @@ export component Test { in property <Foobar> test1; }"#,
 
     #[test]
     fn test_property_brush() {
+        use crate::preview::ui::GradientStop;
         let result =
             property_conversion_test(r#"export component Test { in property <brush> test1; }"#, 0);
         assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
@@ -1036,6 +1061,32 @@ export component Test { in property <Foobar> test1; }"#,
         assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
         assert_eq!(result.kind, ui::PropertyValueKind::Code);
         assert!(matches!(result.brush_kind, ui::BrushKind::Radial));
+
+        let result = property_conversion_test(
+            r#"export component Test { in property <brush> test1: @conic-gradient(white 36deg, #239 126deg, red 306deg); }"#,
+            1,
+        );
+        assert_eq!(result.value_kind, ui::PropertyValueKind::Brush);
+        assert_eq!(result.kind, ui::PropertyValueKind::Brush);
+        assert_eq!(result.brush_kind, ui::BrushKind::Conic);
+        assert_eq!(
+            result.gradient_stops.iter().collect::<Vec<_>>(),
+            [
+                GradientStop {
+                    color: slint::Color::from_rgb_u8(0xff, 0xff, 0xff,),
+                    position: 36.0 / 360.0
+                },
+                GradientStop {
+                    color: slint::Color::from_rgb_u8(0x22, 0x33, 0x99),
+                    position: 126.0 / 360.0
+                },
+                GradientStop {
+                    color: slint::Color::from_rgb_u8(0xff, 0x00, 0x00),
+                    position: 306.0 / 360.0
+                },
+            ]
+        );
+        assert_eq!(result.code, "@conic-gradient(white 36deg, #239 126deg, red 306deg)");
     }
 
     #[test]

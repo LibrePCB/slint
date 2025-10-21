@@ -29,16 +29,17 @@ jobs:
             RELEASE_INPUT: ${{ inputs.release }}
         steps:
             - uses: actions/checkout@v5
-            - uses: pnpm/action-setup@v4.1.0
+            - uses: pnpm/action-setup@v4.2.0
               with:
-                version: 10.14.0
+                version: 10.18.2
             - name: Set up crate rustdoc link
               run: |
                   rgb_version=`grep 'rgb = '  internal/core/Cargo.toml | sed 's/^.*"\(.*\)"/\1/'`
                   echo "RUSTDOCFLAGS=$RUSTDOCFLAGS --extern-html-root-url rgb=https://docs.rs/rgb/$rgb_version/ --extern-html-root-url android_activity=https://docs.rs/android-activity/0.5/ --extern-html-root-url raw_window_handle=https://docs.rs/raw_window_handle/0.6 --extern-html-root-url winit=https://docs.rs/winit/0.30 --extern-html-root-url wgpu=https://docs.rs/wgpu/26 --extern-html-root-url input=https://docs.rs/input/0.9" >> $GITHUB_ENV
-            - uses: actions/setup-node@v4
+            - uses: actions/setup-node@v6
               with:
                 node-version: 20
+                package-manager-cache: false
             - uses: ./.github/actions/install-linux-dependencies
             - name: Install MS fonts for comic sans needed by one of the screenshots in the docs
               run: |
@@ -56,7 +57,7 @@ jobs:
                   crate: cargo-about
                   version: "=0.6.6"
             - name: Install uv
-              uses: astral-sh/setup-uv@v6
+              uses: astral-sh/setup-uv@v7
             - name: Remove docs from cache # Avoid stale docs
               run: |
                   rm -rf target/doc target/cppdocs api/node/docs

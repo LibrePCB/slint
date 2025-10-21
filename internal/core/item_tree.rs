@@ -74,8 +74,6 @@ pub struct ItemTreeVTable {
     ),
 
     /// Return the item tree that is defined by this `ItemTree`.
-    /// The return value is an item weak because it can be null if there is no parent.
-    /// And the return value is passed by &mut because ItemWeak has a destructor
     pub get_item_tree: extern "C" fn(::core::pin::Pin<VRef<ItemTreeVTable>>) -> Slice<ItemTreeNode>,
 
     /// Return the node this ItemTree is a part of in the parent ItemTree.
@@ -84,6 +82,7 @@ pub struct ItemTreeVTable {
     /// And the return value is passed by &mut because ItemWeak has a destructor
     /// Note that the returned value will typically point to a repeater node, which is
     /// strictly speaking not an Item at all!
+    ///
     pub parent_node: extern "C" fn(::core::pin::Pin<VRef<ItemTreeVTable>>, result: &mut ItemWeak),
 
     /// This embeds this ItemTree into the item tree of another ItemTree
@@ -197,6 +196,17 @@ pub fn unregister_item_tree<Base>(
     ).expect("Fatal error encountered when freeing graphics resources while destroying Slint component");
     if let Some(w) = window_adapter.internal(crate::InternalToken) {
         w.unregister_item_tree(item_tree, &mut item_array.iter().map(|item| item.apply_pin(base)));
+    }
+
+    // Close popups that were part of a component that just got deleted
+    let window_inner = crate::window::WindowInner::from_pub(window_adapter.window());
+    let to_close_popups = window_inner
+        .active_popups()
+        .iter()
+        .filter_map(|p| p.parent_item.upgrade().is_none().then_some(p.popup_id))
+        .collect::<Vec<_>>();
+    for popup_id in to_close_popups {
+        window_inner.close_popup(popup_id);
     }
 }
 
@@ -462,8 +472,17 @@ impl ItemRc {
     pub fn map_to_window(&self, p: LogicalPoint) -> LogicalPoint {
         let mut current = self.clone();
         let mut result = p;
+        let supports_transformations = self
+            .window_adapter()
+            .map(|adapter| adapter.renderer().supports_transformations())
+            .unwrap_or(true);
         while let Some(parent) = current.parent_item(ParentItemTraversalMode::StopAtPopups) {
             let geometry = parent.geometry();
+            if supports_transformations {
+                if let Some(transform) = parent.children_transform() {
+                    result = transform.transform_point(result.cast()).cast();
+                }
+            }
             result += geometry.origin.to_vector();
             current = parent.clone();
         }
@@ -482,11 +501,20 @@ impl ItemRc {
         if current.is_root_item_of(item_tree) {
             return result;
         }
+        let supports_transformations = self
+            .window_adapter()
+            .map(|adapter| adapter.renderer().supports_transformations())
+            .unwrap_or(true);
         while let Some(parent) = current.parent_item(ParentItemTraversalMode::StopAtPopups) {
             if parent.is_root_item_of(item_tree) {
                 break;
             }
             let geometry = parent.geometry();
+            if supports_transformations {
+                if let Some(transform) = parent.children_transform() {
+                    result = transform.transform_point(result.cast()).cast();
+                }
+            }
             result += geometry.origin.to_vector();
             current = parent.clone();
         }
@@ -808,18 +836,25 @@ impl ItemRc {
     /// Returns the transform to apply to children to map them into the local coordinate space of this item.
     /// Typically this is None, but rotation for example may return Some.
     pub fn children_transform(&self) -> Option<ItemTransform> {
-        self.downcast::<crate::items::Rotate>().map(|rotate_item| {
-            let origin = euclid::Vector2D::<f32, crate::lengths::LogicalPx>::from_lengths(
-                rotate_item.as_pin_ref().rotation_origin_x().cast(),
-                rotate_item.as_pin_ref().rotation_origin_y().cast(),
-            );
+        self.downcast::<crate::items::Transform>().map(|transform_item| {
+            let item = transform_item.as_pin_ref();
+            let origin = item.transform_origin().to_euclid().to_vector().cast::<f32>();
             ItemTransform::translation(-origin.x, -origin.y)
                 .cast()
-                .then_rotate(euclid::Angle {
-                    radians: rotate_item.as_pin_ref().rotation_angle().to_radians(),
-                })
+                .then_scale(item.transform_scale_x(), item.transform_scale_y())
+                .then_rotate(euclid::Angle { radians: item.transform_rotation().to_radians() })
                 .then_translate(origin)
         })
+    }
+
+    /// Returns the inverse of the children transform.
+    ///
+    /// None if children_transform is None or in the case of
+    /// non-invertible transforms (which should be extremely rare).
+    pub fn inverse_children_transform(&self) -> Option<ItemTransform> {
+        self.children_transform()
+            // Should practically always be possible.
+            .and_then(|child_transform| child_transform.inverse())
     }
 }
 
@@ -1080,6 +1115,7 @@ impl<T: FnMut(&ItemTreeRc, u32, Pin<ItemRef>) -> VisitChildrenResult> ItemVisito
 }
 pub enum ItemVisitorResult<State> {
     Continue(State),
+    SkipChildren,
     Abort,
 }
 
@@ -1110,7 +1146,7 @@ fn visit_internal<State>(
                 ItemVisitorResult::Continue(state) => {
                     visit_internal(item_tree, order, visitor, index as isize, &state)
                 }
-
+                ItemVisitorResult::SkipChildren => VisitChildrenResult::CONTINUE,
                 ItemVisitorResult::Abort => VisitChildrenResult::abort(index, 0),
             }
         };

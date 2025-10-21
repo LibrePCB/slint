@@ -57,7 +57,6 @@ component SelectionFrame {
 
     private property <color> selection-color: pick-selection-color(root.selection);
 
-
     property <bool> had-drag-distance: false;
 
     callback resize(x: length, y: length, width: length, height: length);
@@ -321,7 +320,7 @@ export component PreviewView inherits Rectangle {
 
                                 component-factory: root.preview-area;
 
-                            // The width and the height can't depend on the layout info of the inner item otherwise this would
+                                // The width and the height can't depend on the layout info of the inner item otherwise this would
                             // cause a recursion if this happens (#3989)
                             // Instead, we use a init function to initialize
                             width: 0px;
@@ -422,7 +421,8 @@ export component PreviewView inherits Rectangle {
                             y: s.y;
                             width: s.width;
                             height: s.height;
-                            interactive: root.mode == DrawAreaMode.selecting;
+                            transform-rotation: s.angle;
+                            interactive: root.mode == DrawAreaMode.selecting && s.angle == 0.0;
                             selection: Api.selection;
                             is-primary: self.selection.highlight-index == idx;
                             resize(x, y, w, h) => {

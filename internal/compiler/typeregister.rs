@@ -82,7 +82,7 @@ pub struct BuiltinTypes {
     pub enums: BuiltinEnums,
     pub noarg_callback_type: Type,
     pub strarg_callback_type: Type,
-    pub logical_point_type: Type,
+    pub logical_point_type: Rc<Struct>,
     pub font_metrics_type: Type,
     pub layout_info_type: Rc<Struct>,
     pub path_element_type: Type,
@@ -107,7 +107,7 @@ impl BuiltinTypes {
         });
         Self {
             enums: BuiltinEnums::new(),
-            logical_point_type: Type::Struct(Rc::new(Struct {
+            logical_point_type: Rc::new(Struct {
                 fields: IntoIterator::into_iter([
                     (SmolStr::new_static("x"), Type::LogicalLength),
                     (SmolStr::new_static("y"), Type::LogicalLength),
@@ -116,7 +116,7 @@ impl BuiltinTypes {
                 name: Some("slint::LogicalPosition".into()),
                 node: None,
                 rust_attributes: None,
-            })),
+            }),
             font_metrics_type: Type::Struct(Rc::new(Struct {
                 fields: IntoIterator::into_iter([
                     (SmolStr::new_static("ascent"), Type::LogicalLength),
@@ -175,11 +175,19 @@ pub const RESERVED_DROP_SHADOW_PROPERTIES: &[(&str, Type)] = &[
     ("drop-shadow-color", Type::Color),
 ];
 
-pub const RESERVED_ROTATION_PROPERTIES: &[(&str, Type)] = &[
-    ("rotation-angle", Type::Angle),
-    ("rotation-origin-x", Type::LogicalLength),
-    ("rotation-origin-y", Type::LogicalLength),
+pub const RESERVED_TRANSFORM_PROPERTIES: &[(&str, Type)] = &[
+    ("transform-rotation", Type::Angle),
+    ("transform-scale-x", Type::Float32),
+    ("transform-scale-y", Type::Float32),
+    ("transform-scale", Type::Float32),
 ];
+
+pub fn transform_origin_property() -> (&'static str, Rc<Struct>) {
+    ("transform-origin", logical_point_type())
+}
+
+pub const DEPRECATED_ROTATION_ORIGIN_PROPERTIES: [(&str, Type); 2] =
+    [("rotation-origin-x", Type::LogicalLength), ("rotation-origin-y", Type::LogicalLength)];
 
 pub fn noarg_callback_type() -> Type {
     BUILTIN.with(|types| types.noarg_callback_type.clone())
@@ -226,8 +234,13 @@ pub fn reserved_properties() -> impl Iterator<Item = (&'static str, Type, Proper
         .chain(RESERVED_LAYOUT_PROPERTIES.iter())
         .chain(RESERVED_OTHER_PROPERTIES.iter())
         .chain(RESERVED_DROP_SHADOW_PROPERTIES.iter())
-        .chain(RESERVED_ROTATION_PROPERTIES.iter())
+        .chain(RESERVED_TRANSFORM_PROPERTIES.iter())
+        .chain(DEPRECATED_ROTATION_ORIGIN_PROPERTIES.iter())
         .map(|(k, v)| (*k, v.clone(), PropertyVisibility::Input))
+        .chain(
+            std::iter::once(transform_origin_property())
+                .map(|(k, v)| (k, v.into(), PropertyVisibility::Input)),
+        )
         .chain(reserved_accessibility_properties().map(|(k, v)| (k, v, PropertyVisibility::Input)))
         .chain(
             RESERVED_GRIDLAYOUT_PROPERTIES
@@ -235,7 +248,7 @@ pub fn reserved_properties() -> impl Iterator<Item = (&'static str, Type, Proper
                 .map(|(k, v)| (*k, v.clone(), PropertyVisibility::Constexpr)),
         )
         .chain(IntoIterator::into_iter([
-            ("absolute-position", logical_point_type(), PropertyVisibility::Output),
+            ("absolute-position", logical_point_type().into(), PropertyVisibility::Output),
             ("forward-focus", Type::ElementReference, PropertyVisibility::Constexpr),
             (
                 "focus",
@@ -262,23 +275,23 @@ pub fn reserved_properties() -> impl Iterator<Item = (&'static str, Type, Proper
 }
 
 /// lookup reserved property injected in every item
-pub fn reserved_property(name: &str) -> PropertyLookupResult<'_> {
+pub fn reserved_property(name: std::borrow::Cow<'_, str>) -> PropertyLookupResult<'_> {
     thread_local! {
         static RESERVED_PROPERTIES: HashMap<&'static str, (Type, PropertyVisibility, Option<BuiltinFunction>)>
             = reserved_properties().map(|(name, ty, visibility)| (name, (ty, visibility, reserved_member_function(name)))).collect();
     }
-    if let Some(result) = RESERVED_PROPERTIES.with(|reserved| {
-        reserved.get(name).map(|(ty, visibility, builtin_function)| PropertyLookupResult {
-            property_type: ty.clone(),
-            resolved_name: name.into(),
+    if let Some((ty, visibility, builtin_function)) =
+        RESERVED_PROPERTIES.with(|reserved| reserved.get(name.as_ref()).cloned())
+    {
+        return PropertyLookupResult {
+            property_type: ty,
+            resolved_name: name,
             is_local_to_component: false,
             is_in_direct_base: false,
-            property_visibility: *visibility,
+            property_visibility: visibility,
             declared_pure: None,
-            builtin_function: builtin_function.clone(),
-        })
-    }) {
-        return result;
+            builtin_function,
+        };
     }
 
     // Report deprecated known reserved properties (maximum_width, minimum_height, ...)
@@ -301,7 +314,7 @@ pub fn reserved_property(name: &str) -> PropertyLookupResult<'_> {
             }
         }
     }
-    PropertyLookupResult::invalid(name.into())
+    PropertyLookupResult::invalid(name)
 }
 
 /// These member functions are injected in every time
@@ -388,7 +401,7 @@ impl TypeRegister {
         register.insert_type(Type::Angle);
         register.insert_type(Type::Brush);
         register.insert_type(Type::Rem);
-        register.types.insert("Point".into(), logical_point_type());
+        register.types.insert("Point".into(), logical_point_type().into());
 
         BUILTIN.with(|e| e.enums.fill_register(&mut register));
 
@@ -408,7 +421,7 @@ impl TypeRegister {
             ($pub_type:ident, SharedString) => { Type::String };
             ($pub_type:ident, Image) => { Type::Image };
             ($pub_type:ident, Coord) => { Type::LogicalLength };
-            ($pub_type:ident, LogicalPosition) => { logical_point_type() };
+            ($pub_type:ident, LogicalPosition) => { Type::Struct(logical_point_type()) };
             ($pub_type:ident, KeyboardModifiers) => { $pub_type.clone() };
             ($pub_type:ident, $_:ident) => {
                 BUILTIN.with(|e| Type::Enumeration(e.enums.$pub_type.clone()))
@@ -572,6 +585,8 @@ impl TypeRegister {
         register.elements.remove("DropArea").unwrap();
         register.types.remove("DropEvent").unwrap(); // Also removed in xtask/src/slintdocs.rs
 
+        register.elements.remove("MarkdownText").unwrap();
+
         Rc::new(RefCell::new(register))
     }
 
@@ -703,7 +718,7 @@ impl TypeRegister {
     }
 }
 
-pub fn logical_point_type() -> Type {
+pub fn logical_point_type() -> Rc<Struct> {
     BUILTIN.with(|types| types.logical_point_type.clone())
 }
 

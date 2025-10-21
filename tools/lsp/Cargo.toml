@@ -10,13 +10,13 @@ homepage = "https://slint.dev"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "1.13.0"
+version = "1.14.0"
 categories = ["gui", "development-tools", "command-line-utilities"]
 keywords = ["lsp", "ui", "toolkit"]
 
 [package.metadata.bundle]
 name = "Slint Live Preview"
-icon = ["../../logo/slint-logo-small-light.png"]
+icon = ["../../logo/slint-logo.icns"]
 
 [[bin]]
 name = "slint-lsp"
