@@ -5356,6 +5356,7 @@ dependencies = [
  "i-slint-compiler",
  "proc-macro2",
  "quote",
+ "rustversion",
  "spin_on",
 ]
 
