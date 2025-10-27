@@ -1015,7 +1015,7 @@ checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.1.14",
+ "unicode-width",
 ]
 
 [[package]]
@@ -1695,9 +1695,9 @@ dependencies = [
 
 [[package]]
 name = "fdsm"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfe01693c5c6be0aa2c245b53aad92a84bcfd21c110a0c0a8edd35e1d0543a70"
+checksum = "f43e408596ca74d9c9a44f5d4fd110628c54f38c22e03edef7f112e935c15e41"
 dependencies = [
  "image",
  "nalgebra",
@@ -1706,9 +1706,9 @@ dependencies = [
 
 [[package]]
 name = "fdsm-ttf-parser"
-version = "0.1.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da69f821c354eae5089ee697100f9f093d99c9e07a670a59843d65b0f49f95f6"
+checksum = "803b1b40e898def21bc6f97335da11dffdca865f2c603b41d71ab81d310808df"
 dependencies = [
  "fdsm",
  "image",
@@ -2040,7 +2040,7 @@ version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
 dependencies = [
- "unicode-width 0.2.2",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2112,6 +2112,102 @@ dependencies = [
  "log",
  "xml-rs",
 ]
+
+[[package]]
+name = "glam"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "333928d5eb103c5d4050533cec0384302db6be8ef7d3cebd30ec6a35350353da"
+
+[[package]]
+name = "glam"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3abb554f8ee44336b72d522e0a7fe86a29e09f839a36022fa869a7dfe941a54b"
+
+[[package]]
+name = "glam"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4126c0479ccf7e8664c36a2d719f5f2c140fbb4f9090008098d2c291fa5b3f16"
+
+[[package]]
+name = "glam"
+version = "0.17.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01732b97afd8508eee3333a541b9f7610f454bb818669e66e90f5f57c93a776"
+
+[[package]]
+name = "glam"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525a3e490ba77b8e326fb67d4b44b4bd2f920f44d4cc73ccec50adc68e3bee34"
+
+[[package]]
+name = "glam"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b8509e6791516e81c1a630d0bd7fbac36d2fa8712a9da8662e716b52d5051ca"
+
+[[package]]
+name = "glam"
+version = "0.20.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f43e957e744be03f5801a55472f593d43fabdebf25a4585db250f04d86b1675f"
+
+[[package]]
+name = "glam"
+version = "0.21.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "518faa5064866338b013ff9b2350dc318e14cc4fcd6cb8206d7e7c9886c98815"
+
+[[package]]
+name = "glam"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12f597d56c1bd55a811a1be189459e8fad2bbc272616375602443bdfb37fa774"
+
+[[package]]
+name = "glam"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e4afd9ad95555081e109fe1d21f2a30c691b5f0919c67dfa690a2e1eb6bd51c"
+
+[[package]]
+name = "glam"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5418c17512bdf42730f9032c74e1ae39afc408745ebb2acf72fbc4691c17945"
+
+[[package]]
+name = "glam"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "151665d9be52f9bb40fc7966565d39666f2d1e69233571b71b87791c7e0528b3"
+
+[[package]]
+name = "glam"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e05e7e6723e3455f4818c7b26e855439f7546cf617ef669d1adedb8669e5cb9"
+
+[[package]]
+name = "glam"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "779ae4bf7e8421cf91c0b3b64e7e8b40b862fba4d393f59150042de7c4965a94"
+
+[[package]]
+name = "glam"
+version = "0.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8babf46d4c1c9d92deac9f7be466f76dfc4482b6452fc5024b5e8daf6ffeb3ee"
+
+[[package]]
+name = "glam"
+version = "0.30.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e12d847aeb25f41be4c0ec9587d624e9cd631bc007a8fd7ce3f5851e064c6460"
 
 [[package]]
 name = "glob"
@@ -2357,7 +2453,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "i-slint-backend-android-activity"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "android-activity 0.5.2",
  "android-activity 0.6.0",
@@ -2372,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-linuxkms"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "bytemuck",
  "calloop 0.14.2",
@@ -2394,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-qt"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "const-field-offset",
  "cpp",
@@ -2411,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-selector"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "cfg-if",
  "i-slint-backend-android-activity",
@@ -2429,7 +2525,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-testing"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "async-net",
  "byteorder",
@@ -2447,7 +2543,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-backend-winit"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2486,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-common"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "fontique",
  "ttf-parser 0.25.1",
@@ -2494,7 +2590,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-compiler"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "by_address",
  "codemap",
@@ -2528,7 +2624,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-core"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "async-compat",
  "auto_enums",
@@ -2591,7 +2687,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-core-macros"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "quote",
  "serde_json",
@@ -2600,14 +2696,14 @@ dependencies = [
 
 [[package]]
 name = "i-slint-parser-test-macro"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "quote",
 ]
 
 [[package]]
 name = "i-slint-renderer-femtovg"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "cfg-if",
  "const-field-offset",
@@ -2629,7 +2725,7 @@ dependencies = [
 
 [[package]]
 name = "i-slint-renderer-skia"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "ash",
  "bytemuck",
@@ -3421,7 +3517,7 @@ dependencies = [
 
 [[package]]
 name = "material-gallery"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
@@ -3608,11 +3704,27 @@ dependencies = [
 
 [[package]]
 name = "nalgebra"
-version = "0.33.2"
+version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26aecdf64b707efd1310e3544d709c5c0ac61c13756046aaaba41be5c4f66a3b"
+checksum = "c4d5b3eff5cd580f93da45e64715e8c20a3996342f1e466599cf7a267a0c2f5f"
 dependencies = [
  "approx",
+ "glam 0.14.0",
+ "glam 0.15.2",
+ "glam 0.16.0",
+ "glam 0.17.3",
+ "glam 0.18.0",
+ "glam 0.19.0",
+ "glam 0.20.5",
+ "glam 0.21.3",
+ "glam 0.22.0",
+ "glam 0.23.0",
+ "glam 0.24.2",
+ "glam 0.25.0",
+ "glam 0.27.0",
+ "glam 0.28.0",
+ "glam 0.29.3",
+ "glam 0.30.8",
  "matrixmultiply",
  "nalgebra-macros",
  "num-complex",
@@ -3624,9 +3736,9 @@ dependencies = [
 
 [[package]]
 name = "nalgebra-macros"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "254a5372af8fc138e36684761d3c0cdb758a4410e938babcff1c860ce14ddbfc"
+checksum = "973e7178a678cfd059ccec50887658d482ce16b0aa9da3888ddeab5cd5eb4889"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5210,7 +5322,7 @@ checksum = "9db491c0d4152a069911a0fbdaca959691bf0b9d7110d98a7ed1c8e59b79ab30"
 
 [[package]]
 name = "slint"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "async-compat",
  "bytemuck",
@@ -5244,7 +5356,7 @@ dependencies = [
 
 [[package]]
 name = "slint-build"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "derive_more",
  "i-slint-compiler",
@@ -5254,7 +5366,7 @@ dependencies = [
 
 [[package]]
 name = "slint-compiler"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "atomic-write-file",
  "clap",
@@ -5267,7 +5379,7 @@ dependencies = [
 
 [[package]]
 name = "slint-cpp"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "anyhow",
  "cbindgen",
@@ -5286,7 +5398,7 @@ dependencies = [
 
 [[package]]
 name = "slint-interpreter"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "derive_more",
  "document-features",
@@ -5314,7 +5426,7 @@ dependencies = [
 
 [[package]]
 name = "slint-lsp"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "by_address",
  "clap",
@@ -5351,7 +5463,7 @@ dependencies = [
 
 [[package]]
 name = "slint-macros"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "i-slint-compiler",
  "proc-macro2",
@@ -5362,7 +5474,7 @@ dependencies = [
 
 [[package]]
 name = "slint-tr-extractor"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "chrono",
  "clap",
@@ -6103,12 +6215,6 @@ name = "unicode-vo"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1d386ff53b415b7fe27b50bb44679e2cc4660272694b7b6f3326d8480823a94"
-
-[[package]]
-name = "unicode-width"
-version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "unicode-width"
@@ -7540,9 +7646,9 @@ checksum = "0ef33da6b1660b4ddbfb3aef0ade110c8b8a781a3b6382fa5f2b5b040fd55f61"
 
 [[package]]
 name = "xkbcommon"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d66ca9352cbd4eecbbc40871d8a11b4ac8107cfc528a6e14d7c19c69d0e1ac9"
+checksum = "a7a974f48060a14e95705c01f24ad9c3345022f4d97441b8a36beb7ed5c4a02d"
 dependencies = [
  "libc",
  "memmap2",
@@ -7597,7 +7703,7 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 
 [[package]]
 name = "xtask"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "anyhow",
  "cbindgen",
