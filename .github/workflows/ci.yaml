@@ -4,15 +4,19 @@
 name: CI
 
 on:
-    push:
-        branches: [master, "feature/*"]
-    pull_request:
-        branches: [master, "feature/*"]
     workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
-  cancel-in-progress: true
+    workflow_call:
+      secrets:
+        CLOUDFLARE_API_TOKEN:
+          required: true
+        CLOUDFLARE_ACCOUNT_ID:
+          required: true
+        ANDROID_KEYSTORE_PASSWORD:
+          required: true
+        ANDROID_KEYSTORE_BASE64:
+          required: true
+        READ_WRITE_PRIVATE_KEY:
+          required: true
 
 env:
     MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -222,9 +226,6 @@ jobs:
             - name: Run mypy
               working-directory: api/python/slint
               run: uv run mypy -p tests -p slint
-            - name: Run mypy on slint-compiler
-              working-directory: api/python/compiler
-              run: uv run mypy slint_compiler
             - name: Run ruff linter
               working-directory: api/python/slint
               run: uv tool run ruff check
@@ -489,7 +490,8 @@ jobs:
         needs: files-changed
         if: needs.files-changed.outputs.slint == 'true'
         uses: ./.github/workflows/build_docs.yaml
-        secrets: inherit
+        secrets:
+          READ_WRITE_PRIVATE_KEY: ${{ secrets.READ_WRITE_PRIVATE_KEY }}
         with:
           release: false
           app-id: ${{ vars.READ_WRITE_APP_ID }}

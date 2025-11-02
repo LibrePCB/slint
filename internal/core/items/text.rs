@@ -9,7 +9,7 @@ Lookup the [`crate::items`] module documentation.
 */
 use super::{
     EventResult, FontMetrics, InputType, Item, ItemConsts, ItemRc, ItemRef, KeyEventArg,
-    KeyEventResult, KeyEventType, PointArg, PointerEventButton, RenderingResult,
+    KeyEventResult, KeyEventType, PointArg, PointerEventButton, RenderingResult, StringArg,
     TextHorizontalAlignment, TextOverflow, TextStrokeStyle, TextVerticalAlignment, TextWrap,
     VoidArg, WindowItem,
 };
@@ -232,6 +232,7 @@ pub struct MarkdownText {
     pub color: Property<Brush>,
     pub horizontal_alignment: Property<TextHorizontalAlignment>,
     pub vertical_alignment: Property<TextVerticalAlignment>,
+    pub link_clicked: Callback<StringArg>,
 
     pub font_family: Property<SharedString>,
     pub font_italic: Property<bool>,
@@ -268,9 +269,42 @@ impl Item for MarkdownText {
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> InputEventFilterResult {
-        InputEventFilterResult::ForwardAndIgnore
+        InputEventFilterResult::ForwardEvent
     }
 
+    #[cfg(feature = "experimental-rich-text")]
+    fn input_event(
+        self: Pin<&Self>,
+        event: &MouseEvent,
+        window_adapter: &Rc<dyn WindowAdapter>,
+        self_rc: &ItemRc,
+    ) -> InputEventResult {
+        match event {
+            MouseEvent::Pressed {
+                position,
+                button: PointerEventButton::Left,
+                click_count: _,
+                is_touch: _,
+            } => {
+                let window_inner = WindowInner::from_pub(window_adapter.window());
+                let scale_factor = ScaleFactor::new(window_inner.scale_factor());
+                if let Some(link) = crate::textlayout::sharedparley::link_under_cursor(
+                    scale_factor,
+                    self,
+                    Some(self.font_request(self_rc)),
+                    LogicalSize::from_lengths(self.width(), self.height()),
+                    *position * scale_factor,
+                ) {
+                    Self::FIELD_OFFSETS.link_clicked.apply_pin(self).call(&(link.into(),));
+                }
+
+                InputEventResult::EventAccepted
+            }
+            _ => InputEventResult::EventIgnored,
+        }
+    }
+
+    #[cfg(not(feature = "experimental-rich-text"))]
     fn input_event(
         self: Pin<&Self>,
         _: &MouseEvent,
@@ -798,7 +832,9 @@ impl Item for TextInput {
             return InputEventResult::EventIgnored;
         }
         match event {
-            MouseEvent::Pressed { position, button: PointerEventButton::Left, click_count } => {
+            MouseEvent::Pressed {
+                position, button: PointerEventButton::Left, click_count, ..
+            } => {
                 let clicked_offset =
                     self.byte_offset_for_position(*position, window_adapter, self_rc) as i32;
                 self.as_ref().pressed.set((click_count % 3) + 1);
@@ -855,7 +891,7 @@ impl Item for TextInput {
                 }
                 self.as_ref().pressed.set(0)
             }
-            MouseEvent::Moved { position } => {
+            MouseEvent::Moved { position, .. } => {
                 if let Some(x) = window_adapter.internal(crate::InternalToken) {
                     x.set_mouse_cursor(super::MouseCursor::Text);
                 }
@@ -2203,7 +2239,7 @@ fn next_paragraph_boundary(text: &str, last_cursor_pos: usize) -> usize {
         .iter()
         .enumerate()
         .skip(last_cursor_pos)
-        .find(|(_, &c)| c == b'\n')
+        .find(|(_, c)| **c == b'\n')
         .map(|(new_pos, _)| new_pos)
         .unwrap_or(text.len())
 }
@@ -2214,7 +2250,7 @@ fn prev_paragraph_boundary(text: &str, last_cursor_pos: usize) -> usize {
         .enumerate()
         .rev()
         .skip(text.len() - last_cursor_pos)
-        .find(|(_, &c)| c == b'\n')
+        .find(|(_, c)| **c == b'\n')
         .map(|(new_pos, _)| new_pos + 1)
         .unwrap_or(0)
 }
