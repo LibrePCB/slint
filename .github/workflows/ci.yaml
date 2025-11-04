@@ -114,7 +114,7 @@ jobs:
                   toolchain: ${{ matrix.rust_version }}
                   key: x-v3
             - name: Run tests
-              run:  cargo test --verbose --all-features --workspace ${{ matrix.extra_args }} ${{ matrix.maybe_exclude_bevy }} --exclude slint-node --exclude pyslint --exclude test-driver-node --exclude slint-node --exclude test-driver-nodejs --exclude test-driver-cpp --exclude mcu-board-support --exclude mcu-embassy --exclude printerdemo_mcu --exclude uefi-demo --exclude slint-cpp --exclude slint-python -- --skip=_qt::t
+              run:  cargo test --verbose --all-features --workspace --timings ${{ matrix.extra_args }} ${{ matrix.maybe_exclude_bevy }} --exclude slint-node --exclude pyslint --exclude test-driver-node --exclude slint-node --exclude test-driver-nodejs --exclude test-driver-cpp --exclude mcu-board-support --exclude mcu-embassy --exclude printerdemo_mcu --exclude uefi-demo --exclude slint-cpp --exclude slint-python -- --skip=_qt::t
               env:
                   SLINT_CREATE_SCREENSHOTS: 1
               shell: bash
@@ -126,9 +126,16 @@ jobs:
                 SLINT_LIVE_PREVIEW: 1
               run: cargo test --verbose --features=build-time,slint/live-preview -p test-driver-rust -- --skip=_qt::t
               shell: bash
+            - name: Upload build timing report
+              if: always()
+              uses: actions/upload-artifact@v5
+              with:
+                  name: cargo-timings-${{ matrix.os }}-${{ matrix.rust_version }}
+                  path: target/cargo-timings/cargo-timing.html
+                  if-no-files-found: ignore
             - name: Archive screenshots after failed tests
               if: ${{ failure() }}
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v5
               with:
                   name: screenshots-${{matrix.os}}
                   path: |
@@ -327,7 +334,7 @@ jobs:
               working-directory: ${{ runner.workspace }}/cppbuild
               run: cmake --build . --config Debug --target package
             - name: "Create C++ packages artifact"
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v5
               with:
                   name: cpp_bin-${{ matrix.os }}
                   path: ${{ runner.workspace }}/cppbuild/Slint-cpp-*
@@ -349,7 +356,7 @@ jobs:
               with:
                   version: 6.5.1
                   cache: true
-            - uses: actions/download-artifact@v5
+            - uses: actions/download-artifact@v6
               with:
                   name: cpp_bin-ubuntu-22.04
                   path: cpp-package
@@ -729,7 +736,7 @@ jobs:
               working-directory: tools/figma-inspector
               run: pnpm zip
             - name: Archive zip
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v5
               with:
                   name: figma-plugin
                   path: tools/figma-inspector/zip

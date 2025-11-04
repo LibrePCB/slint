@@ -130,6 +130,7 @@ export component MarkdownText inherits Empty {
     in property <TextHorizontalAlignment> horizontal-alignment;
     in property <TextVerticalAlignment> vertical-alignment;
     callback link-clicked(link: string);
+    in property <color> link-color: #00f;
 
     in property <string> font-family;
     in property <bool> font-italic;
@@ -501,6 +502,7 @@ export component Path {
     in property <brush> stroke;
     in property <length> stroke-width;
     in property <LineCap> stroke-line-cap;
+    in property <LineJoin> stroke-line-join;
     in property <string> commands;  // 'fake' hardcoded in typeregister.rs
     in property <float> viewbox-x;
     in property <float> viewbox-y;

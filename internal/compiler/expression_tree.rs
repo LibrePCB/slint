@@ -111,6 +111,7 @@ pub enum BuiltinFunction {
     StartTimer,
     StopTimer,
     RestartTimer,
+    OpenUrl,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +277,7 @@ declare_builtin_function_types!(
     StartTimer: (Type::ElementReference) -> Type::Void,
     StopTimer: (Type::ElementReference) -> Type::Void,
     RestartTimer: (Type::ElementReference) -> Type::Void,
+    OpenUrl: (Type::String) -> Type::Void
 );
 
 impl BuiltinFunction {
@@ -289,7 +291,9 @@ impl BuiltinFunction {
     /// It is const if the return value only depends on its argument and has no side effect
     fn is_const(&self, global_analysis: Option<&crate::passes::GlobalAnalysis>) -> bool {
         match self {
-            BuiltinFunction::GetWindowScaleFactor => false,
+            BuiltinFunction::GetWindowScaleFactor => {
+                global_analysis.is_some_and(|x| x.const_scale_factor.is_some())
+            }
             BuiltinFunction::GetWindowDefaultFontSize => {
                 global_analysis.is_some_and(|x| x.default_font_size.is_const())
             }
@@ -369,6 +373,7 @@ impl BuiltinFunction {
             BuiltinFunction::StartTimer => false,
             BuiltinFunction::StopTimer => false,
             BuiltinFunction::RestartTimer => false,
+            BuiltinFunction::OpenUrl => false,
         }
     }
 
@@ -446,6 +451,7 @@ impl BuiltinFunction {
             BuiltinFunction::StartTimer => false,
             BuiltinFunction::StopTimer => false,
             BuiltinFunction::RestartTimer => false,
+            BuiltinFunction::OpenUrl => false,
         }
     }
 }

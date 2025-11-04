@@ -149,11 +149,11 @@ jobs:
                 - demo: demos/home-automation/rust
                   scheme: "Home Automation"
                   bundle_id: dev.slint.demos.HomeAutomation
-                  device: iPad Pro 13-inch (M5)
+                  device: iPad mini (A17 Pro)
                 - demo: demos/energy-monitor
                   scheme: "Energy Monitor"
                   bundle_id: dev.slint.demos.EnergyMonitor
-                  device: iPhone 17
+                  device: iPhone 16e
         runs-on: macos-26
         steps:
             - uses: actions/checkout@v5
@@ -164,9 +164,42 @@ jobs:
             - run: xcodegen -s ios-project.yml
               working-directory: ${{ matrix.demo }}
             - name: "Boot Simulator (to ensure also that xcodebuild -destination works)"
+              timeout-minutes: 5
               run: |
+                xcrun simctl list > /dev/null # workaround https://github.com/actions/runner-images/issues/12862
+                echo "=== Available simulators ==="
+                xcrun simctl list devices available | grep -i "ipad\|iphone"
+                echo ""
+
+                echo "=== System state before boot ==="
+                echo "Running simulators:"
+                xcrun simctl list devices | grep "(Booted)" || echo "None"
+                echo "Simulator.app processes:"
+                pgrep -fl Simulator || echo "None"
+                echo ""
+
+                echo "=== Booting simulator ==="
+                echo "Device: ${{ matrix.device }}"
+                echo "Command: xcrun simctl boot \"${{ matrix.device }}\""
+                echo "Start time: $(date '+%Y-%m-%d %H:%M:%S')"
+
+                set -x  # Enable command echoing
                 xcrun simctl boot "${{ matrix.device }}"
-                sleep 10
+                BOOT_RESULT=$?
+                set +x  # Disable command echoing
+
+                echo "Boot command completed with exit code: $BOOT_RESULT"
+                echo ""
+
+                echo "=== Simulator state after boot command ==="
+                xcrun simctl list devices | grep "${{ matrix.device }}"
+                echo ""
+
+                echo "=== Waiting for full boot (bootstatus) ==="
+                echo "Start time: $(date '+%Y-%m-%d %H:%M:%S')"
+                xcrun simctl bootstatus booted -b
+                echo "End time: $(date '+%Y-%m-%d %H:%M:%S')"
+                echo "Simulator fully booted and ready"
             - run: xcodebuild -scheme "${{ matrix.scheme }}" -destination 'platform=iOS Simulator,name=${{ matrix.device }}' build
               working-directory: ${{ matrix.demo }}
             - name: "Install"
@@ -174,14 +207,42 @@ jobs:
                 APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "${{ matrix.scheme }}.app" | head -n 1)
                 echo "Found app bundle at $APP_PATH"
                 xcrun simctl install booted "$APP_PATH"
+                echo "Verifying installation..."
+                xcrun simctl listapps booted | grep -q "${{ matrix.bundle_id }}" && echo "App installed successfully" || echo "WARNING: App may not be installed"
             - name: "Launch"
+              timeout-minutes: 5
               run: |
-                xcrun simctl launch booted "${{ matrix.bundle_id }}"
-                sleep 5
+                echo "Attempting to launch ${{ matrix.bundle_id }}..."
+                # Retry loop to wait for FrontBoard to register the app
+                MAX_ATTEMPTS=10
+                ATTEMPT=1
+                while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+                  echo "Launch attempt $ATTEMPT of $MAX_ATTEMPTS..."
+                  if xcrun simctl launch booted "${{ matrix.bundle_id }}" 2>&1 | tee launch_output.txt; then
+                    echo "App launched successfully on attempt $ATTEMPT"
+                    sleep 5
+                    exit 0
+                  fi
+
+                  if grep -q "unknown to FrontBoard" launch_output.txt; then
+                    echo "FrontBoard hasn't registered app yet, waiting 2 seconds..."
+                    sleep 2
+                    ATTEMPT=$((ATTEMPT + 1))
+                  else
+                    echo "Launch failed with a different error:"
+                    cat launch_output.txt
+                    echo "Checking simulator logs..."
+                    xcrun simctl spawn booted log show --last 30s --predicate 'processImagePath contains "${{ matrix.scheme }}"' || true
+                    exit 1
+                  fi
+                done
+
+                echo "Failed to launch after $MAX_ATTEMPTS attempts"
+                exit 1
             - name: "Screenshot"
               run: xcrun simctl io booted screenshot "${{ matrix.scheme }}.png"
             - name: Upload Screenshot Artifact
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v5
               with:
                 name: ${{matrix.scheme}}-screenshot
                 path: ${{ matrix.scheme }}.png

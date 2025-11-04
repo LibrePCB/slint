@@ -6,7 +6,6 @@
 
 // cSpell:ignore cmath constexpr cstdlib decltype intptr itertools nullptr prepended struc subcomponent uintptr vals
 
-use lyon_path::geom::euclid::approxeq::ApproxEq;
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::io::BufWriter;
@@ -769,11 +768,9 @@ pub fn generate(
         "   auto &window = self->m_window.emplace(slint::private_api::WindowAdapterRc());".into(),
     ];
 
-    if !compiler_config.const_scale_factor.approx_eq(&1.0) {
-        window_creation_code.push(format!(
-            "window.dispatch_scale_factor_change_event({});",
-            compiler_config.const_scale_factor
-        ));
+    if let Some(scale_factor) = compiler_config.const_scale_factor {
+        window_creation_code
+            .push(format!("window.window_handle().set_const_scale_factor({scale_factor});"));
     }
 
     window_creation_code.extend([
@@ -3400,6 +3397,13 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                         }}({events}, {points})"#
                     )
                 }
+                (Type::Enumeration(e), Type::String) => {
+                    let mut cases = e.values.iter().enumerate().map(|(idx, v)| {
+                        let c = compile_expression(&Expression::EnumerationValue(EnumerationValue{ value: idx, enumeration: e.clone() }), ctx);
+                        format!("case {c}: return {v:?};")
+                    });
+                    format!("[&]() -> slint::SharedString {{ switch ({f}) {{ {} default: return {{}}; }} }}()", cases.join(" "))
+                }
                 _ => f,
             }
         }
@@ -3510,15 +3514,13 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             let ty = expr.ty(ctx);
             let cond_code = compile_expression(condition, ctx);
             let cond_code = remove_parentheses(&cond_code);
-            let true_code = return_compile_expression(true_expr, ctx, Some(&ty));
-            let false_code = return_compile_expression(false_expr, ctx, Some(&ty));
-            format!(
-                r#"[&]() -> {} {{ if ({}) {{ {}; }} else {{ {}; }}}}()"#,
-                ty.cpp_type().unwrap_or_else(|| "void".into()),
-                cond_code,
-                true_code,
-                false_code
-            )
+            let true_code = compile_expression(true_expr, ctx);
+            let false_code = compile_expression(false_expr, ctx);
+            if ty == Type::Void {
+                format!("if ({cond_code}) {{ {true_code}; }} else {{ {false_code}; }}")
+            } else {
+                format!("({cond_code} ? {true_code} : {false_code})")
+            }
         }
         Expression::Array { element_ty, values, as_model } => {
             let ty = element_ty.cpp_type().unwrap();
@@ -4200,6 +4202,10 @@ fn compile_builtin_function_call(
             } else {
                 panic!("internal error: invalid args to RetartTimer {arguments:?}")
             }
+        }
+        BuiltinFunction::OpenUrl => {
+            let url = a.next().unwrap();
+            format!("slint::cbindgen_private::open_url({})", url)
         }
     }
 }
