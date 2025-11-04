@@ -150,9 +150,9 @@ pub fn is_apple_platform() -> bool {
 }
 
 #[cfg_attr(not(feature = "std"), allow(unused))]
-pub fn open_url(url: &str) {
-    #[cfg(feature = "std")]
-    if let Err(err) = webbrowser::open(url) {
-        debug_log!("Error opening url {}: {}", url, err);
-    }
+pub fn open_url(_url: &str) {
+    //#[cfg(feature = "std")]
+    //if let Err(err) = webbrowser::open(url) {
+    //    debug_log!("Error opening url {}: {}", url, err);
+    //}
 }
