@@ -580,8 +580,10 @@ mod software_renderer {
         r: SoftwareRendererOpaque,
         buffer: *mut CppTargetPixelBuffer<Rgb8Pixel>,
     ) -> PhysicalRegion {
-        let renderer = &*(r as *const SoftwareRenderer);
-        unsafe { renderer.render_into_buffer(&mut *buffer) }
+        unsafe {
+            let renderer = &*(r as *const SoftwareRenderer);
+            renderer.render_into_buffer(&mut *buffer)
+        }
     }
 
     #[cfg(feature = "experimental")]
@@ -590,8 +592,10 @@ mod software_renderer {
         r: SoftwareRendererOpaque,
         buffer: *mut CppTargetPixelBuffer<Rgb565Pixel>,
     ) -> PhysicalRegion {
-        let renderer = &*(r as *const SoftwareRenderer);
-        unsafe { renderer.render_into_buffer(&mut *buffer) }
+        unsafe {
+            let renderer = &*(r as *const SoftwareRenderer);
+            renderer.render_into_buffer(&mut *buffer)
+        }
     }
 
     #[unsafe(no_mangle)]
