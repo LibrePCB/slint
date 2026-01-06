@@ -207,7 +207,7 @@ fn main() -> std::io::Result<()> {
     if args.output == std::path::Path::new("-") {
         generator::generate(format, &mut std::io::stdout(), None, &doc, &loader.compiler_config)?;
     } else {
-        let mut file_writer = BufWriter::new(atomic_write_file::AtomicWriteFile::options().open(&args.output)?);
+        let mut file_writer = BufWriter::new(std::fs::File::create(&args.output)?);
         generator::generate(
             format,
             &mut file_writer,
