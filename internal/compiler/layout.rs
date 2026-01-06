@@ -8,7 +8,7 @@ use crate::expression_tree::*;
 use crate::langtype::{ElementType, PropertyLookupResult, Type};
 use crate::object_tree::{Component, ElementRc};
 
-use smol_str::{format_smolstr, SmolStr, ToSmolStr};
+use smol_str::{SmolStr, ToSmolStr, format_smolstr};
 
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -275,21 +275,36 @@ impl LayoutConstraints {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum RowColExpr {
+    Named(NamedReference),
+    Literal(u16),
+    Auto,
+}
+
+#[derive(Debug, Clone)]
+pub struct GridLayoutCell {
+    pub new_row: bool,
+    pub col_expr: RowColExpr,
+    pub row_expr: RowColExpr,
+    pub colspan_expr: RowColExpr,
+    pub rowspan_expr: RowColExpr,
+}
+
 /// An element in a GridLayout
 #[derive(Debug, Clone)]
 pub struct GridLayoutElement {
-    pub col: u16,
-    pub row: u16,
-    pub colspan: u16,
-    pub rowspan: u16,
+    // Rc<RefCell<GridLayoutCell>> because shared with the repeated component's element
+    pub cell: Rc<RefCell<GridLayoutCell>>,
     pub item: LayoutItem,
 }
 
 impl GridLayoutElement {
-    pub fn col_or_row_and_span(&self, orientation: Orientation) -> (u16, u16) {
+    pub fn span(&self, orientation: Orientation) -> RowColExpr {
+        let cell = self.cell.borrow();
         match orientation {
-            Orientation::Horizontal => (self.col, self.colspan),
-            Orientation::Vertical => (self.row, self.rowspan),
+            Orientation::Horizontal => cell.colspan_expr.clone(),
+            Orientation::Vertical => cell.rowspan_expr.clone(),
         }
     }
 }
@@ -410,10 +425,10 @@ fn find_binding<R>(
     let mut element = element.clone();
     let mut depth = 0;
     loop {
-        if let Some(b) = element.borrow().bindings.get(name) {
-            if b.borrow().has_binding() {
-                return Some(f(&b.borrow(), &element.borrow().enclosing_component, depth));
-            }
+        if let Some(b) = element.borrow().bindings.get(name)
+            && b.borrow().has_binding()
+        {
+            return Some(f(&b.borrow(), &element.borrow().enclosing_component, depth));
         }
         let e = match &element.borrow().base_type {
             ElementType::Component(base) => base.root_element.clone(),
@@ -425,7 +440,7 @@ fn find_binding<R>(
 }
 
 /// Return a named reference to a property if a binding is set on that property
-fn binding_reference(element: &ElementRc, name: &'static str) -> Option<NamedReference> {
+pub fn binding_reference(element: &ElementRc, name: &'static str) -> Option<NamedReference> {
     find_binding(element, name, |_, _, _| NamedReference::new(element, SmolStr::new_static(name)))
 }
 
@@ -436,24 +451,23 @@ fn init_fake_property(
 ) {
     if grid_layout_element.borrow().property_declarations.contains_key(name)
         && !grid_layout_element.borrow().bindings.contains_key(name)
+        && let Some(e) = lazy_default()
     {
-        if let Some(e) = lazy_default() {
-            if e.name() == name && Rc::ptr_eq(&e.element(), grid_layout_element) {
-                // Don't reference self
-                return;
-            }
-            grid_layout_element
-                .borrow_mut()
-                .bindings
-                .insert(name.into(), RefCell::new(Expression::PropertyReference(e).into()));
+        if e.name() == name && Rc::ptr_eq(&e.element(), grid_layout_element) {
+            // Don't reference self
+            return;
         }
+        grid_layout_element
+            .borrow_mut()
+            .bindings
+            .insert(name.into(), RefCell::new(Expression::PropertyReference(e).into()));
     }
 }
 
 /// Internal representation of a grid layout
 #[derive(Debug, Clone)]
 pub struct GridLayout {
-    /// All the elements will be layout within that element.
+    /// All the elements which will be laid out within that element.
     pub elems: Vec<GridLayoutElement>,
 
     pub geometry: LayoutGeometry,
@@ -461,10 +475,32 @@ pub struct GridLayout {
     /// When this GridLayout is actually the layout of a Dialog, then the cells start with all the buttons,
     /// and this variable contains their roles. The string is actually one of the values from the i_slint_core::layout::DialogButtonRole
     pub dialog_button_roles: Option<Vec<SmolStr>>,
+
+    /// Whether any of the row/column expressions use 'auto'
+    pub uses_auto: bool,
 }
 
 impl GridLayout {
-    fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    pub fn visit_rowcol_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+        for elem in &mut self.elems {
+            let mut cell = elem.cell.borrow_mut();
+            if let RowColExpr::Named(ref mut e) = cell.col_expr {
+                visitor(e);
+            }
+            if let RowColExpr::Named(ref mut e) = cell.row_expr {
+                visitor(e);
+            }
+            if let RowColExpr::Named(ref mut e) = cell.colspan_expr {
+                visitor(e);
+            }
+            if let RowColExpr::Named(ref mut e) = cell.rowspan_expr {
+                visitor(e);
+            }
+        }
+    }
+
+    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+        self.visit_rowcol_named_references(visitor);
         for cell in &mut self.elems {
             cell.item.constraints.visit_named_references(visitor);
         }
@@ -475,7 +511,7 @@ impl GridLayout {
 /// Internal representation of a BoxLayout
 #[derive(Debug, Clone)]
 pub struct BoxLayout {
-    /// Whether, this is a HorizontalLayout, otherwise a VerticalLayout
+    /// Whether this is a HorizontalLayout or a VerticalLayout
     pub orientation: Orientation,
     pub elems: Vec<LayoutItem>,
     pub geometry: LayoutGeometry,

@@ -63,6 +63,7 @@ fn create_repeater_components(component: &Rc<Component>) {
                 item_index_of_first_children: Default::default(),
                 is_legacy_syntax: elem.is_legacy_syntax,
                 inline_depth: 0,
+                grid_layout_cell: elem.grid_layout_cell.clone(),
             })),
             parent_element,
             ..Component::default()
@@ -92,7 +93,7 @@ fn create_repeater_components(component: &Rc<Component>) {
             e.borrow_mut().enclosing_component = weak.clone()
         });
 
-        // Move all the menus that belong to the new crated component
+        // Move all the menus that belong to the newly created component
         // Could use Vec::extract_if if MSRV >= 1.87
         component.menu_item_tree.borrow_mut().retain(|x| {
             if x.parent_element
@@ -121,7 +122,7 @@ fn create_repeater_components(component: &Rc<Component>) {
     }
 }
 
-/// Make sure that references to property within the repeated element actually point to the reference
+/// Make sure that references to properties within the repeated element actually point to the reference
 /// to the root of the newly created component
 fn adjust_references(comp: &Rc<Component>) {
     visit_all_named_references(comp, &mut |nr| {
@@ -129,23 +130,22 @@ fn adjust_references(comp: &Rc<Component>) {
             return;
         }
         let e = nr.element();
-        if e.borrow().repeated.is_some() {
-            if let ElementType::Component(c) = e.borrow().base_type.clone() {
-                *nr = NamedReference::new(&c.root_element, nr.name().clone())
-            };
-        }
+        if e.borrow().repeated.is_some()
+            && let ElementType::Component(c) = e.borrow().base_type.clone()
+        {
+            *nr = NamedReference::new(&c.root_element, nr.name().clone())
+        };
     });
     // Transform any references to the repeated element to refer to the root of each instance.
     visit_all_expressions(comp, |expr, _| {
         expr.visit_recursive_mut(&mut |expr| {
-            if let Expression::ElementReference(element_ref) = expr {
-                if let Some(repeater_element) =
+            if let Expression::ElementReference(element_ref) = expr
+                && let Some(repeater_element) =
                     element_ref.upgrade().filter(|e| e.borrow().repeated.is_some())
-                {
-                    let inner_element =
-                        repeater_element.borrow().base_type.as_component().root_element.clone();
-                    *element_ref = Rc::downgrade(&inner_element);
-                }
+            {
+                let inner_element =
+                    repeater_element.borrow().base_type.as_component().root_element.clone();
+                *element_ref = Rc::downgrade(&inner_element);
             }
         })
     });

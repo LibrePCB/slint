@@ -19,7 +19,7 @@ fn builtin_component_info(name: &str) -> ComponentInformation {
     let default_properties = match name {
         "Text" | "TextInput" => vec![PropertyChange::new("text", format!("\"{name}\""))],
         "Image" => vec![PropertyChange::new("source", "@image-url(\"EDIT_ME.png\")".to_string())],
-        _ => vec![],
+        _ => Vec::new(),
     };
 
     let component = {
@@ -66,7 +66,7 @@ fn std_widgets_info(name: &str, is_global: bool) -> ComponentInformation {
             PropertyChange::new("maximum", "100".to_string()),
         ],
         "StandardButton" => vec![PropertyChange::new("kind", "ok".to_string())],
-        _ => vec![],
+        _ => Vec::new(),
     };
 
     ComponentInformation {
@@ -98,7 +98,7 @@ fn exported_project_component_info(
         is_interactive: false,
         is_exported: true,
         defined_at: Some(position),
-        default_properties: vec![],
+        default_properties: Vec::new(),
     }
 }
 
@@ -118,7 +118,7 @@ fn file_local_component_info(
         is_interactive: false,
         is_exported: false,
         defined_at: Some(position),
-        default_properties: vec![],
+        default_properties: Vec::new(),
     }
 }
 
@@ -254,12 +254,14 @@ mod tests {
         assert!(result.iter().all(|ci| ci.is_exported));
         assert!(result.iter().all(|ci| ci.is_builtin));
         assert!(result.iter().all(|ci| !ci.is_global));
-        assert!(result
-            .iter()
-            .any(|ci| &ci.name == "TouchArea" && ci.is_interactive && !ci.is_layout));
-        assert!(result
-            .iter()
-            .any(|ci| &ci.name == "HorizontalLayout" && !ci.is_interactive && ci.is_layout));
+        assert!(
+            result.iter().any(|ci| &ci.name == "TouchArea" && ci.is_interactive && !ci.is_layout)
+        );
+        assert!(
+            result
+                .iter()
+                .any(|ci| &ci.name == "HorizontalLayout" && !ci.is_interactive && ci.is_layout)
+        );
         assert!(!result.iter().any(|ci| &ci.name == "AboutSlint"));
         assert!(!result.iter().any(|ci| &ci.name == "ProgressIndicator"));
         assert!(!result.iter().any(|ci| &ci.name == "Timer"));

@@ -4,6 +4,8 @@
 export component LineEditBase inherits Rectangle {
     in property <string> placeholder-text;
     in property <length> font-size <=> text-input.font-size;
+    in property <string> font-family <=> text-input.font-family;
+    in property <bool> font-italic <=> text-input.font-italic;
     in-out property <string> text <=> text-input.text;
     in-out property <brush> placeholder-color;
     in property <bool> enabled <=> text-input.enabled;
@@ -31,11 +33,15 @@ export component LineEditBase inherits Rectangle {
     }
 
     public function clear-selection() {
-        text-input.clear-selection();
+        if (!root.read-only && root.enabled) {
+           text-input.clear-selection();
+        }
     }
 
     public function cut() {
-        text-input.cut();
+        if (!root.read-only && root.enabled) {
+           text-input.cut();
+        }
     }
 
     public function copy() {
@@ -43,7 +49,9 @@ export component LineEditBase inherits Rectangle {
     }
 
     public function paste() {
-        text-input.paste();
+        if (!root.read-only && root.enabled) {
+            text-input.paste();
+        }
     }
 
     // on width < 1px or if the `TextInput` is clipped it cannot be focused therefore min-width 1px

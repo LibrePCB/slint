@@ -5,7 +5,7 @@ use crate::preview::{self, ui};
 use core::cell::RefCell;
 use core::num::NonZeroUsize;
 use i_slint_compiler::object_tree;
-use i_slint_compiler::parser::{self, syntax_nodes, TextSize};
+use i_slint_compiler::parser::{self, TextSize, syntax_nodes};
 use lsp_types::Url;
 use slint::{ComponentHandle as _, Model, ModelRc, SharedString, ToSharedString as _};
 use std::rc::Rc;
@@ -341,6 +341,7 @@ fn drop_edit(
             &drop_info,
             &moving_element,
             Default::default(),
+            document_cache.format,
         )?
     } else if let Ok(library_index) = data.parse::<usize>() {
         let component = super::PREVIEW_STATE.with(|preview_state| {

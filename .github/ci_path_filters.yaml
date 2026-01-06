@@ -3,10 +3,18 @@
 
 ci_config: &ci_config
  - '.github/**'
+ - '.mise/**'
 
 files_in_root: &files_in_root
  - '*!(/)' # changes in the root, such as cspell.json or pnpm-lock.yaml
  - '.*'
+
+js_config: &js_config
+ - 'package.json'
+ - 'package-lock.json'
+ - 'pnpm-workspace.yaml'
+ - '.npmrc'
+ - 'pnpm-lock.yaml'
 
 slint:
  - 'api/**'
@@ -15,7 +23,6 @@ slint:
  - 'docker/**'
  - 'docs/**'
  - 'editors/**'
- - 'examples/**'
  - 'helper_crates/**'
  - 'internal/**'
  - 'logo/**'
@@ -35,44 +42,59 @@ slint:
 
 figma_inspector:
  - 'tools/figma-inspector/**'
- - *files_in_root
+ - *js_config
  - *ci_config
 
 material_components:
  - 'ui-libraries/material/**'
- - *files_in_root
  - *ci_config
 
 internal: &internal
- - 'internal/**'
+ # The API specific tests don't depends on renderer or backend, but they do depend on the Qt widgets and the testing backend
+ - 'internal/!({renderers,backends}/**)'
+ - 'internal/backends/qt/**'
+ - 'internal/backends/testing/**'
  - 'helper_crates/**'
- - *files_in_root
+ - 'Cargo.toml' # the root Cargo.toml
+ - '.cargo/**'
  - *ci_config
 
 api_cpp:
  - 'api/cpp/**'
  - 'tools/compiler/**'
+ - *ci_config
+ # The renderers are not part of the `internal` group, but are exposed in the C++ API
+ - 'internal/renderers/{skia,software}/**'
 
 api_python:
  - 'api/python/**'
+ - *ci_config
 
 api_node:
  - 'api/node/**'
+ - *js_config
+ - *ci_config
 
 api_rs:
  - 'api/rs/**'
+ - 'Cargo.toml'
+ - *ci_config
 
 tests:
  - 'tests/**'
 
 examples:
- - 'examples/**'
+ # Some examples are tested separately and can be excluded from here
+ - 'examples/!({servo,bevy,*mcu*,uefi-demo,}/**)'
  - 'demos/**'
 
+examples_mcu:
+ - 'examples/*mcu*/**'
+ - 'internal/renderers/software/**'
+
 vsce:
- - *files_in_root
- - *ci_config
  - *internal
+ - *js_config
  - 'api/rs/**'
  - 'editors/vscode/**'
  - 'tools/lsp/**'
@@ -90,3 +112,7 @@ updater_test:
  - *internal
  - 'tests/cases/**'
  - 'tools/updater/**'
+
+servo_example:
+ - 'examples/servo/**'
+ - *ci_config

@@ -7,9 +7,9 @@
     [WindowAdapter] trait used by the generated code and the run-time to change
     aspects of windows on the screen.
 */
+use crate::EventResult;
 use crate::drag_resize_window::{handle_cursor_move_for_resize, handle_resize};
 use crate::winitwindowadapter::WindowVisibility;
-use crate::EventResult;
 use crate::{SharedBackendData, SlintEvent};
 use corelib::graphics::euclid;
 use corelib::input::{KeyEvent, KeyEventType, MouseEvent};
@@ -186,9 +186,17 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 // trigger a resize event. We need to update the internal window
                 // state to match the actual window state. We simulate a "window
                 // state event" since there is not an official event for it yet.
-                // Because we don't always get a Resized event (eg, minimized), also handle Occluded
                 // See: https://github.com/rust-windowing/winit/issues/2334
                 window.window_state_event();
+
+                // Some platforms (e.g., Windows) may not emit an Occluded event when minimized,
+                // so manually mark the window as occluded if its size is zero.
+                #[cfg(target_os = "windows")]
+                {
+                    if size.width == 0 || size.height == 0 {
+                        window.renderer.occluded(true);
+                    }
+                }
             }
             WindowEvent::CloseRequested => {
                 self.loop_error = window
@@ -212,6 +220,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 let swap_cmd_ctrl = i_slint_core::is_apple_platform();
 
                 let key_code = if swap_cmd_ctrl {
+                    #[cfg_attr(slint_nightly_test, allow(non_exhaustive_omitted_patterns))]
                     match key_code {
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::Control) => {
                             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Super)
@@ -240,6 +249,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                     }
                 }
             }
+                #[cfg_attr(slint_nightly_test, allow(non_exhaustive_omitted_patterns))]
                 let text = i_slint_common::for_each_special_keys!(winit_key_to_char);
 
                 self.loop_error = window

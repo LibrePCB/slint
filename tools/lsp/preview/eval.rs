@@ -116,11 +116,7 @@ fn eval_expression(
                 ('+', a @ Value::Struct(_), b @ Value::Struct(_)) => {
                     let a: Option<i_slint_core::layout::LayoutInfo> = a.try_into().ok();
                     let b: Option<i_slint_core::layout::LayoutInfo> = b.try_into().ok();
-                    if let (Some(a), Some(b)) = (a, b) {
-                        a.merge(&b).into()
-                    } else {
-                        Value::Void
-                    }
+                    if let (Some(a), Some(b)) = (a, b) { a.merge(&b).into() } else { Value::Void }
                 }
                 ('-', Value::Number(a), Value::Number(b)) => Value::Number(a - b),
                 ('/', Value::Number(a), Value::Number(b)) => Value::Number(a / b),
@@ -244,15 +240,18 @@ fn eval_expression(
                 },
             )),
         )),
-        Expression::ConicGradient { stops } => Value::Brush(slint::Brush::ConicGradient(
-            i_slint_core::graphics::ConicGradientBrush::new(stops.iter().map(|(color, stop)| {
-                let color =
-                    eval_expression(color, local_context, None).try_into().unwrap_or_default();
-                let position =
-                    eval_expression(stop, local_context, None).try_into().unwrap_or_default();
-                i_slint_core::graphics::GradientStop { color, position }
-            })),
-        )),
+        Expression::ConicGradient { from_angle, stops } => Value::Brush(
+            slint::Brush::ConicGradient(i_slint_core::graphics::ConicGradientBrush::new(
+                eval_expression(from_angle, local_context, None).try_into().unwrap_or_default(),
+                stops.iter().map(|(color, stop)| {
+                    let color =
+                        eval_expression(color, local_context, None).try_into().unwrap_or_default();
+                    let position =
+                        eval_expression(stop, local_context, None).try_into().unwrap_or_default();
+                    i_slint_core::graphics::GradientStop { color, position }
+                }),
+            )),
+        ),
         Expression::EnumerationValue(value) => {
             Value::EnumerationValue(value.enumeration.name.to_string(), value.to_string())
         }

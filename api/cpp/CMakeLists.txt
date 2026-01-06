@@ -15,7 +15,7 @@ if (NOT Corrosion_FOUND)
     FetchContent_Declare(
         Corrosion
         GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
-        GIT_TAG v0.5.2
+        GIT_TAG v0.6.0
     )
 
     FetchContent_MakeAvailable(Corrosion)
@@ -103,7 +103,7 @@ define_cargo_dependent_feature(renderer-femtovg-wgpu "Enable support for the WGP
 define_cargo_dependent_feature(renderer-skia "Enable support for the Skia based rendering engine." OFF "NOT SLINT_FEATURE_FREESTANDING")
 define_cargo_dependent_feature(renderer-skia-opengl "Enable support for the Skia based rendering engine with its OpenGL backend." OFF "NOT SLINT_FEATURE_FREESTANDING")
 define_cargo_dependent_feature(renderer-skia-vulkan "Enable support for the Skia based rendering engine with its Vulkan backend." OFF "NOT SLINT_FEATURE_FREESTANDING")
-define_cargo_feature(renderer-software "Enable support for the software renderer" OFF)
+define_cargo_feature(renderer-software "Enable support for the software renderer" ON)
 
 set(SLINT_BACKEND_QT_DEFAULT OFF)
 if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
@@ -111,8 +111,8 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
 endif()
 define_cargo_dependent_feature(backend-qt "Enable Qt based rendering backend" ${SLINT_BACKEND_QT_DEFAULT} "NOT SLINT_FEATURE_FREESTANDING")
 
-define_cargo_dependent_feature(backend-linuxkms "Enable support for the backend that renders a single window fullscreen on Linux. Requires libseat. If you don't have libseat, select `backend-linuxkms-noseat` instead. (Experimental)" OFF "NOT SLINT_FEATURE_FREESTANDING")
-define_cargo_dependent_feature(backend-linuxkms-noseat "Enable support for the backend that renders a single window fullscreen on Linux (Experimental)" OFF "NOT SLINT_FEATURE_FREESTANDING")
+define_cargo_dependent_feature(backend-linuxkms "Enable support for the backend that renders a single window fullscreen on Linux. Requires libseat. If you don't have libseat, select `backend-linuxkms-noseat` instead." OFF "NOT SLINT_FEATURE_FREESTANDING")
+define_cargo_dependent_feature(backend-linuxkms-noseat "Enable support for the backend that renders a single window fullscreen on Linux" OFF "NOT SLINT_FEATURE_FREESTANDING")
 
 define_cargo_dependent_feature(gettext "Enable support of translations using gettext" OFF "NOT SLINT_FEATURE_FREESTANDING")
 define_cargo_dependent_feature(accessibility "Enable integration with operating system provided accessibility APIs" ON "NOT SLINT_FEATURE_FREESTANDING")
@@ -150,6 +150,14 @@ if(SLINT_FEATURE_COMPILER AND NOT SLINT_COMPILER)
         ON
     )
     list(APPEND slint_compiler_features "software-renderer")
+
+    # Switch to dlopening fontconfig in the slint-compiler to avoid the issue that
+    # for example in Yocto environments, PKG_CONFIG_PATH will be set to the target only
+    # and pkg-config in PATH doesn't permit lookups in the hots.
+    if(CMAKE_CROSSCOMPILING)
+        list(APPEND slint_compiler_features "fontconfig-dlopen")
+    endif()
+
     if (SLINT_FEATURE_SDF_FONTS)
         list(APPEND slint_compiler_features "sdf-fonts")
     endif()

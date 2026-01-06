@@ -60,6 +60,7 @@ pub fn ensure_window(
         is_flickable_viewport: false,
         item_index: Default::default(),
         item_index_of_first_children: Default::default(),
+        grid_layout_cell: None,
         debug: std::mem::take(&mut win_elem_mut.debug),
 
         inline_depth: 0,
@@ -141,7 +142,7 @@ pub fn ensure_window(
 }
 
 pub fn inherits_window(component: &Rc<Component>) -> bool {
-    component.root_element.borrow().builtin_type().map_or(true, |b| {
+    component.root_element.borrow().builtin_type().is_none_or(|b| {
         matches!(b.name.as_str(), "Window" | "Dialog" | "WindowItem" | "PopupWindow")
     })
 }

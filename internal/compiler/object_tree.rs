@@ -11,17 +11,17 @@ use crate::diagnostics::{BuildDiagnostics, SourceLocation, Spanned};
 use crate::expression_tree::{self, BindingExpression, Callable, Expression, Unit};
 use crate::langtype::{
     BuiltinElement, BuiltinPropertyDefault, Enumeration, EnumerationValue, Function, NativeClass,
-    Struct, Type,
+    Struct, StructName, Type,
 };
 use crate::langtype::{ElementType, PropertyLookupResult};
 use crate::layout::{LayoutConstraints, Orientation};
 use crate::namedreference::NamedReference;
 use crate::parser;
-use crate::parser::{syntax_nodes, SyntaxKind, SyntaxNode};
+use crate::parser::{SyntaxKind, SyntaxNode, syntax_nodes};
 use crate::typeloader::{ImportKind, ImportedTypes, LibraryInfo};
 use crate::typeregister::TypeRegister;
 use itertools::Either;
-use smol_str::{format_smolstr, SmolStr, ToSmolStr};
+use smol_str::{SmolStr, ToSmolStr, format_smolstr};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -81,8 +81,8 @@ impl Document {
         debug_assert_eq!(node.kind(), SyntaxKind::Document);
 
         let mut local_registry = TypeRegister::new(parent_registry);
-        let mut inner_components = vec![];
-        let mut inner_types = vec![];
+        let mut inner_components = Vec::new();
+        let mut inner_types = Vec::new();
 
         let mut process_component =
             |n: syntax_nodes::Component,
@@ -90,7 +90,7 @@ impl Document {
              local_registry: &mut TypeRegister| {
                 let compo = Component::from_node(n, diag, local_registry);
                 if !local_registry.add(compo.clone()) {
-                    diag.push_warning(format!("Component '{}' is replacing a previously defined component with the same name", compo.id), &syntax_nodes::Component::from(compo.node.clone().unwrap()).DeclaredIdentifier());
+                    diag.push_warning(format!("Component '{}' is replacing a previously defined component with the same name", compo.id), &compo.node.clone().unwrap().DeclaredIdentifier());
                 }
                 inner_components.push(compo);
             };
@@ -98,12 +98,10 @@ impl Document {
                               diag: &mut BuildDiagnostics,
                               local_registry: &mut TypeRegister,
                               inner_types: &mut Vec<Type>| {
-            let rust_attributes = n.AtRustAttr().map(|child| vec![child.text().to_smolstr()]);
             let ty = type_struct_from_node(
                 n.ObjectType(),
                 diag,
                 local_registry,
-                rust_attributes,
                 parser::identifier_text(&n.DeclaredIdentifier()),
             );
             assert!(matches!(ty, Type::Struct(_)));
@@ -349,6 +347,74 @@ pub struct UsedSubTypes {
     pub library_global_imports: Vec<(SmolStr, LibraryInfo)>,
 }
 
+/// A parsed [syntax_nodes::UsesIdentifier].
+#[derive(Clone, Debug)]
+struct UsesStatement {
+    interface_name: QualifiedTypeName,
+    child_id: SmolStr,
+    node: syntax_nodes::UsesIdentifier,
+}
+
+impl UsesStatement {
+    /// Get the node representing the interface name.
+    fn interface_name_node(&self) -> syntax_nodes::QualifiedName {
+        self.node.QualifiedName()
+    }
+
+    /// Get the node representing the child identifier.
+    fn child_id_node(&self) -> syntax_nodes::DeclaredIdentifier {
+        self.node.DeclaredIdentifier()
+    }
+
+    /// Lookup the interface component for this uses statement. Emits an error if the iterface could not be found, or
+    /// was not actually an interface.
+    fn lookup_interface(
+        &self,
+        tr: &TypeRegister,
+        diag: &mut BuildDiagnostics,
+    ) -> Result<Rc<Component>, ()> {
+        let interface_name = self.interface_name.to_smolstr();
+        match tr.lookup_element(&interface_name) {
+            Ok(element_type) => match element_type {
+                ElementType::Component(component) => {
+                    if !component.is_interface() {
+                        diag.push_error(
+                            format!("'{}' is not an interface", self.interface_name),
+                            &self.interface_name_node(),
+                        );
+                        return Err(());
+                    }
+
+                    Ok(component)
+                }
+                _ => {
+                    diag.push_error(
+                        format!("'{}' is not an interface", self.interface_name),
+                        &self.interface_name_node(),
+                    );
+                    Err(())
+                }
+            },
+            Err(error) => {
+                diag.push_error(error, &self.interface_name_node());
+                Err(())
+            }
+        }
+    }
+}
+
+impl From<&syntax_nodes::UsesIdentifier> for UsesStatement {
+    fn from(node: &syntax_nodes::UsesIdentifier) -> UsesStatement {
+        UsesStatement {
+            interface_name: QualifiedTypeName::from_node(
+                node.child_node(SyntaxKind::QualifiedName).unwrap().clone().into(),
+            ),
+            child_id: parser::identifier_text(&node.DeclaredIdentifier()).unwrap_or_default(),
+            node: node.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct InitCode {
     // Code from init callbacks collected from elements
@@ -440,10 +506,17 @@ impl Component {
             root_element: Element::from_node(
                 node.Element(),
                 "root".into(),
-                if node.child_text(SyntaxKind::Identifier).is_some_and(|t| t == "global") {
-                    ElementType::Global
-                } else {
-                    ElementType::Error
+                match node.child_text(SyntaxKind::Identifier) {
+                    Some(t) if t == "global" => ElementType::Global,
+                    Some(t) if t == "interface" => {
+                        if !diag.enable_experimental {
+                            diag.push_error("'interface' is an experimental feature".into(), &node);
+                            ElementType::Error
+                        } else {
+                            ElementType::Interface
+                        }
+                    }
+                    _ => ElementType::Error,
                 },
                 &mut child_insertion_point,
                 is_legacy_syntax,
@@ -463,6 +536,7 @@ impl Component {
                 *qualified_id = format_smolstr!("{}::{}", c.id, qualified_id);
             }
         });
+        apply_uses_statement(&c.root_element, node.UsesSpecifier(), tr, diag);
         c
     }
 
@@ -473,6 +547,11 @@ impl Component {
             ElementType::Builtin(c) => c.is_global,
             _ => false,
         }
+    }
+
+    /// This is an interface introduced with the "interface" keyword
+    pub fn is_interface(&self) -> bool {
+        matches!(&self.root_element.borrow().base_type, ElementType::Interface)
     }
 
     /// Returns the names of aliases to global singletons, exactly as
@@ -693,7 +772,7 @@ impl GeometryProps {
 
 pub type BindingsMap = BTreeMap<SmolStr, RefCell<BindingExpression>>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ElementDebugInfo {
     // The id qualified with the enclosing component name. Given `foo := Bar {}` this is `EnclosingComponent::foo`
     pub qualified_id: Option<SmolStr>,
@@ -791,6 +870,9 @@ pub struct Element {
     /// How many times the element was inlined
     pub inline_depth: i32,
 
+    /// Information about the grid cell containing this element, if applicable
+    pub grid_layout_cell: Option<Rc<RefCell<crate::layout::GridLayoutCell>>>,
+
     /// Debug information about this element.
     ///
     /// There can be several in case of inlining or optimization (child merged into their parent).
@@ -801,7 +883,16 @@ pub struct Element {
 
 impl Spanned for Element {
     fn span(&self) -> crate::diagnostics::Span {
-        self.debug.first().map(|n| n.node.span()).unwrap_or_default()
+        self.debug
+            .first()
+            .map(|n| {
+                // If possible, only span the qualified name of the Element (i.e. the `MyElement`
+                // part of `MyElement { ... }`, as otherwise the span can get very large, which
+                // isn't useful for showing diagnostics.
+                // Only use the full span as the fallback.
+                n.node.QualifiedName().as_ref().map(Spanned::span).unwrap_or_else(|| n.node.span())
+            })
+            .unwrap_or_default()
     }
 
     fn source_file(&self) -> Option<&crate::diagnostics::SourceFile> {
@@ -978,6 +1069,28 @@ pub struct RepeatedElementInfo {
 pub type ElementRc = Rc<RefCell<Element>>;
 pub type ElementWeak = Weak<RefCell<Element>>;
 
+#[derive(Debug, PartialEq)]
+/// The kind of relationship a component has the component or interface it derives from, if any.
+enum ParentRelationship {
+    /// The component inherits from the parent component.
+    Inherits,
+    /// The component implements the parent interface.
+    Implements,
+}
+
+/// Determine the expected relationship to the parent component/interface, if any.
+fn expected_relationship_to_parent(node: &syntax_nodes::Element) -> Option<ParentRelationship> {
+    let parent = node.parent().filter(|p| p.kind() == SyntaxKind::Component)?;
+    let implements_inherits_identifier =
+        parent.children_with_tokens().filter(|n| n.kind() == SyntaxKind::Identifier).nth(1)?;
+    let token = implements_inherits_identifier.as_token()?;
+    match token.text() {
+        "inherits" => Some(ParentRelationship::Inherits),
+        "implements" => Some(ParentRelationship::Implements),
+        _ => None,
+    }
+}
+
 impl Element {
     pub fn make_rc(self) -> ElementRc {
         let r = ElementRc::new(RefCell::new(self));
@@ -995,27 +1108,70 @@ impl Element {
         diag: &mut BuildDiagnostics,
         tr: &TypeRegister,
     ) -> ElementRc {
+        let mut interfaces: Vec<Rc<Component>> = Vec::new();
         let base_type = if let Some(base_node) = node.QualifiedName() {
             let base = QualifiedTypeName::from_node(base_node.clone());
             let base_string = base.to_smolstr();
-            match parent_type.lookup_type_for_child_element(&base_string, tr) {
-                Ok(ElementType::Component(c)) if c.is_global() => {
+            match (
+                parent_type.lookup_type_for_child_element(&base_string, tr),
+                expected_relationship_to_parent(&node),
+            ) {
+                (Ok(ElementType::Component(c)), _) if c.is_global() => {
                     diag.push_error(
                         "Cannot create an instance of a global component".into(),
                         &base_node,
                     );
                     ElementType::Error
                 }
-                Ok(ty) => ty,
-                Err(err) => {
+                (Ok(ElementType::Component(c)), Some(ParentRelationship::Implements)) => {
+                    if !diag.enable_experimental {
+                        diag.push_error(
+                            "'implements' is an experimental feature".into(),
+                            &base_node,
+                        );
+                        ElementType::Error
+                    } else if !c.is_interface() {
+                        diag.push_error(
+                            format!("Cannot implement {}. It is not an interface", base_string),
+                            &base_node,
+                        );
+                        ElementType::Error
+                    } else {
+                        c.used.set(true);
+                        interfaces.push(c);
+                        // We are implementing an interface - not inheriting from it
+                        tr.empty_type()
+                    }
+                }
+                (Ok(ElementType::Builtin(_bt)), Some(ParentRelationship::Implements)) => {
+                    if !diag.enable_experimental {
+                        diag.push_error(
+                            "'implements' is an experimental feature".into(),
+                            &base_node,
+                        );
+                    } else {
+                        diag.push_error(
+                            format!("Cannot implement {}. It is not an interface", base_string),
+                            &base_node,
+                        );
+                    }
+                    ElementType::Error
+                }
+                (Ok(ty), _) => ty,
+                (Err(err), _) => {
                     diag.push_error(err, &base_node);
                     ElementType::Error
                 }
             }
-        } else if parent_type == ElementType::Global {
-            // This must be a global component it can only have properties and callback
+        } else if parent_type == ElementType::Global || parent_type == ElementType::Interface {
+            // This must be a global component or interface. It can only have properties and callbacks
             let mut error_on = |node: &dyn Spanned, what: &str| {
-                diag.push_error(format!("A global component cannot have {what}"), node);
+                let element_type = match parent_type {
+                    ElementType::Global => "A global component",
+                    ElementType::Interface => "An interface",
+                    _ => "An unexpected type",
+                };
+                diag.push_error(format!("{element_type} cannot have {what}"), node);
             };
             node.SubElement().for_each(|n| error_on(&n, "sub elements"));
             node.RepeatedElement().for_each(|n| error_on(&n, "sub elements"));
@@ -1036,7 +1192,7 @@ impl Element {
                 }
             });
 
-            ElementType::Global
+            parent_type
         } else if parent_type != ElementType::Error {
             // This should normally never happen because the parser does not allow for this
             assert!(diag.has_errors());
@@ -1056,7 +1212,7 @@ impl Element {
             .to_string();
         let mut r = Element {
             id,
-            base_type,
+            base_type: base_type.clone(),
             debug: vec![ElementDebugInfo {
                 qualified_id,
                 element_hash: 0,
@@ -1068,6 +1224,14 @@ impl Element {
             is_legacy_syntax,
             ..Default::default()
         };
+
+        for interface in interfaces.iter() {
+            for (prop_name, prop_decl) in
+                interface.root_element.borrow().property_declarations.iter()
+            {
+                r.property_declarations.insert(prop_name.clone(), prop_decl.clone());
+            }
+        }
 
         for prop_decl in node.PropertyDeclaration() {
             let prop_type = prop_decl
@@ -1140,6 +1304,13 @@ impl Element {
                 }
             });
 
+            if base_type == ElementType::Interface && visibility == PropertyVisibility::Private {
+                diag.push_error(
+                    "'private' properties are inaccessible in an interface".into(),
+                    &prop_decl,
+                );
+            }
+
             r.property_declarations.insert(
                 prop_name.clone().into(),
                 PropertyDeclaration {
@@ -1163,16 +1334,15 @@ impl Element {
                     }
                 }
             }
-            if let Some(csn) = prop_decl.TwoWayBinding() {
-                if r.bindings
+            if let Some(csn) = prop_decl.TwoWayBinding()
+                && r.bindings
                     .insert(prop_name.into(), BindingExpression::new_uncompiled(csn.into()).into())
                     .is_some()
-                {
-                    diag.push_error(
-                        "Duplicated property binding".into(),
-                        &prop_decl.DeclaredIdentifier(),
-                    );
-                }
+            {
+                diag.push_error(
+                    "Duplicated property binding".into(),
+                    &prop_decl.DeclaredIdentifier(),
+                );
             }
         }
 
@@ -1303,8 +1473,8 @@ impl Element {
                 continue;
             }
 
-            let mut args = vec![];
-            let mut arg_names = vec![];
+            let mut args = Vec::new();
+            let mut arg_names = Vec::new();
             for a in func.ArgumentDeclaration() {
                 args.push(type_from_node(a.Type(), diag, tr));
                 let name =
@@ -1982,6 +2152,129 @@ fn apply_default_type_properties(element: &mut Element) {
     }
 }
 
+fn apply_uses_statement(
+    e: &ElementRc,
+    uses_specifier: Option<syntax_nodes::UsesSpecifier>,
+    tr: &TypeRegister,
+    diag: &mut BuildDiagnostics,
+) {
+    let Some(uses_specifier) = uses_specifier else {
+        return;
+    };
+
+    if !diag.enable_experimental {
+        diag.push_error("'uses' is an experimental feature".into(), &uses_specifier);
+        return;
+    }
+
+    for uses_identifier_node in uses_specifier.UsesIdentifier() {
+        let uses_statement: UsesStatement = (&uses_identifier_node).into();
+        let Ok(interface) = uses_statement.lookup_interface(tr, diag) else {
+            continue;
+        };
+
+        let Some(child) = find_element_by_id(e, &uses_statement.child_id) else {
+            diag.push_error(
+                format!("'{}' does not exist", uses_statement.child_id),
+                &uses_statement.child_id_node(),
+            );
+            continue;
+        };
+
+        if !element_implements_interface(&child, &interface, &uses_statement, diag) {
+            continue;
+        }
+
+        for (prop_name, prop_decl) in &interface.root_element.borrow().property_declarations {
+            let lookup_result = e.borrow().base_type.lookup_property(prop_name);
+            if lookup_result.is_valid() {
+                diag.push_error(
+                    format!(
+                        "Cannot use interface '{}' because property '{}' conflicts with existing property in '{}'",
+                        uses_statement.interface_name, prop_name, e.borrow().base_type
+                    ),
+                    &uses_statement.interface_name_node(),
+                );
+                continue;
+            }
+
+            if let Some(existing_property) =
+                e.borrow_mut().property_declarations.insert(prop_name.clone(), prop_decl.clone())
+            {
+                let source = existing_property
+                    .node
+                    .as_ref()
+                    .and_then(|node| node.child_node(SyntaxKind::DeclaredIdentifier))
+                    .and_then(|node| node.child_token(SyntaxKind::Identifier))
+                    .map_or_else(
+                        || parser::NodeOrToken::Node(uses_statement.child_id_node().into()),
+                        |token| parser::NodeOrToken::Token(token),
+                    );
+
+                diag.push_error(
+                    format!(
+                        "Cannot override property '{}' from '{}'",
+                        prop_name, uses_statement.interface_name
+                    ),
+                    &source,
+                );
+                continue;
+            }
+
+            if let Some(existing_binding) = e.borrow_mut().bindings.insert(
+                prop_name.clone(),
+                BindingExpression::new_two_way(
+                    NamedReference::new(&child, prop_name.clone()).into(),
+                )
+                .into(),
+            ) {
+                let message = format!(
+                    "Cannot override binding for property '{}' from interface '{}'",
+                    prop_name, uses_statement.interface_name
+                );
+                if let Some(location) = &existing_binding.borrow().span {
+                    diag.push_error(message, location);
+                } else {
+                    diag.push_error(message, &uses_statement.interface_name_node());
+                }
+
+                continue;
+            }
+        }
+    }
+}
+
+/// Check that the given element implements the given interface. Emits a diagnostic if the interface is not implemented.
+fn element_implements_interface(
+    element: &ElementRc,
+    interface: &Rc<Component>,
+    uses_statement: &UsesStatement,
+    diag: &mut BuildDiagnostics,
+) -> bool {
+    let property_matches_interface =
+        |property: &PropertyLookupResult, interface_declaration: &PropertyDeclaration| -> bool {
+            property.property_type == interface_declaration.property_type
+                && property.property_visibility == interface_declaration.visibility
+        };
+
+    for (property_name, property_declaration) in
+        interface.root_element.borrow().property_declarations.iter()
+    {
+        let lookup_result = element.borrow().lookup_property(property_name);
+        if !property_matches_interface(&lookup_result, property_declaration) {
+            diag.push_error(
+                format!(
+                    "{} does not implement {}",
+                    uses_statement.child_id, uses_statement.interface_name
+                ),
+                &uses_statement.child_id_node(),
+            );
+            return false;
+        }
+    }
+    true
+}
+
 /// Create a Type for this node
 pub fn type_from_node(
     node: syntax_nodes::Type,
@@ -2003,7 +2296,7 @@ pub fn type_from_node(
         }
         prop_type
     } else if let Some(object_node) = node.ObjectType() {
-        type_struct_from_node(object_node, diag, tr, None, None)
+        type_struct_from_node(object_node, diag, tr, None)
     } else if let Some(array_node) = node.ArrayType() {
         Type::Array(Rc::new(type_from_node(array_node.Type(), diag, tr)))
     } else {
@@ -2017,7 +2310,6 @@ pub fn type_struct_from_node(
     object_node: syntax_nodes::ObjectType,
     diag: &mut BuildDiagnostics,
     tr: &TypeRegister,
-    rust_attributes: Option<Vec<SmolStr>>,
     name: Option<SmolStr>,
 ) -> Type {
     let fields = object_node
@@ -2029,7 +2321,10 @@ pub fn type_struct_from_node(
             )
         })
         .collect();
-    Type::Struct(Rc::new(Struct { fields, name, node: Some(object_node), rust_attributes }))
+    Type::Struct(Rc::new(Struct {
+        fields,
+        name: name.map_or(StructName::None, |name| StructName::User { name, node: object_node }),
+    }))
 }
 
 fn animation_element_from_node(
@@ -2213,12 +2508,11 @@ pub fn recurse_elem_including_sub_components<State>(
             component as *const Component,
             (&*elem.borrow().enclosing_component.upgrade().unwrap()) as *const Component
         ));
-        if elem.borrow().repeated.is_some() {
-            if let ElementType::Component(base) = &elem.borrow().base_type {
-                if base.parent_element.upgrade().is_some() {
-                    recurse_elem_including_sub_components(base, state, vis);
-                }
-            }
+        if elem.borrow().repeated.is_some()
+            && let ElementType::Component(base) = &elem.borrow().base_type
+            && base.parent_element.upgrade().is_some()
+        {
+            recurse_elem_including_sub_components(base, state, vis);
         }
         vis(elem, state)
     });
@@ -2374,8 +2668,17 @@ pub fn visit_named_references_in_expression(
             ..
         } => vis(r),
         Expression::LayoutCacheAccess { layout_cache_prop, .. } => vis(layout_cache_prop),
-        Expression::SolveLayout(l, _) => l.visit_named_references(vis),
+        Expression::OrganizeGridLayout(l) => l.visit_named_references(vis),
         Expression::ComputeLayoutInfo(l, _) => l.visit_named_references(vis),
+        Expression::ComputeGridLayoutInfo { layout_organized_data_prop, layout, .. } => {
+            vis(layout_organized_data_prop);
+            layout.visit_named_references(vis);
+        }
+        Expression::SolveLayout(l, _) => l.visit_named_references(vis),
+        Expression::SolveGridLayout { layout_organized_data_prop, layout, .. } => {
+            vis(layout_organized_data_prop);
+            layout.visit_named_references(vis);
+        }
         // This is not really a named reference, but the result is the same, it need to be updated
         // FIXME: this should probably be lowered into a PropertyReference
         Expression::RepeaterModelReference { element }
@@ -2415,14 +2718,14 @@ pub fn visit_all_named_references_in_element(
     }
     elem.borrow_mut().transitions = transitions;
     let mut repeated = std::mem::take(&mut elem.borrow_mut().repeated);
-    if let Some(r) = &mut repeated {
-        if let Some(lv) = &mut r.is_listview {
-            vis(&mut lv.viewport_y);
-            vis(&mut lv.viewport_height);
-            vis(&mut lv.viewport_width);
-            vis(&mut lv.listview_height);
-            vis(&mut lv.listview_width);
-        }
+    if let Some(r) = &mut repeated
+        && let Some(lv) = &mut r.is_listview
+    {
+        vis(&mut lv.viewport_y);
+        vis(&mut lv.viewport_height);
+        vis(&mut lv.viewport_width);
+        vis(&mut lv.listview_height);
+        vis(&mut lv.listview_width);
     }
     elem.borrow_mut().repeated = repeated;
     let mut layout_info_prop = std::mem::take(&mut elem.borrow_mut().layout_info_prop);
@@ -2849,10 +3152,10 @@ pub fn inject_element_as_repeated_element(repeated_element: &ElementRc, new_root
     // Any elements with a weak reference to the repeater's component will need fixing later.
     let mut elements_with_enclosing_component_reference = Vec::new();
     recurse_elem(old_root, &(), &mut |element: &ElementRc, _| {
-        if let Some(enclosing_component) = element.borrow().enclosing_component.upgrade() {
-            if Rc::ptr_eq(&enclosing_component, &component) {
-                elements_with_enclosing_component_reference.push(element.clone());
-            }
+        if let Some(enclosing_component) = element.borrow().enclosing_component.upgrade()
+            && Rc::ptr_eq(&enclosing_component, &component)
+        {
+            elements_with_enclosing_component_reference.push(element.clone());
         }
     });
     elements_with_enclosing_component_reference

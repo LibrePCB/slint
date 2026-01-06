@@ -96,6 +96,10 @@ struct Cli {
     #[arg(long = "bundle-translations", name = "path")]
     bundle_translations: Option<std::path::PathBuf>,
 
+    /// Disable the default to use the component name as translation context when none is specified in `@tr`
+    #[arg(long = "no-default-translation-context")]
+    no_default_translation_context: bool,
+
     /// Define the C++ namespace for generated code.
     #[arg(long = "cpp-namespace", name = "C++ namespace")]
     cpp_namespace: Option<String>,
@@ -124,6 +128,7 @@ fn main() -> std::io::Result<()> {
     let mut format = args.format.clone().unwrap_or_else(|| {
         match std::path::Path::new(&args.output).extension().and_then(|ext| ext.to_str()) {
             Some("rs") => generator::OutputFormat::Rust,
+            Some("py") => generator::OutputFormat::Python,
             _ => generator::OutputFormat::Cpp(Default::default()),
         }
     });
@@ -140,7 +145,7 @@ fn main() -> std::io::Result<()> {
 
     if !args.cpp_files.is_empty() {
         match &mut format {
-            generator::OutputFormat::Cpp(ref mut config) => {
+            generator::OutputFormat::Cpp(config) => {
                 config.cpp_files = args.cpp_files;
 
                 if args.output == std::path::Path::new("-") {
@@ -158,6 +163,10 @@ fn main() -> std::io::Result<()> {
 
     let mut compiler_config = CompilerConfiguration::new(format.clone());
     compiler_config.translation_domain = args.translation_domain;
+    if args.no_default_translation_context {
+        compiler_config.default_translation_context =
+            i_slint_compiler::DefaultTranslationContext::None;
+    }
 
     // Override defaults from command line:
     if let Some(embed) = args.embed_resources {
@@ -196,13 +205,17 @@ fn main() -> std::io::Result<()> {
     let diag = diag.check_and_exit_on_error();
 
     if args.output == std::path::Path::new("-") {
-        generator::generate(format, &mut std::io::stdout(), &doc, &loader.compiler_config)?;
+        generator::generate(format, &mut std::io::stdout(), None, &doc, &loader.compiler_config)?;
     } else {
-        let mut file =
-            BufWriter::new(atomic_write_file::AtomicWriteFile::options().open(&args.output)?);
-        generator::generate(format, &mut file, &doc, &loader.compiler_config)?;
-        file.flush()?;
-        file.into_inner()?.commit()?;
+        let mut file_writer = BufWriter::new(atomic_write_file::AtomicWriteFile::options().open(&args.output)?);
+        generator::generate(
+            format,
+            &mut file_writer,
+            Some(&args.output),
+            &doc,
+            &loader.compiler_config,
+        )?;
+        file_writer.flush()?;
     }
 
     if let Some(depfile) = args.depfile {

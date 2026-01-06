@@ -1,11 +1,11 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+use crate::EmbedResourcesKind;
 use crate::diagnostics::BuildDiagnostics;
 use crate::embedded_resources::*;
 use crate::expression_tree::{Expression, ImageReference};
 use crate::object_tree::*;
-use crate::EmbedResourcesKind;
 #[cfg(feature = "software-renderer")]
 use image::GenericImageView;
 use smol_str::SmolStr;
@@ -71,10 +71,10 @@ fn collect_image_urls_from_expression(
     e: &Expression,
     urls: &mut HashMap<SmolStr, Option<SmolStr>>,
 ) {
-    if let Expression::ImageReference { resource_ref, .. } = e {
-        if let ImageReference::AbsolutePath(path) = resource_ref {
-            urls.insert(path.clone(), None);
-        }
+    if let Expression::ImageReference { resource_ref, .. } = e
+        && let ImageReference::AbsolutePath(path) = resource_ref
+    {
+        urls.insert(path.clone(), None);
     };
 
     e.visit(|e| collect_image_urls_from_expression(e, urls));
@@ -88,27 +88,27 @@ fn embed_images_from_expression(
     scale_factor: f32,
     diag: &mut BuildDiagnostics,
 ) {
-    if let Expression::ImageReference { resource_ref, source_location, nine_slice: _ } = e {
-        if let ImageReference::AbsolutePath(path) = resource_ref {
-            // used mapped path:
-            let mapped_path =
-                urls.get(path).unwrap_or(&Some(path.clone())).clone().unwrap_or(path.clone());
-            *path = mapped_path;
-            if embed_files != EmbedResourcesKind::Nothing
-                && (embed_files != EmbedResourcesKind::OnlyBuiltinResources
-                    || path.starts_with("builtin:/"))
-            {
-                let image_ref = embed_image(
-                    global_embedded_resources,
-                    embed_files,
-                    path,
-                    scale_factor,
-                    diag,
-                    source_location,
-                );
-                if embed_files != EmbedResourcesKind::ListAllResources {
-                    *resource_ref = image_ref;
-                }
+    if let Expression::ImageReference { resource_ref, source_location, nine_slice: _ } = e
+        && let ImageReference::AbsolutePath(path) = resource_ref
+    {
+        // used mapped path:
+        let mapped_path =
+            urls.get(path).unwrap_or(&Some(path.clone())).clone().unwrap_or(path.clone());
+        *path = mapped_path;
+        if embed_files != EmbedResourcesKind::Nothing
+            && (embed_files != EmbedResourcesKind::OnlyBuiltinResources
+                || path.starts_with("builtin:/"))
+        {
+            let image_ref = embed_image(
+                global_embedded_resources,
+                embed_files,
+                path,
+                scale_factor,
+                diag,
+                source_location,
+            );
+            if embed_files != EmbedResourcesKind::ListAllResources {
+                *resource_ref = image_ref;
             }
         }
     };
@@ -283,11 +283,7 @@ fn generate_texture(
                 }
                 ColorState::Rgb([a, b, c]) => {
                     let abs_diff = |t, u| {
-                        if t < u {
-                            u - t
-                        } else {
-                            t - u
-                        }
+                        if t < u { u - t } else { t - u }
                     };
                     let px = get_pixel();
                     if abs_diff(a, px[0]) > 2 || abs_diff(b, px[1]) > 2 || abs_diff(c, px[2]) > 2 {

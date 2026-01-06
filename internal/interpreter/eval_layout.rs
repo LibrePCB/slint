@@ -1,16 +1,18 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+use crate::Value;
 use crate::dynamic_item_tree::InstanceRef;
 use crate::eval::{self, EvalLocalContext};
-use crate::Value;
 use i_slint_compiler::expression_tree::Expression;
 use i_slint_compiler::langtype::Type;
-use i_slint_compiler::layout::{Layout, LayoutConstraints, LayoutGeometry, Orientation};
+use i_slint_compiler::layout::{
+    GridLayout, Layout, LayoutConstraints, LayoutGeometry, Orientation, RowColExpr,
+};
 use i_slint_compiler::namedreference::NamedReference;
 use i_slint_compiler::object_tree::ElementRc;
 use i_slint_core::items::{DialogButtonRole, ItemRc};
-use i_slint_core::layout::{self as core_layout};
+use i_slint_core::layout::{self as core_layout, GridLayoutOrganizedData};
 use i_slint_core::model::RepeatedItemTree;
 use i_slint_core::slice::Slice;
 use i_slint_core::window::WindowAdapter;
@@ -31,6 +33,30 @@ pub(crate) fn from_runtime(o: core_layout::Orientation) -> Orientation {
     }
 }
 
+pub(crate) fn compute_grid_layout_info(
+    grid_layout: &GridLayout,
+    organized_data: &GridLayoutOrganizedData,
+    orientation: Orientation,
+    local_context: &mut EvalLocalContext,
+) -> Value {
+    let component = local_context.component_instance;
+    let expr_eval = |nr: &NamedReference| -> f32 {
+        eval::load_property(component, &nr.element(), nr.name()).unwrap().try_into().unwrap()
+    };
+    let (padding, spacing) = padding_and_spacing(&grid_layout.geometry, orientation, &expr_eval);
+    let repeater_indices = grid_repeater_indices(grid_layout, local_context);
+    let constraints = grid_layout_constraints(grid_layout, orientation, local_context);
+    core_layout::grid_layout_info(
+        organized_data.clone(),
+        Slice::from_slice(constraints.as_slice()),
+        Slice::from_slice(repeater_indices.as_slice()),
+        spacing,
+        &padding,
+        to_runtime(orientation),
+    )
+    .into()
+}
+
 pub(crate) fn compute_layout_info(
     lay: &Layout,
     orientation: Orientation,
@@ -41,11 +67,8 @@ pub(crate) fn compute_layout_info(
         eval::load_property(component, &nr.element(), nr.name()).unwrap().try_into().unwrap()
     };
     match lay {
-        Layout::GridLayout(grid_layout) => {
-            let cells = grid_layout_data(grid_layout, orientation, component, &expr_eval);
-            let (padding, spacing) =
-                padding_and_spacing(&grid_layout.geometry, orientation, &expr_eval);
-            core_layout::grid_layout_info(Slice::from(cells.as_slice()), spacing, &padding).into()
+        Layout::GridLayout(_) => {
+            panic!("only BoxLayout is supported");
         }
         Layout::BoxLayout(box_layout) => {
             let (cells, alignment) =
@@ -67,6 +90,63 @@ pub(crate) fn compute_layout_info(
     }
 }
 
+pub(crate) fn organize_grid_layout(
+    layout: &GridLayout,
+    local_context: &mut EvalLocalContext,
+) -> Value {
+    let cells = grid_layout_input_data(layout, local_context);
+    let repeater_indices = grid_repeater_indices(layout, local_context);
+    if let Some(buttons_roles) = &layout.dialog_button_roles {
+        let roles = buttons_roles
+            .iter()
+            .map(|r| DialogButtonRole::from_str(r).unwrap())
+            .collect::<Vec<_>>();
+        core_layout::organize_dialog_button_layout(
+            Slice::from_slice(cells.as_slice()),
+            Slice::from_slice(roles.as_slice()),
+        )
+        .into()
+    } else {
+        core_layout::organize_grid_layout(
+            Slice::from_slice(cells.as_slice()),
+            Slice::from_slice(repeater_indices.as_slice()),
+        )
+        .into()
+    }
+}
+
+pub(crate) fn solve_grid_layout(
+    organized_data: &GridLayoutOrganizedData,
+    grid_layout: &GridLayout,
+    orientation: Orientation,
+    local_context: &mut EvalLocalContext,
+) -> Value {
+    let component = local_context.component_instance;
+    let expr_eval = |nr: &NamedReference| -> f32 {
+        eval::load_property(component, &nr.element(), nr.name()).unwrap().try_into().unwrap()
+    };
+    let repeater_indices = grid_repeater_indices(grid_layout, local_context);
+    let constraints = grid_layout_constraints(grid_layout, orientation, local_context);
+
+    let (padding, spacing) = padding_and_spacing(&grid_layout.geometry, orientation, &expr_eval);
+    let size_ref = grid_layout.geometry.rect.size_reference(orientation);
+
+    let data = core_layout::GridLayoutData {
+        size: size_ref.map(expr_eval).unwrap_or(0.),
+        spacing,
+        padding,
+        organized_data: organized_data.clone(),
+    };
+
+    core_layout::solve_grid_layout(
+        &data,
+        Slice::from_slice(constraints.as_slice()),
+        to_runtime(orientation),
+        Slice::from_slice(repeater_indices.as_slice()),
+    )
+    .into()
+}
+
 pub(crate) fn solve_layout(
     lay: &Layout,
     orientation: Orientation,
@@ -78,29 +158,8 @@ pub(crate) fn solve_layout(
     };
 
     match lay {
-        Layout::GridLayout(grid_layout) => {
-            let mut cells = grid_layout_data(grid_layout, orientation, component, &expr_eval);
-            if let (Some(buttons_roles), Orientation::Horizontal) =
-                (&grid_layout.dialog_button_roles, orientation)
-            {
-                let roles = buttons_roles
-                    .iter()
-                    .map(|r| DialogButtonRole::from_str(r).unwrap())
-                    .collect::<Vec<_>>();
-                core_layout::reorder_dialog_button_layout(&mut cells, &roles);
-            }
-
-            let (padding, spacing) =
-                padding_and_spacing(&grid_layout.geometry, orientation, &expr_eval);
-
-            let size_ref = grid_layout.geometry.rect.size_reference(orientation);
-            core_layout::solve_grid_layout(&core_layout::GridLayoutData {
-                size: size_ref.map(expr_eval).unwrap_or(0.),
-                spacing,
-                padding,
-                cells: Slice::from(cells.as_slice()),
-            })
-            .into()
+        Layout::GridLayout(_) => {
+            panic!("solve_layout called on GridLayout; use solve_grid_layout instead");
         }
         Layout::BoxLayout(box_layout) => {
             let mut repeated_indices = Vec::new();
@@ -144,17 +203,127 @@ fn padding_and_spacing(
     (padding, spacing)
 }
 
-/// return the celldata, the padding, and the spacing of a grid layout
-fn grid_layout_data(
+fn repeater_instances(
+    component: InstanceRef,
+    elem: &ElementRc,
+) -> Vec<crate::dynamic_item_tree::DynamicComponentVRc> {
+    generativity::make_guard!(guard);
+    let rep =
+        crate::dynamic_item_tree::get_repeater_by_name(component, elem.borrow().id.as_str(), guard);
+    rep.0.as_ref().ensure_updated(|| {
+        crate::dynamic_item_tree::instantiate(
+            rep.1.clone(),
+            component.self_weak().get().cloned(),
+            None,
+            None,
+            Default::default(),
+        )
+    });
+    rep.0.as_ref().instances_vec()
+}
+
+fn grid_layout_input_data(
+    grid_layout: &i_slint_compiler::layout::GridLayout,
+    ctx: &EvalLocalContext,
+) -> Vec<core_layout::GridLayoutInputData> {
+    let component = ctx.component_instance;
+    let mut result = Vec::with_capacity(grid_layout.elems.len());
+    let mut after_repeater_in_same_row = false;
+    let mut new_row = true;
+    for elem in grid_layout.elems.iter() {
+        let eval_or_default = |expr: &RowColExpr, component: InstanceRef| match expr {
+            RowColExpr::Literal(value) => *value as f32,
+            RowColExpr::Auto => i_slint_common::ROW_COL_AUTO,
+            RowColExpr::Named(nr) => {
+                // we could check for out-of-bounds here, but organize_grid_layout will also do it
+                eval::load_property(component, &nr.element(), nr.name())
+                    .unwrap()
+                    .try_into()
+                    .unwrap()
+            }
+        };
+
+        let cell_new_row = elem.cell.borrow().new_row;
+        if cell_new_row {
+            after_repeater_in_same_row = false;
+        }
+        if elem.item.element.borrow().repeated.is_some() {
+            let component_vec = repeater_instances(component, &elem.item.element);
+            new_row = cell_new_row;
+            for erased_sub_comp in &component_vec {
+                // Evaluate the row/col/rowspan/colspan expressions in the context of the sub-component
+                generativity::make_guard!(guard);
+                let sub_comp = erased_sub_comp.as_pin_ref();
+                let sub_instance_ref =
+                    unsafe { InstanceRef::from_pin_ref(sub_comp.borrow(), guard) };
+                let row = eval_or_default(&elem.cell.borrow().row_expr, sub_instance_ref);
+                let col = eval_or_default(&elem.cell.borrow().col_expr, sub_instance_ref);
+                let rowspan = eval_or_default(&elem.cell.borrow().rowspan_expr, sub_instance_ref);
+                let colspan = eval_or_default(&elem.cell.borrow().colspan_expr, sub_instance_ref);
+                result.push(core_layout::GridLayoutInputData {
+                    new_row,
+                    col,
+                    row,
+                    colspan,
+                    rowspan,
+                });
+                new_row = false;
+            }
+            after_repeater_in_same_row = true;
+        } else {
+            let new_row =
+                if cell_new_row || !after_repeater_in_same_row { cell_new_row } else { new_row };
+            let row = eval_or_default(&elem.cell.borrow().row_expr, component);
+            let col = eval_or_default(&elem.cell.borrow().col_expr, component);
+            let rowspan = eval_or_default(&elem.cell.borrow().rowspan_expr, component);
+            let colspan = eval_or_default(&elem.cell.borrow().colspan_expr, component);
+            result.push(core_layout::GridLayoutInputData { new_row, col, row, colspan, rowspan });
+        }
+    }
+    result
+}
+
+fn grid_repeater_indices(
+    grid_layout: &i_slint_compiler::layout::GridLayout,
+    ctx: &mut EvalLocalContext,
+) -> Vec<u32> {
+    let component = ctx.component_instance;
+    let mut repeater_indices = Vec::new();
+
+    let mut num_cells = 0;
+    for cell in grid_layout.elems.iter() {
+        if cell.item.element.borrow().repeated.is_some() {
+            let component_vec = repeater_instances(component, &cell.item.element);
+            repeater_indices.push(num_cells as _);
+            repeater_indices.push(component_vec.len() as _);
+            num_cells += component_vec.len();
+        } else {
+            num_cells += 1;
+        }
+    }
+    repeater_indices
+}
+
+fn grid_layout_constraints(
     grid_layout: &i_slint_compiler::layout::GridLayout,
     orientation: Orientation,
-    component: InstanceRef,
-    expr_eval: &impl Fn(&NamedReference) -> f32,
-) -> Vec<core_layout::GridLayoutCellData> {
-    let cells = grid_layout
-        .elems
-        .iter()
-        .map(|cell| {
+    ctx: &mut EvalLocalContext,
+) -> Vec<core_layout::LayoutItemInfo> {
+    let component = ctx.component_instance;
+    let expr_eval = |nr: &NamedReference| -> f32 {
+        eval::load_property(component, &nr.element(), nr.name()).unwrap().try_into().unwrap()
+    };
+    let mut constraints = Vec::with_capacity(grid_layout.elems.len());
+
+    for cell in grid_layout.elems.iter() {
+        if cell.item.element.borrow().repeated.is_some() {
+            let component_vec = repeater_instances(component, &cell.item.element);
+            constraints.extend(
+                component_vec
+                    .iter()
+                    .map(|x| x.as_pin_ref().layout_item_info(to_runtime(orientation))),
+            );
+        } else {
             let mut layout_info = get_layout_info(
                 &cell.item.element,
                 component,
@@ -167,11 +336,10 @@ fn grid_layout_data(
                 orientation,
                 &expr_eval,
             );
-            let (col_or_row, span) = cell.col_or_row_and_span(orientation);
-            core_layout::GridLayoutCellData { col_or_row, span, constraint: layout_info }
-        })
-        .collect::<Vec<_>>();
-    cells
+            constraints.push(core_layout::LayoutItemInfo { constraint: layout_info });
+        }
+    }
+    constraints
 }
 
 fn box_layout_data(
@@ -180,28 +348,12 @@ fn box_layout_data(
     component: InstanceRef,
     expr_eval: &impl Fn(&NamedReference) -> f32,
     mut repeater_indices: Option<&mut Vec<u32>>,
-) -> (Vec<core_layout::BoxLayoutCellData>, i_slint_core::items::LayoutAlignment) {
+) -> (Vec<core_layout::LayoutItemInfo>, i_slint_core::items::LayoutAlignment) {
     let window_adapter = component.window_adapter();
     let mut cells = Vec::with_capacity(box_layout.elems.len());
     for cell in &box_layout.elems {
         if cell.element.borrow().repeated.is_some() {
-            generativity::make_guard!(guard);
-            let rep = crate::dynamic_item_tree::get_repeater_by_name(
-                component,
-                cell.element.borrow().id.as_str(),
-                guard,
-            );
-            rep.0.as_ref().ensure_updated(|| {
-                let instance = crate::dynamic_item_tree::instantiate(
-                    rep.1.clone(),
-                    component.self_weak().get().cloned(),
-                    None,
-                    None,
-                    Default::default(),
-                );
-                instance
-            });
-            let component_vec = rep.0.as_ref().instances_vec();
+            let component_vec = repeater_instances(component, &cell.element);
             if let Some(ri) = repeater_indices.as_mut() {
                 ri.push(cells.len() as _);
                 ri.push(component_vec.len() as _);
@@ -209,7 +361,7 @@ fn box_layout_data(
             cells.extend(
                 component_vec
                     .iter()
-                    .map(|x| x.as_pin_ref().box_layout_data(to_runtime(orientation))),
+                    .map(|x| x.as_pin_ref().layout_item_info(to_runtime(orientation))),
             );
         } else {
             let mut layout_info =
@@ -220,7 +372,7 @@ fn box_layout_data(
                 orientation,
                 &expr_eval,
             );
-            cells.push(core_layout::BoxLayoutCellData { constraint: layout_info });
+            cells.push(core_layout::LayoutItemInfo { constraint: layout_info });
         }
     }
     let alignment = box_layout

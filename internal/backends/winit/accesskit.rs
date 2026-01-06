@@ -7,6 +7,7 @@ use std::ptr::NonNull;
 use std::rc::Weak;
 
 use accesskit::{Action, ActionRequest, Node, NodeId, Role, Toggled, Tree, TreeUpdate};
+use i_slint_core::SharedString;
 use i_slint_core::accessibility::{
     AccessibilityAction, AccessibleStringProperty, SupportedAccessibilityAction,
 };
@@ -16,7 +17,6 @@ use i_slint_core::item_tree::{ItemTreeRc, ItemTreeRef, ItemTreeWeak, ParentItemT
 use i_slint_core::items::{ItemRc, WindowItem};
 use i_slint_core::lengths::{LogicalPoint, ScaleFactor};
 use i_slint_core::window::{PopupWindowLocation, WindowInner};
-use i_slint_core::SharedString;
 use i_slint_core::{properties::PropertyTracker, window::WindowAdapter};
 
 use super::WinitWindowAdapter;
@@ -130,7 +130,7 @@ impl AccessKitAdapter {
             return;
         }
         self.inner.update_if_active(|| TreeUpdate {
-            nodes: vec![],
+            nodes: Vec::new(),
             tree: None,
             focus: self.nodes.focus_node(&self.window_adapter_weak),
         })
@@ -504,7 +504,7 @@ impl NodeCollection {
                                     i_slint_core::items::InputType::Decimal
                                     | i_slint_core::items::InputType::Number => Role::NumberInput,
                                     i_slint_core::items::InputType::Password => Role::PasswordInput,
-                                    _ => Role::TextInput,
+                                    i_slint_core::items::InputType::Text | _ => Role::TextInput,
                                 }
                             }
                         } else {
@@ -575,6 +575,10 @@ impl NodeCollection {
             item.accessible_string_property(AccessibleStringProperty::Description)
         {
             node.set_description(description.to_string());
+        }
+
+        if let Some(id) = item.accessible_string_property(AccessibleStringProperty::Id) {
+            node.set_author_id(id.to_string());
         }
 
         if item

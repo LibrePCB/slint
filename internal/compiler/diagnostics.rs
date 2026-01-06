@@ -10,12 +10,13 @@ use std::collections::BTreeSet;
 
 /// Span represent an error location within a file.
 ///
-/// Currently, it is just an offset in byte within the file.
+/// Currently, it is just an offset in byte within the file + the corresponding length.
 ///
 /// When the `proc_macro_span` feature is enabled, it may also hold a proc_macro span.
 #[derive(Debug, Clone)]
 pub struct Span {
     pub offset: usize,
+    pub length: usize,
     #[cfg(feature = "proc_macro_span")]
     pub span: Option<proc_macro::Span>,
 }
@@ -26,8 +27,8 @@ impl Span {
     }
 
     #[allow(clippy::needless_update)] // needed when `proc_macro_span` is enabled
-    pub fn new(offset: usize) -> Self {
-        Self { offset, ..Default::default() }
+    pub fn new(offset: usize, length: usize) -> Self {
+        Self { offset, length, ..Default::default() }
     }
 }
 
@@ -35,6 +36,7 @@ impl Default for Span {
     fn default() -> Self {
         Span {
             offset: usize::MAX,
+            length: 0,
             #[cfg(feature = "proc_macro_span")]
             span: Default::default(),
         }
@@ -43,7 +45,7 @@ impl Default for Span {
 
 impl PartialEq for Span {
     fn eq(&self, other: &Span) -> bool {
-        self.offset == other.offset
+        self.offset == other.offset && self.length == other.length
     }
 }
 
@@ -95,14 +97,24 @@ impl SourceFileInner {
     }
 
     /// Returns a tuple with the line (starting at 1) and column number (starting at 1)
-    pub fn line_column(&self, offset: usize) -> (usize, usize) {
+    pub fn line_column(&self, offset: usize, format: ByteFormat) -> (usize, usize) {
+        let adjust_utf16 = |line_begin, col| {
+            if format == ByteFormat::Utf8 {
+                col
+            } else {
+                let Some(source) = &self.source else { return col };
+                source[line_begin..][..col].encode_utf16().count()
+            }
+        };
+
         let line_offsets = self.line_offsets();
         line_offsets.binary_search(&offset).map_or_else(
             |line| {
                 if line == 0 {
-                    (1, offset + 1)
+                    (1, adjust_utf16(0, offset) + 1)
                 } else {
-                    (line + 1, line_offsets.get(line - 1).map_or(0, |x| offset - x + 1))
+                    let line_begin = *line_offsets.get(line - 1).unwrap_or(&0);
+                    (line + 1, adjust_utf16(line_begin, offset - line_begin) + 1)
                 }
             },
             |line| (line + 2, 1),
@@ -112,22 +124,40 @@ impl SourceFileInner {
     pub fn text_size_to_file_line_column(
         &self,
         size: TextSize,
+        format: ByteFormat,
     ) -> (String, usize, usize, usize, usize) {
         let file_name = self.path().to_string_lossy().to_string();
-        let (start_line, start_column) = self.line_column(size.into());
+        let (start_line, start_column) = self.line_column(size.into(), format);
         (file_name, start_line, start_column, start_line, start_column)
     }
 
     /// Returns the offset that corresponds to the line/column
-    pub fn offset(&self, line: usize, column: usize) -> usize {
+    pub fn offset(&self, line: usize, column: usize, format: ByteFormat) -> usize {
+        let adjust_utf16 = |line_begin, col| {
+            if format == ByteFormat::Utf8 {
+                col
+            } else {
+                let Some(source) = &self.source else { return col };
+                let mut utf16_counter = 0;
+                for (utf8_index, c) in source[line_begin..].char_indices() {
+                    if utf16_counter >= col {
+                        return utf8_index;
+                    }
+                    utf16_counter += c.len_utf16();
+                }
+                col
+            }
+        };
+
         let col_offset = column.saturating_sub(1);
         if line <= 1 {
             // line == 0 is actually invalid!
-            return col_offset;
+            return adjust_utf16(0, col_offset);
         }
         let offsets = self.line_offsets();
         let index = std::cmp::min(line.saturating_sub(1), offsets.len());
-        offsets.get(index.saturating_sub(1)).unwrap_or(&0).saturating_add(col_offset)
+        let line_offset = *offsets.get(index.saturating_sub(1)).unwrap_or(&0);
+        line_offset.saturating_add(adjust_utf16(line_offset, col_offset))
     }
 
     fn line_offsets(&self) -> &[usize] {
@@ -149,6 +179,13 @@ impl SourceFileInner {
     pub fn source(&self) -> Option<&str> {
         self.source.as_deref()
     }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+/// When converting between line/columns to offset, specify if the format of the column is UTF-8 or UTF-16
+pub enum ByteFormat {
+    Utf8,
+    Utf16,
 }
 
 pub type SourceFile = Rc<SourceFileInner>;
@@ -224,16 +261,6 @@ pub enum DiagnosticLevel {
     Warning,
 }
 
-#[cfg(feature = "display-diagnostics")]
-impl From<DiagnosticLevel> for codemap_diagnostic::Level {
-    fn from(l: DiagnosticLevel) -> Self {
-        match l {
-            DiagnosticLevel::Error => codemap_diagnostic::Level::Error,
-            DiagnosticLevel::Warning => codemap_diagnostic::Level::Warning,
-        }
-    }
-}
-
 /// This structure represent a diagnostic emitted while compiling .slint code.
 ///
 /// It is basically a message, a level (warning or error), attached to a
@@ -268,10 +295,20 @@ impl Diagnostic {
 
         match &self.span.source_file {
             None => (0, 0),
-            Some(sl) => sl.line_column(offset),
+            Some(sl) => sl.line_column(offset, ByteFormat::Utf8),
         }
     }
 
+    /// Return the length of this diagnostic in characters.
+    pub fn length(&self) -> usize {
+        // The length should always be at least 1, even if the span indicates a
+        // length of 0, as otherwise there is no character to display the diagnostic on.
+        self.span.span.length.max(1)
+    }
+
+    // NOTE: The return-type differs from the Spanned trait.
+    // Because this is public API (Diagnostic is re-exported by the Interpreter), we cannot change
+    // this.
     /// return the path of the source file where this error is attached
     pub fn source_file(&self) -> Option<&Path> {
         self.span.source_file().map(|sf| sf.path())
@@ -287,6 +324,38 @@ impl std::fmt::Display for Diagnostic {
             write!(f, "{}", self.message)
         }
     }
+}
+
+impl std::fmt::Display for SourceLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(sf) = &self.source_file {
+            let (line, col) = sf.line_column(self.span.offset, ByteFormat::Utf8);
+            write!(f, "{}:{line}:{col}", sf.path.display())
+        } else {
+            write!(f, "<unknown>")
+        }
+    }
+}
+
+pub fn diagnostic_line_column_with_format(
+    diagnostic: &Diagnostic,
+    format: ByteFormat,
+) -> (usize, usize) {
+    let Some(sf) = &diagnostic.span.source_file else { return (0, 0) };
+    sf.line_column(diagnostic.span.span.offset, format)
+}
+
+pub fn diagnostic_end_line_column_with_format(
+    diagnostic: &Diagnostic,
+    format: ByteFormat,
+) -> (usize, usize) {
+    let Some(sf) = &diagnostic.span.source_file else { return (0, 0) };
+    // The end_line_column is exclusive.
+    // Even if the span indicates a length of 0, the diagnostic should always
+    // return an end_line_column that is at least one offset further.
+    // Diagnostic::length ensures this.
+    let offset = diagnostic.span.span.offset + diagnostic.length();
+    sf.line_column(offset, format)
 }
 
 #[derive(Default)]
@@ -366,87 +435,69 @@ impl BuildDiagnostics {
     }
 
     #[cfg(feature = "display-diagnostics")]
-    fn call_diagnostics<Output>(
-        self,
-        output: &mut Output,
-        mut handle_no_source: Option<&mut dyn FnMut(Diagnostic)>,
-        emitter_factory: impl for<'b> FnOnce(
-            &'b mut Output,
-            Option<&'b codemap::CodeMap>,
-        ) -> codemap_diagnostic::Emitter<'b>,
-    ) {
+    fn call_diagnostics(
+        &self,
+        mut handle_no_source: Option<&mut dyn FnMut(&Diagnostic)>,
+    ) -> String {
         if self.inner.is_empty() {
-            return;
+            return Default::default();
         }
 
-        let mut codemap = codemap::CodeMap::new();
-        let mut codemap_files = std::collections::HashMap::new();
-
-        let diags: Vec<_> = self
+        let report: Vec<_> = self
             .inner
-            .into_iter()
+            .iter()
             .filter_map(|d| {
-                let spans = if !d.span.span.is_valid() {
-                    vec![]
+                let annotate_snippets_level = match d.level {
+                    DiagnosticLevel::Error => annotate_snippets::Level::ERROR,
+                    DiagnosticLevel::Warning => annotate_snippets::Level::WARNING,
+                };
+                let message = annotate_snippets_level.primary_title(d.message());
+
+                let group = if !d.span.span.is_valid() {
+                    annotate_snippets::Group::with_title(message)
                 } else if let Some(sf) = &d.span.source_file {
-                    if let Some(ref mut handle_no_source) = handle_no_source {
-                        if sf.source.is_none() {
+                    if let Some(source) = &sf.source {
+                        let start_offset = d.span.span.offset;
+                        let end_offset = d.span.span.offset + d.length();
+                        message.element(
+                            annotate_snippets::Snippet::source(source)
+                                .path(sf.path.to_string_lossy())
+                                .annotation(
+                                    annotate_snippets::AnnotationKind::Primary
+                                        .span(start_offset..end_offset),
+                                ),
+                        )
+                    } else {
+                        if let Some(ref mut handle_no_source) = handle_no_source {
+                            drop(message);
                             handle_no_source(d);
                             return None;
                         }
+                        message.element(annotate_snippets::Origin::path(sf.path.to_string_lossy()))
                     }
-                    let path: String = sf.path.to_string_lossy().into();
-                    let file = codemap_files.entry(path).or_insert_with(|| {
-                        codemap.add_file(
-                            sf.path.to_string_lossy().into(),
-                            sf.source.clone().unwrap_or_default(),
-                        )
-                    });
-                    let file_span = file.span;
-                    let s = codemap_diagnostic::SpanLabel {
-                        span: file_span
-                            .subspan(d.span.span.offset as u64, d.span.span.offset as u64),
-                        style: codemap_diagnostic::SpanStyle::Primary,
-                        label: None,
-                    };
-                    vec![s]
                 } else {
-                    vec![]
+                    annotate_snippets::Group::with_title(message)
                 };
-                Some(codemap_diagnostic::Diagnostic {
-                    level: d.level.into(),
-                    message: d.message,
-                    code: None,
-                    spans,
-                })
+                Some(group)
             })
             .collect();
 
-        if !diags.is_empty() {
-            let mut emitter = emitter_factory(output, Some(&codemap));
-            emitter.emit(&diags);
-        }
+        annotate_snippets::Renderer::styled().render(&report)
     }
 
     #[cfg(feature = "display-diagnostics")]
     /// Print the diagnostics on the console
     pub fn print(self) {
-        self.call_diagnostics(&mut (), None, |_, codemap| {
-            codemap_diagnostic::Emitter::stderr(codemap_diagnostic::ColorConfig::Always, codemap)
-        });
+        let to_print = self.call_diagnostics(None);
+        if !to_print.is_empty() {
+            std::eprintln!("{to_print}");
+        }
     }
 
     #[cfg(feature = "display-diagnostics")]
     /// Print into a string
     pub fn diagnostics_as_string(self) -> String {
-        let mut output = Vec::new();
-        self.call_diagnostics(&mut output, None, |output, codemap| {
-            codemap_diagnostic::Emitter::vec(output, codemap)
-        });
-
-        String::from_utf8(output).expect(
-            "Internal error: There were errors during compilation but they did not result in valid utf-8 diagnostics!"
-        )
+        self.call_diagnostics(None)
     }
 
     #[cfg(all(feature = "proc_macro_span", feature = "display-diagnostics"))]
@@ -457,8 +508,7 @@ impl BuildDiagnostics {
     ) -> proc_macro::TokenStream {
         let mut result = proc_macro::TokenStream::default();
         let mut needs_error = self.has_errors();
-        self.call_diagnostics(
-            &mut (),
+        let output = self.call_diagnostics(
             Some(&mut |diag| {
                 let span = diag.span.span.span.or_else(|| {
                     //let pos =
@@ -493,13 +543,11 @@ impl BuildDiagnostics {
                     },
                 }
             }),
-            |_, codemap| {
-                codemap_diagnostic::Emitter::stderr(
-                    codemap_diagnostic::ColorConfig::Always,
-                    codemap,
-                )
-            },
         );
+        if !output.is_empty() {
+            eprintln!("{output}");
+        }
+
         if needs_error {
             result.extend(proc_macro::TokenStream::from(quote::quote!(
                 compile_error! { "Error occurred" }
@@ -586,8 +634,8 @@ component MainWindow inherits Window {
         for offset in 0..content.len() {
             let b = *content.as_bytes().get(offset).unwrap();
 
-            assert_eq!(sf.offset(line, column), offset);
-            assert_eq!(sf.line_column(offset), (line, column));
+            assert_eq!(sf.offset(line, column, ByteFormat::Utf8), offset);
+            assert_eq!(sf.line_column(offset, ByteFormat::Utf8), (line, column));
 
             if b == b'\n' {
                 line += 1;

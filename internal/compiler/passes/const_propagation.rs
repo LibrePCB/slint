@@ -5,10 +5,9 @@
 
 use super::GlobalAnalysis;
 use crate::expression_tree::*;
-use crate::langtype::ElementType;
-use crate::langtype::Type;
+use crate::langtype::{BuiltinPrivateStruct, ElementType, StructName, Type};
 use crate::object_tree::*;
-use smol_str::{format_smolstr, ToSmolStr};
+use smol_str::{ToSmolStr, format_smolstr};
 
 pub fn const_propagation(component: &Component, global_analysis: &GlobalAnalysis) {
     visit_all_expressions(component, |expr, ty| {
@@ -26,7 +25,10 @@ fn simplify_expression(expr: &mut Expression, ga: &GlobalAnalysis) -> bool {
             if nr.is_constant()
                 && !match nr.ty() {
                     Type::Struct(s) => {
-                        s.name.as_ref().is_some_and(|name| name.ends_with("::StateInfo"))
+                        matches!(
+                            s.name,
+                            StructName::BuiltinPrivate(BuiltinPrivateStruct::StateInfo)
+                        )
                     }
                     _ => false,
                 }
@@ -131,11 +133,11 @@ fn simplify_expression(expr: &mut Expression, ga: &GlobalAnalysis) -> bool {
         }
         Expression::StructFieldAccess { base, name } => {
             let r = simplify_expression(base, ga);
-            if let Expression::Struct { values, .. } = &mut **base {
-                if let Some(e) = values.remove(name) {
-                    *expr = e;
-                    return simplify_expression(expr, ga);
-                }
+            if let Expression::Struct { values, .. } = &mut **base
+                && let Some(e) = values.remove(name)
+            {
+                *expr = e;
+                return simplify_expression(expr, ga);
             }
             r
         }
@@ -199,16 +201,15 @@ fn simplify_expression(expr: &mut Expression, ga: &GlobalAnalysis) -> bool {
             for arg in arguments.iter_mut() {
                 args_can_inline &= simplify_expression(arg, ga);
             }
-            if args_can_inline {
-                if let Some(inlined) = try_inline_function(function, arguments, ga) {
-                    *expr = inlined;
-                    return true;
-                }
+            if args_can_inline && let Some(inlined) = try_inline_function(function, arguments, ga) {
+                *expr = inlined;
+                return true;
             }
             false
         }
         Expression::ElementReference { .. } => false,
         Expression::LayoutCacheAccess { .. } => false,
+        Expression::OrganizeGridLayout { .. } => false,
         Expression::SolveLayout { .. } => false,
         Expression::ComputeLayoutInfo { .. } => false,
         _ => {
@@ -287,11 +288,7 @@ fn try_inline_function(
     }
     substitute_arguments_recursive(&mut body, arguments);
 
-    if simplify_expression(&mut body, ga) {
-        Some(body)
-    } else {
-        None
-    }
+    if simplify_expression(&mut body, ga) { Some(body) } else { None }
 }
 
 fn try_inline_builtin_function(
@@ -412,42 +409,53 @@ fn test_propagate_font_size() {
         Case {
             default_font_size: "default-font-size: 12px;",
             another_window: "",
-            check_expression: |e| assert_expr_is_mul(e, 5.0, 12.0)
+            check_expression: |e| assert_expr_is_mul(e, 5.0, 12.0),
         },
         Case {
             default_font_size: "default-font-size: some-value;",
             another_window: "",
-            check_expression: |e|  {
-                assert!(!e.is_constant(None), "{e:?} should not be constant since some-value can vary at runtime");
+            check_expression: |e| {
+                assert!(
+                    !e.is_constant(None),
+                    "{e:?} should not be constant since some-value can vary at runtime"
+                );
             },
         },
         Case {
             default_font_size: "default-font-size: 25px;",
             another_window: "export component AnotherWindow inherits Window { default-font-size: 8px; }",
-            check_expression: |e|  {
-                assert!(e.is_constant(None) && !matches!(e, Expression::NumberLiteral(_,_ )), "{e:?} should be constant but not known at compile time since there are two windows");
+            check_expression: |e| {
+                assert!(
+                    e.is_constant(None) && !matches!(e, Expression::NumberLiteral(_, _)),
+                    "{e:?} should be constant but not known at compile time since there are two windows"
+                );
             },
         },
         Case {
             default_font_size: "default-font-size: 25px;",
             another_window: "export component AnotherWindow inherits Window { }",
-            check_expression: |e|  {
-                assert!(!e.is_constant(None), "should not be const since at least one window has it unset");
+            check_expression: |e| {
+                assert!(
+                    !e.is_constant(None),
+                    "should not be const since at least one window has it unset"
+                );
             },
         },
         Case {
             default_font_size: "default-font-size: 20px;",
             another_window: "export component AnotherWindow inherits Window { default-font-size: 20px;  }",
-            check_expression: |e| assert_expr_is_mul(e, 5.0, 20.0)
+            check_expression: |e| assert_expr_is_mul(e, 5.0, 20.0),
         },
         Case {
             default_font_size: "default-font-size: 20px;",
             another_window: "export component AnotherWindow inherits Window { in property <float> f: 1; default-font-size: 20px*f;  }",
             check_expression: |e| {
-                assert!(!e.is_constant(None), "{e:?} should not be constant since 'f' can vary at runtime");
+                assert!(
+                    !e.is_constant(None),
+                    "{e:?} should not be constant since 'f' can vary at runtime"
+                );
             },
         },
-
     ] {
         let source = format!(
             r#"

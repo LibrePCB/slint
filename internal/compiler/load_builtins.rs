@@ -12,11 +12,11 @@ use std::rc::Rc;
 
 use crate::expression_tree::Expression;
 use crate::langtype::{
-    BuiltinElement, BuiltinPropertyDefault, BuiltinPropertyInfo, DefaultSizeBinding, ElementType,
-    Function, NativeClass, Type,
+    BuiltinElement, BuiltinPrivateStruct, BuiltinPropertyDefault, BuiltinPropertyInfo,
+    DefaultSizeBinding, ElementType, Function, NativeClass, Type,
 };
 use crate::object_tree::{self, *};
-use crate::parser::{identifier_text, syntax_nodes, SyntaxKind, SyntaxNode};
+use crate::parser::{SyntaxKind, SyntaxNode, identifier_text, syntax_nodes};
 use crate::typeregister::TypeRegister;
 
 /// Parse the contents of builtins.slint and fill the builtin type registry
@@ -140,8 +140,8 @@ pub(crate) fn load_builtins(register: &mut TypeRegister) {
                 }
             })
             .collect();
-        n.cpp_type = parse_annotation("cpp_type", &e).map(|x| x.unwrap());
-        n.rust_type_constructor = parse_annotation("rust_type_constructor", &e).map(|x| x.unwrap());
+        n.builtin_struct = parse_annotation("builtin_struct", &e)
+            .map(|x| x.unwrap().parse::<BuiltinPrivateStruct>().unwrap());
         enum Base {
             None,
             Global,
@@ -170,7 +170,7 @@ pub(crate) fn load_builtins(register: &mut TypeRegister) {
             (
                 name,
                 BuiltinPropertyInfo::new(Type::Function(
-                    Function { return_type, args: vec![], arg_names: vec![] }.into(),
+                    Function { return_type, args: Vec::new(), arg_names: vec![] }.into(),
                 )),
             )
         }));
@@ -269,20 +269,19 @@ fn compiled(
 /// or `Some(Some(value))` if there is a `//-key:value`  match
 fn parse_annotation(key: &str, node: &SyntaxNode) -> Option<Option<SmolStr>> {
     for x in node.children_with_tokens() {
-        if x.kind() == SyntaxKind::Comment {
-            if let Some(comment) = x
+        if x.kind() == SyntaxKind::Comment
+            && let Some(comment) = x
                 .as_token()
                 .unwrap()
                 .text()
                 .strip_prefix("//-")
                 .and_then(|x| x.trim_end().strip_prefix(key))
-            {
-                if comment.is_empty() {
-                    return Some(None);
-                }
-                if let Some(comment) = comment.strip_prefix(':') {
-                    return Some(Some(comment.into()));
-                }
+        {
+            if comment.is_empty() {
+                return Some(None);
+            }
+            if let Some(comment) = comment.strip_prefix(':') {
+                return Some(Some(comment.into()));
             }
         }
     }

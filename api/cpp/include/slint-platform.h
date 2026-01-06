@@ -602,7 +602,7 @@ public:
         auto rectangles() const
         {
             SharedVector<cbindgen_private::IntRect> rectangles;
-            slint_software_renderer_region_to_rects(&inner, &rectangles);
+            cbindgen_private::slint_software_renderer_region_to_rects(&inner, &rectangles);
 #    if __cpp_lib_ranges >= 202110L // DR20 P2415R2
             using std::ranges::owning_view;
 #    else
@@ -793,9 +793,11 @@ public:
     /// The first template parameter (PixelType) must be specified and can be either Rgb565Pixel or
     /// Rgb8Pixel.
     template<typename PixelType, typename Callback>
+#    if !defined(__clang__) || __clang_major__ >= 17
         requires requires(Callback callback) {
-            callback(size_t(0), size_t(0), size_t(0), [&callback](std::span<PixelType>) { });
+            callback(size_t(0), size_t(0), size_t(0), [&callback](std::span<PixelType>) {});
         }
+#    endif
     PhysicalRegion render_by_line(Callback process_line_callback) const
     {
         auto process_line_fn = [](void *process_line_callback_ptr, uintptr_t line,
@@ -949,7 +951,7 @@ public:
     }
 
 #    endif
-#    if (!defined(__APPLE__) && (defined(_WIN32) || !defined(_WIN64))) || defined(DOXYGEN)
+#    if (!defined(__APPLE__) && (defined(_WIN32) || defined(_WIN64))) || defined(DOXYGEN)
 
     /// Creates a new NativeWindowHandle from the given HWND \a hwnd, and HINSTANCE \a hinstance.
     static NativeWindowHandle from_win32(void *hwnd, void *hinstance)

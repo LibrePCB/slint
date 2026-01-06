@@ -1,9 +1,9 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+use crate::Property;
 use crate::api::PlatformError;
 use crate::platform::{EventLoopProxy, Platform};
-use crate::Property;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 
@@ -99,6 +99,7 @@ impl SlintContext {
     #[cfg(feature = "tr")]
     pub fn set_external_translator(&self, translator: Option<Box<dyn tr::Translator>>) {
         *self.0.external_translator.borrow_mut() = translator;
+        self.0.translations_dirty.mark_dirty();
     }
 
     #[cfg(feature = "tr")]

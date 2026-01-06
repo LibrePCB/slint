@@ -25,6 +25,7 @@ env:
 jobs:
     files-changed:
       runs-on: ubuntu-latest
+      timeout-minutes: 1
       permissions:
         pull-requests: read
       outputs:
@@ -38,11 +39,13 @@ jobs:
         api_rs : ${{ steps.filter.outputs.api_rs }}
         tests : ${{ steps.filter.outputs.tests }}
         examples : ${{ steps.filter.outputs.examples }}
+        examples_mcu : ${{ steps.filter.outputs.examples_mcu }}
         vsce : ${{ steps.filter.outputs.vsce }}
         slintpad : ${{ steps.filter.outputs.slintpad }}
         updater_test : ${{ steps.filter.outputs.updater_test }}
+        servo_example : ${{ steps.filter.outputs.servo_example }}
       steps:
-        - uses: actions/checkout@v5
+        - uses: actions/checkout@v6
         - uses: dorny/paths-filter@v3
           id: filter
           with:
@@ -51,194 +54,81 @@ jobs:
 
     build_and_test:
         needs: files-changed
-        if: needs.files-changed.outputs.slint == 'true'
-        env:
-            DYLD_FRAMEWORK_PATH: /Users/runner/work/slint/Qt/6.2.2/macos/lib
-            QT_QPA_PLATFORM: offscreen
-            RUSTFLAGS: -D warnings
-            CARGO_PROFILE_DEV_DEBUG: 0
-            CARGO_INCREMENTAL: false
-            RUST_BACKTRACE: 1
-            SLINT_EMIT_DEBUG_INFO: 1
+        if: needs.files-changed.outputs.slint == 'true' || needs.files-changed.outputs.examples == 'true'
         strategy:
             matrix:
-                os: [ubuntu-22.04, macos-14, windows-2022]
-                rust_version: [stable, "1.85"]
                 include:
-                    - os: windows-2022
-                      extra_args: "--exclude ffmpeg --exclude gstreamer-player"
-                    - os: macos-14
-                      extra_args: "--exclude ffmpeg --exclude gstreamer-player"
-                    - os: windows-2022
+                    - os: ubuntu-22.04
+                      name: "Ubuntu 22.04 beta"
                       rust_version: "beta"
+                      save_if: ${{ github.ref == 'refs/heads/master' }}
+                      extra_args: "--exclude plotter"
+                    - os: windows-2022
+                      name: "Windows 2022 1.88"
+                      rust_version: "1.88"
+                      save_if: ${{ github.ref == 'refs/heads/master' }}
                       extra_args: "--exclude ffmpeg --exclude gstreamer-player"
-                    - os: ubuntu-22.04
-                      rust_version: "nightly"
-                    # Bevy requires 1.86, won't compile with 1.85
-                    - rust_version: "1.85"
-                      maybe_exclude_bevy: "--exclude bevy-example"
-                exclude:
                     - os: macos-14
-                      rust_version: "1.85"
-                    # We already test 1.85 and nightly. Stable is in the middle and already covered by other jobs
-                    - os: ubuntu-22.04
+                      name: "MacOS 14 stable"
                       rust_version: "stable"
+                      save_if: ${{ github.ref == 'refs/heads/master' }}
+                      extra_args: "--exclude ffmpeg --exclude gstreamer-player"
+        uses: ./.github/workflows/build_and_test_reusable.yaml
+        with:
+            os: ${{ matrix.os }}
+            name: ${{ matrix.name }}
+            rust_version: ${{ matrix.rust_version }}
+            extra_args: ${{ matrix.extra_args }} --exclude material-gallery
+            save_if: ${{ matrix.save_if }}
+            timeout_minutes: 120
 
-        runs-on: ${{ matrix.os }}
-
-        steps:
-            - uses: actions/checkout@v5
-            - uses: ./.github/actions/install-linux-dependencies
-            - uses: ./.github/actions/install-skia-dependencies
-            - uses: ilammy/msvc-dev-cmd@v1
-            - uses: actions/setup-python@v6
-              with:
-                python-version: '3.10'
-            - name: Install Qt
-              if: runner.os != 'Windows'
-              uses: jurplel/install-qt-action@v4
-              with:
-                  version: "6.2.2"
-                  setup-python: false
-                  cache: true
-            - name: Install ffmpeg and alsa (Linux)
-              if: runner.os == 'Linux'
-              run: sudo apt-get install clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libasound2-dev pkg-config
-            - name: Install gstreamer and libunwind (Linux)
-              if: runner.os == 'Linux'
-              run: sudo apt-get install libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
-            - name: Setup headless display
-              uses: pyvista/setup-headless-display-action@v4
-            - uses: ./.github/actions/setup-rust
-              with:
-                  toolchain: ${{ matrix.rust_version }}
-                  key: x-v3
-            - name: Run tests
-              run:  cargo test --verbose --all-features --workspace --timings ${{ matrix.extra_args }} ${{ matrix.maybe_exclude_bevy }} --exclude slint-node --exclude pyslint --exclude test-driver-node --exclude slint-node --exclude test-driver-nodejs --exclude test-driver-cpp --exclude mcu-board-support --exclude mcu-embassy --exclude printerdemo_mcu --exclude uefi-demo --exclude slint-cpp --exclude slint-python -- --skip=_qt::t
-              env:
-                  SLINT_CREATE_SCREENSHOTS: 1
-              shell: bash
-            - name: Run tests (qt)
-              run: cargo test --verbose --all-features --workspace ${{ matrix.extra_args }} ${{ matrix.maybe_exclude_bevy }} --exclude slint-node --exclude pyslint --exclude test-driver-node --exclude slint-node --exclude test-driver-nodejs --exclude test-driver-cpp --exclude mcu-board-support --exclude mcu-embassy --exclude printerdemo_mcu --exclude uefi-demo --exclude slint-cpp --exclude slint-python --bin test-driver-rust -- _qt --test-threads=1
-              shell: bash
-            - name: live-preview for rust test
-              env:
-                SLINT_LIVE_PREVIEW: 1
-              run: cargo test --verbose --features=build-time,slint/live-preview -p test-driver-rust -- --skip=_qt::t
-              shell: bash
-            - name: Upload build timing report
-              if: always()
-              uses: actions/upload-artifact@v5
-              with:
-                  name: cargo-timings-${{ matrix.os }}-${{ matrix.rust_version }}
-                  path: target/cargo-timings/cargo-timing.html
-                  if-no-files-found: ignore
-            - name: Archive screenshots after failed tests
-              if: ${{ failure() }}
-              uses: actions/upload-artifact@v5
-              with:
-                  name: screenshots-${{matrix.os}}
-                  path: |
-                      tests/screenshots/references
-
-    node_test:
+    # For changes to Slint internals, do a quick test on Linux for Node.js only.
+    node_test_linux:
         needs: files-changed
         if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.api_node == 'true' || needs.files-changed.outputs.tests == 'true'
-        env:
-            RUSTFLAGS: -D warnings
-            CARGO_PROFILE_DEV_DEBUG: 0
-            CARGO_INCREMENTAL: false
-            RUST_BACKTRACE: 1
-        strategy:
-            matrix:
-                os: [ubuntu-22.04, macos-14, windows-2022]
+        uses: ./.github/workflows/node_test_reusable.yaml
+        with:
+          name: "Node.js Linux"
+          os: "ubuntu-22.04"
 
-        runs-on: ${{ matrix.os }}
+    node_test_macos:
+        needs: files-changed
+        if: needs.files-changed.outputs.api_node == 'true' || needs.files-changed.outputs.tests == 'true'
+        uses: ./.github/workflows/node_test_reusable.yaml
+        with:
+          name: "Node.js macOS"
+          os: "macos-14"
 
-        steps:
-            - uses: actions/checkout@v5
-            - uses: ./.github/actions/install-linux-dependencies
-            - uses: ./.github/actions/install-skia-dependencies
-            - name: Setup headless display
-              uses: pyvista/setup-headless-display-action@v4
-            - uses: actions/setup-node@v6
-              with:
-                node-version: 20
-                package-manager-cache: false
-              id: node-install
-            - uses: pnpm/action-setup@v4.2.0
-              with:
-                version: 10.18.2
-            - uses: ./.github/actions/setup-rust
-              with:
-                  key: x-napi-v2-${{ steps.node-install.outputs.node-version }} # the cache key consists of a manually bumpable version and the node version, as the cached rustc artifacts contain linking information where to find node.lib, which is in a versioned directory.
-            - name: Run pnpm install
-              working-directory: api/node
-              run: pnpm install --frozen-lockfile
-            - name: Build node plugin in debug
-              run: pnpm build:testing
-              working-directory: api/node
-            - name: Run node tests
-              working-directory: api/node
-              run: pnpm test
-            - name: Run test-driver-nodejs
-              # Release is only applied to the harness that drives the node.js invocations, but needed
-              # to avoid crashing on Windows with what looks like an out of stack exception.
-              run: cargo test --verbose --release --all-features -p test-driver-nodejs
-            - name: Check image-filter example
-              working-directory: examples/imagefilter/node
-              run: pnpm check
+    node_test_windows:
+        needs: files-changed
+        if: needs.files-changed.outputs.api_node == 'true' || needs.files-changed.outputs.tests == 'true'
+        uses: ./.github/workflows/node_test_reusable.yaml
+        with:
+          name: "Node.js Windows"
+          os: "windows-2022"
 
-    python_test:
+    # For changes to Slint internals, do a quick test on Linux for Python only.
+    python_test_linux:
         needs: files-changed
         if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.api_python == 'true' || needs.files-changed.outputs.tests == 'true'
-        env:
-            DYLD_FRAMEWORK_PATH: /Users/runner/work/slint/Qt/5.15.2/clang_64/lib
-            QT_QPA_PLATFORM: offscreen
-            RUSTFLAGS: -D warnings
-            CARGO_PROFILE_DEV_DEBUG: 0
-            CARGO_INCREMENTAL: false
-            RUST_BACKTRACE: full
-            SLINT_BACKEND: winit
-        strategy:
-            matrix:
-                os: [ubuntu-22.04, macos-14, windows-2022]
-
-        runs-on: ${{ matrix.os }}
-
-        steps:
-            - uses: actions/checkout@v5
-            - uses: ./.github/actions/install-linux-dependencies
-            - name: Install Qt
-              if: runner.os == 'Linux'
-              uses: jurplel/install-qt-action@v4
-              with:
-                  version: "5.15.2"
-                  setup-python: false
-                  cache: true
-            - name: Setup headless display
-              uses: pyvista/setup-headless-display-action@v4
-            - uses: ./.github/actions/setup-rust
-              with:
-                  key: x-napi-v2-${{ steps.node-install.outputs.node-version }} # the cache key consists of a manually bumpable version and the node version, as the cached rustc artifacts contain linking information where to find node.lib, which is in a versioned directory.
-            - uses: actions/setup-python@v6
-              with:
-                  python-version: "3.12"
-            - name: Install uv
-              uses: astral-sh/setup-uv@v7
-            - uses: fjwillemsen/setup-nox2@v3.0.0
-            - name: Run python tests
-              working-directory: api/python/slint
-              run: nox --default-venv-backend uv
-            - name: Run mypy
-              working-directory: api/python/slint
-              run: uv run mypy -p tests -p slint
-            - name: Run ruff linter
-              working-directory: api/python/slint
-              run: uv tool run ruff check
-            - name: Run ruff linter
-              working-directory: api/python/briefcase
-              run: uv tool run ruff check
+        uses: ./.github/workflows/python_test_reusable.yaml
+        with:
+          name: "Python Linux"
+          os: "ubuntu-22.04"
+    python_test_macos:
+        needs: files-changed
+        if: needs.files-changed.outputs.api_python == 'true' || needs.files-changed.outputs.tests == 'true'
+        uses: ./.github/workflows/python_test_reusable.yaml
+        with:
+          name: "Python macOS"
+          os: "macos-14"
+    python_test_windows:
+        needs: files-changed
+        if: needs.files-changed.outputs.api_python == 'true' || needs.files-changed.outputs.tests == 'true'
+        uses: ./.github/workflows/python_test_reusable.yaml
+        with:
+          name: "Python Windows"
+          os: "windows-2022"
 
     cpp_test_driver:
         needs: files-changed
@@ -256,7 +146,7 @@ jobs:
         runs-on: ${{ matrix.os }}
 
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
               with:
                   force-gcc-10: true
@@ -292,14 +182,14 @@ jobs:
             matrix:
                 include:
                     - os: macos-14
-                      rust_version: "1.85"
+                      rust_version: "1.88"
                     - os: windows-2022
                       rust_version: "nightly"
                     - os: ubuntu-22.04
                       rust_version: "stable"
         runs-on: ${{ matrix.os }}
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
               with:
                   force-gcc-10: true
@@ -334,7 +224,7 @@ jobs:
               working-directory: ${{ runner.workspace }}/cppbuild
               run: cmake --build . --config Debug --target package
             - name: "Create C++ packages artifact"
-              uses: actions/upload-artifact@v5
+              uses: actions/upload-artifact@v6
               with:
                   name: cpp_bin-${{ matrix.os }}
                   path: ${{ runner.workspace }}/cppbuild/Slint-cpp-*
@@ -347,7 +237,7 @@ jobs:
             CARGO_INCREMENTAL: false
             CARGO_PROFILE_DEV_DEBUG: 0
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
               with:
                   force-gcc-10: true
@@ -356,7 +246,7 @@ jobs:
               with:
                   version: 6.5.1
                   cache: true
-            - uses: actions/download-artifact@v6
+            - uses: actions/download-artifact@v7
               with:
                   name: cpp_bin-ubuntu-22.04
                   path: cpp-package
@@ -380,7 +270,7 @@ jobs:
         if: needs.files-changed.outputs.vsce == 'true'
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: pnpm/action-setup@v4.2.0
               with:
                 version: 10.18.2
@@ -417,7 +307,7 @@ jobs:
     # test to compile the mcu backend for the arm target (no_std)
     mcu:
         needs: files-changed
-        if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.examples == 'true' || needs.files-changed.outputs.api_rs == 'true'
+        if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.examples_mcu == 'true' || needs.files-changed.outputs.api_rs == 'true'
         env:
             SLINT_FONT_SIZES: 8,11,10,12,13,14,15,16,18,20,22,24,32
             RUSTFLAGS: --cfg slint_int_coord -D warnings
@@ -434,7 +324,7 @@ jobs:
                     - feature: stm32h735g
                       target: thumbv7em-none-eabihf
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: ${{matrix.target}}
@@ -444,7 +334,7 @@ jobs:
     # test to compile the mcu backend for the arm target (no_std) using embassy
     mcu-embassy:
         needs: files-changed
-        if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.examples == 'true' || needs.files-changed.outputs.api_rs == 'true'
+        if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.examples_mcu == 'true' || needs.files-changed.outputs.api_rs == 'true'
         env:
             SLINT_FONT_SIZES: 8,11,10,12,13,14,15,16,18,20,22,24,32
             RUSTFLAGS: --cfg slint_int_coord -D warnings
@@ -452,7 +342,7 @@ jobs:
             CARGO_PROFILE_RELEASE_OPT_LEVEL: s
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: thumbv8m.main-none-eabihf
@@ -465,7 +355,7 @@ jobs:
 #            RUSTFLAGS: -D warnings
 #        runs-on: ubuntu-22.04
 #        steps:
-#            - uses: actions/checkout@v5
+#            - uses: actions/checkout@v6
 #            - uses: dtolnay/rust-toolchain@stable
 #            - uses: esp-rs/xtensa-toolchain@v1.6
 #              with:
@@ -483,7 +373,7 @@ jobs:
         if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.api_cpp == 'true'
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: armv7-unknown-linux-gnueabihf
@@ -538,7 +428,7 @@ jobs:
                 from_version: ["0.3.0"]
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
               with:
                   fetch-depth: 0
             - uses: ./.github/actions/install-linux-dependencies
@@ -591,6 +481,9 @@ jobs:
                             --skip example_dial \
                             --skip example_fancy_switches \
                             --skip example_sprite_sheet \
+                            --skip example_grid_model_rows \
+                            --skip example_vector_as_grid \
+                            --skip example_vlayout \
                             --skip test_interpreter_elements_path_fit \
                             --skip test_interpreter_layout_path \
                             --skip test_interpreter_7guis_booker \
@@ -607,7 +500,7 @@ jobs:
             RUSTFLAGS: -D warnings
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
             - uses: ./.github/actions/setup-rust
             - name: run the formatter
@@ -640,7 +533,8 @@ jobs:
                   . ${IDF_PATH}/export.sh
                   cd $IDF_PYTHON_ENV_PATH
                   bin/pip install pydantic==2.11.10
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
+            - run: apt-get update && apt-get install -y libfontconfig1-dev
             - uses: dtolnay/rust-toolchain@stable
             - uses: esp-rs/xtensa-toolchain@v1.6
               with:
@@ -660,12 +554,13 @@ jobs:
         if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.api_rs == 'true' || needs.files-changed.outputs.examples == 'true'
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
+            - uses: ./.github/actions/install-linux-dependencies
             - name: Install Android API level 30
               run: ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-30"
             - name: Cache cargo-apk
               id: cargo-apk-cache
-              uses: actions/cache@v4
+              uses: actions/cache@v5
               with:
                   path: ~/.cargo/bin/cargo-apk
                   key: cargo-apk-cache
@@ -697,7 +592,7 @@ jobs:
         if: needs.files-changed.outputs.internal == 'true'
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   toolchain: nightly
@@ -711,7 +606,7 @@ jobs:
         if: needs.files-changed.outputs.figma_inspector == 'true'
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: actions/setup-node@v6
               with:
                 node-version: 20
@@ -736,7 +631,7 @@ jobs:
               working-directory: tools/figma-inspector
               run: pnpm zip
             - name: Archive zip
-              uses: actions/upload-artifact@v5
+              uses: actions/upload-artifact@v6
               with:
                   name: figma-plugin
                   path: tools/figma-inspector/zip
@@ -753,3 +648,8 @@ jobs:
             CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
             ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
             ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+    servo_example:
+        needs: files-changed
+        if: needs.files-changed.outputs.servo_example == 'true'
+        uses: ./.github/workflows/servo_example.yaml

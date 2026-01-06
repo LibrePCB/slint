@@ -5,7 +5,7 @@
 name = "slide_puzzle"
 version = "1.15.0"
 authors = ["Slint Developers <info@slint.dev>"]
-edition = "2021"
+edition.workspace = true
 publish = false
 license = "MIT"
 
@@ -14,7 +14,7 @@ path = "main.rs"
 name = "slide_puzzle"
 
 [dependencies]
-rand = "0.8"
+rand = "0.9"
 slint = { path = "../../api/rs/slint" }
 
 [build-dependencies]
@@ -32,4 +32,4 @@ slint-build = { path = "../../api/rs/build" }
 #wasm# wasm-bindgen = { version = "0.2" }
 #wasm# web-sys = { version = "0.3", features=["console", "Element", "HtmlCollection"] }
 #wasm# console_error_panic_hook = "0.1.5"
-#wasm# getrandom = { version = "0.2.2", features = ["js"] }
+#wasm# getrandom = { version = "0.3.4", features = ["wasm_js"] }

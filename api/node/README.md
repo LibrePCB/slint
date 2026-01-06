@@ -1,4 +1,3 @@
-<!-- Copyright © SixtyFPS GmbH <info@slint.dev> ; SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0 -->
 
 # Slint-node (Beta)
 
@@ -31,7 +30,7 @@ npm install slint-ui
 
 You need to install the following components:
 
-  * **[Node.js](https://nodejs.org/download/release/)** (v16. or newer)
+  * **[Node.js](https://nodejs.org/download/release/)** (v20 or newer)
   * **[pnpm](https://www.pnpm.io/)**
   * **[Rust compiler](https://www.rust-lang.org/tools/install)**
 

@@ -16,9 +16,9 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use i_slint_core::SlintContext;
 use i_slint_core::platform::Platform;
 use i_slint_core::platform::PlatformError;
-use i_slint_core::SlintContext;
 
 #[cfg(all(feature = "i-slint-backend-qt", not(no_qt), not(target_os = "android")))]
 fn create_qt_backend() -> Result<Box<dyn Platform + 'static>, PlatformError> {
@@ -108,6 +108,10 @@ cfg_if::cfg_if! {
                     }
                     return builder.build().map(|b| Box::new(b) as Box<dyn Platform + 'static>)
                 },
+                #[cfg(feature = "i-slint-backend-testing")]
+                "testing" => return Ok(Box::new(i_slint_backend_testing::TestingBackend::new(
+                    i_slint_backend_testing::TestingBackendOptions { mock_time: false, threading: true },
+                ))),
                 _ => {},
             }
 

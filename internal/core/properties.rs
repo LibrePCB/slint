@@ -115,12 +115,14 @@ pub(crate) mod dependency_tracker {
 
     impl<T> DependencyListHead<T> {
         pub unsafe fn mem_move(from: *mut Self, to: *mut Self) {
-            (*to).0.set((*from).0.get());
-            if let Some(next) = (*from).0.get().as_ref() {
-                debug_assert_eq!(from as *const _, next.prev.get() as *const _);
-                next.debug_assert_valid();
-                next.prev.set(to as *const _);
-                next.debug_assert_valid();
+            unsafe {
+                (*to).0.set((*from).0.get());
+                if let Some(next) = (*from).0.get().as_ref() {
+                    debug_assert_eq!(from as *const _, next.prev.get() as *const _);
+                    next.debug_assert_valid();
+                    next.prev.set(to as *const _);
+                    next.debug_assert_valid();
+                }
             }
         }
 
@@ -148,11 +150,13 @@ pub(crate) mod dependency_tracker {
         }
 
         pub unsafe fn drop(_self: *mut Self) {
-            if let Some(next) = (*_self).0.get().as_ref() {
-                debug_assert_eq!(_self as *const _, next.prev.get() as *const _);
-                next.debug_assert_valid();
-                next.prev.set(core::ptr::null());
-                next.debug_assert_valid();
+            unsafe {
+                if let Some(next) = (*_self).0.get().as_ref() {
+                    debug_assert_eq!(_self as *const _, next.prev.get() as *const _);
+                    next.debug_assert_valid();
+                    next.prev.set(core::ptr::null());
+                    next.debug_assert_valid();
+                }
             }
         }
         pub fn append(&self, node: Pin<&DependencyNode<T>>) {
@@ -298,10 +302,10 @@ struct BindingVTable {
 /// # Safety
 ///
 /// IS_TWO_WAY_BINDING cannot be true if Self is not a TwoWayBinding
-unsafe trait BindingCallable {
+unsafe trait BindingCallable<T> {
     /// This function is called by the property to evaluate the binding and produce a new value. The
     /// previous property value is provided in the value parameter.
-    unsafe fn evaluate(self: Pin<&Self>, value: *mut ()) -> BindingResult;
+    fn evaluate(self: Pin<&Self>, value: &mut T) -> BindingResult;
 
     /// This function is used to notify the binding that one of the dependencies was changed
     /// and therefore this binding may evaluate to a different value, too.
@@ -312,7 +316,7 @@ unsafe trait BindingCallable {
     /// the property will get the new value.
     /// When returning true, the call was intercepted and the binding will not be removed,
     /// but the property will still have that value
-    unsafe fn intercept_set(self: Pin<&Self>, _value: *const ()) -> bool {
+    fn intercept_set(self: Pin<&Self>, _value: &T) -> bool {
         false
     }
 
@@ -327,8 +331,8 @@ unsafe trait BindingCallable {
     const IS_TWO_WAY_BINDING: bool = false;
 }
 
-unsafe impl<F: Fn(*mut ()) -> BindingResult> BindingCallable for F {
-    unsafe fn evaluate(self: Pin<&Self>, value: *mut ()) -> BindingResult {
+unsafe impl<T, F: Fn(&mut T) -> BindingResult> BindingCallable<T> for F {
+    fn evaluate(self: Pin<&Self>, value: &mut T) -> BindingResult {
         self(value)
     }
 }
@@ -389,7 +393,7 @@ pub fn is_currently_tracking() -> bool {
 /// This structure erase the `B` type with a vtable.
 #[repr(C)]
 struct BindingHolder<B = ()> {
-    /// Access to the list of binding which depends on this binding
+    /// Access to the list of bindings which depend on this binding
     dependencies: Cell<usize>,
     /// The binding own the nodes used in the dependencies lists of the properties
     /// From which we depend.
@@ -420,59 +424,69 @@ impl BindingHolder {
     }
 }
 
-fn alloc_binding_holder<B: BindingCallable + 'static>(binding: B) -> *mut BindingHolder {
+fn alloc_binding_holder<T, B: BindingCallable<T> + 'static>(binding: B) -> *mut BindingHolder {
     /// Safety: _self must be a pointer that comes from a `Box<BindingHolder<B>>::into_raw()`
     unsafe fn binding_drop<B>(_self: *mut BindingHolder) {
-        drop(Box::from_raw(_self as *mut BindingHolder<B>));
+        unsafe {
+            drop(Box::from_raw(_self as *mut BindingHolder<B>));
+        }
     }
 
     /// Safety: _self must be a pointer to a `BindingHolder<B>`
     /// and value must be a pointer to T
-    unsafe fn evaluate<B: BindingCallable>(
+    unsafe fn evaluate<T, B: BindingCallable<T>>(
         _self: *const BindingHolder,
         value: *mut (),
     ) -> BindingResult {
-        Pin::new_unchecked(&((*(_self as *const BindingHolder<B>)).binding)).evaluate(value)
+        unsafe {
+            Pin::new_unchecked(&((*(_self as *const BindingHolder<B>)).binding))
+                .evaluate(&mut *(value as *mut T))
+        }
     }
 
     /// Safety: _self must be a pointer to a `BindingHolder<B>`
-    unsafe fn mark_dirty<B: BindingCallable>(_self: *const BindingHolder, _: bool) {
-        Pin::new_unchecked(&((*(_self as *const BindingHolder<B>)).binding)).mark_dirty()
+    unsafe fn mark_dirty<T, B: BindingCallable<T>>(_self: *const BindingHolder, _: bool) {
+        unsafe { Pin::new_unchecked(&((*(_self as *const BindingHolder<B>)).binding)).mark_dirty() }
     }
 
     /// Safety: _self must be a pointer to a `BindingHolder<B>`
-    unsafe fn intercept_set<B: BindingCallable>(
+    unsafe fn intercept_set<T, B: BindingCallable<T>>(
         _self: *const BindingHolder,
         value: *const (),
     ) -> bool {
-        Pin::new_unchecked(&((*(_self as *const BindingHolder<B>)).binding)).intercept_set(value)
+        unsafe {
+            Pin::new_unchecked(&((*(_self as *const BindingHolder<B>)).binding))
+                .intercept_set(&*(value as *const T))
+        }
     }
 
-    unsafe fn intercept_set_binding<B: BindingCallable>(
+    unsafe fn intercept_set_binding<T, B: BindingCallable<T>>(
         _self: *const BindingHolder,
         new_binding: *mut BindingHolder,
     ) -> bool {
-        Pin::new_unchecked(&((*(_self as *const BindingHolder<B>)).binding))
-            .intercept_set_binding(new_binding)
+        unsafe {
+            Pin::new_unchecked(&((*(_self as *const BindingHolder<B>)).binding))
+                .intercept_set_binding(new_binding)
+        }
     }
 
-    trait HasBindingVTable {
+    trait HasBindingVTable<T> {
         const VT: &'static BindingVTable;
     }
-    impl<B: BindingCallable> HasBindingVTable for B {
+    impl<T, B: BindingCallable<T>> HasBindingVTable<T> for B {
         const VT: &'static BindingVTable = &BindingVTable {
             drop: binding_drop::<B>,
-            evaluate: evaluate::<B>,
-            mark_dirty: mark_dirty::<B>,
-            intercept_set: intercept_set::<B>,
-            intercept_set_binding: intercept_set_binding::<B>,
+            evaluate: evaluate::<T, B>,
+            mark_dirty: mark_dirty::<T, B>,
+            intercept_set: intercept_set::<T, B>,
+            intercept_set_binding: intercept_set_binding::<T, B>,
         };
     }
 
     let holder: BindingHolder<B> = BindingHolder {
         dependencies: Cell::new(0),
         dep_nodes: Default::default(),
-        vtable: <B as HasBindingVTable>::VT,
+        vtable: <B as HasBindingVTable<T>>::VT,
         dirty: Cell::new(true), // starts dirty so it evaluates the property when used
         is_two_way_binding: B::IS_TWO_WAY_BINDING,
         pinned: PhantomPinned,
@@ -488,10 +502,10 @@ fn alloc_binding_holder<B: BindingCallable + 'static>(binding: B) -> *mut Bindin
 struct PropertyHandle {
     /// The handle can either be a pointer to a binding, or a pointer to the list of dependent properties.
     /// The two least significant bit of the pointer are flags, as the pointer will be aligned.
-    /// The least significant bit (`0b01`) tells that the binding is borrowed. So no two reference to the
+    /// The least significant bit (`0b01`) tells that the binding is borrowed. So no two references to the
     /// binding exist at the same time.
     /// The second to last bit (`0b10`) tells that the pointer points to a binding. Otherwise, it is the head
-    /// node of the linked list of dependent binding
+    /// node of the linked list of dependent bindings.
     handle: Cell<usize>,
 }
 
@@ -509,12 +523,12 @@ impl core::fmt::Debug for PropertyHandle {
 }
 
 impl PropertyHandle {
-    /// The lock flag specify that we can get reference to the Cell or unsafe cell
+    /// The lock flag specifies that we can get a reference to the Cell or unsafe cell
     fn lock_flag(&self) -> bool {
         self.handle.get() & 0b1 == 1
     }
     /// Sets the lock_flag.
-    /// Safety: the lock flag must not be unset if there exist reference to what's inside the cell
+    /// Safety: the lock flag must not be unset if there exist references to what's inside the cell
     unsafe fn set_lock_flag(&self, set: bool) {
         self.handle.set(if set { self.handle.get() | 0b1 } else { self.handle.get() & !0b1 })
     }
@@ -571,14 +585,14 @@ impl PropertyHandle {
     }
 
     /// Safety: the BindingCallable must be valid for the type of this property
-    unsafe fn set_binding<B: BindingCallable + 'static>(
+    unsafe fn set_binding<T, B: BindingCallable<T> + 'static>(
         &self,
         binding: B,
         #[cfg(slint_debug_property)] debug_name: &str,
     ) {
-        let binding = alloc_binding_holder::<B>(binding);
+        let binding = alloc_binding_holder::<T, B>(binding);
         #[cfg(slint_debug_property)]
-        {
+        unsafe {
             (*binding).debug_name = debug_name.into();
         }
         self.set_binding_impl(binding);
@@ -640,7 +654,7 @@ impl PropertyHandle {
                         value: *mut (),
                         binding: Pin<&BindingHolder>,
                     ) -> BindingResult {
-                        CURRENT_BINDING.set(Some(binding), || {
+                        CURRENT_BINDING.set(Some(binding), || unsafe {
                             (binding.vtable.evaluate)(
                                 binding.get_ref() as *const BindingHolder,
                                 value as *mut (),
@@ -650,7 +664,8 @@ impl PropertyHandle {
 
                     // clear all the nodes so that we can start from scratch
                     binding.dep_nodes.set(Default::default());
-                    let r = evaluate_as_current_binding(value as *mut (), binding.as_ref());
+                    let r =
+                        unsafe { evaluate_as_current_binding(value as *mut (), binding.as_ref()) };
                     binding.dirty.set(false);
                     if r == BindingResult::RemoveBinding {
                         return true;
@@ -742,27 +757,29 @@ impl Drop for PropertyHandle {
 
 /// Safety: the dependency list must be valid and consistent
 unsafe fn mark_dependencies_dirty(dependencies: *mut DependencyListHead) {
-    debug_assert!(!core::ptr::eq(
-        *(dependencies as *mut *const u32),
-        (&CONSTANT_PROPERTY_SENTINEL) as *const u32,
-    ));
-    DependencyListHead::for_each(&*dependencies, |binding| {
-        let binding: &BindingHolder = &**binding;
-        let was_dirty = binding.dirty.replace(true);
-        (binding.vtable.mark_dirty)(binding as *const BindingHolder, was_dirty);
+    unsafe {
+        debug_assert!(!core::ptr::eq(
+            *(dependencies as *mut *const u32),
+            (&CONSTANT_PROPERTY_SENTINEL) as *const u32,
+        ));
+        DependencyListHead::for_each(&*dependencies, |binding| {
+            let binding: &BindingHolder = &**binding;
+            let was_dirty = binding.dirty.replace(true);
+            (binding.vtable.mark_dirty)(binding as *const BindingHolder, was_dirty);
 
-        assert!(
-            !core::ptr::eq(
-                *(binding.dependencies.as_ptr() as *mut *const u32),
-                (&CONSTANT_PROPERTY_SENTINEL) as *const u32,
-            ),
-            "Const property marked as dirty"
-        );
+            assert!(
+                !core::ptr::eq(
+                    *(binding.dependencies.as_ptr() as *mut *const u32),
+                    (&CONSTANT_PROPERTY_SENTINEL) as *const u32,
+                ),
+                "Const property marked as dirty"
+            );
 
-        if !was_dirty {
-            mark_dependencies_dirty(binding.dependencies.as_ptr() as *mut DependencyListHead)
-        }
-    });
+            if !was_dirty {
+                mark_dependencies_dirty(binding.dependencies.as_ptr() as *mut DependencyListHead)
+            }
+        });
+    }
 }
 
 /// Types that can be set as bindings for a `Property<T>`
@@ -777,9 +794,9 @@ impl<T, F: Fn() -> T> Binding<T> for F {
     }
 }
 
-/// A Property that allow binding that track changes
+/// A Property that allows a binding that tracks changes
 ///
-/// Property can have an assigned value, or binding.
+/// Property can have an assigned value, or a binding.
 /// When a binding is assigned, it is lazily evaluated on demand
 /// when calling `get()`.
 /// When accessing another property from a binding evaluation,
@@ -964,8 +981,7 @@ impl<T: Clone> Property<T> {
         // Safety: This will make a binding callable for the type T
         unsafe {
             self.handle.set_binding(
-                move |val: *mut ()| {
-                    let val = &mut *(val as *mut T);
+                move |val: &mut T| {
                     *val = binding.evaluate(val);
                     BindingResult::KeepBinding
                 },
@@ -1045,14 +1061,14 @@ fn properties_simple_test() {
 struct TwoWayBinding<T> {
     common_property: Pin<Rc<Property<T>>>,
 }
-unsafe impl<T: PartialEq + Clone + 'static> BindingCallable for TwoWayBinding<T> {
-    unsafe fn evaluate(self: Pin<&Self>, value: *mut ()) -> BindingResult {
-        *(value as *mut T) = self.common_property.as_ref().get();
+unsafe impl<T: PartialEq + Clone + 'static> BindingCallable<T> for TwoWayBinding<T> {
+    fn evaluate(self: Pin<&Self>, value: &mut T) -> BindingResult {
+        *value = self.common_property.as_ref().get();
         BindingResult::KeepBinding
     }
 
-    unsafe fn intercept_set(self: Pin<&Self>, value: *const ()) -> bool {
-        self.common_property.as_ref().set((*(value as *const T)).clone());
+    fn intercept_set(self: Pin<&Self>, value: &T) -> bool {
+        self.common_property.as_ref().set(value.clone());
         true
     }
 
@@ -1173,12 +1189,15 @@ impl<T: PartialEq + Clone + 'static> Property<T> {
                 PropertyHandle::default()
             };
 
+            #[cfg(slint_debug_property)]
+            let debug_name = alloc::format!("{}*", prop1.debug_name.borrow());
+
             let common_property = Rc::pin(Property {
                 handle,
                 value: UnsafeCell::new(prop1.get_internal()),
                 pinned: PhantomPinned,
                 #[cfg(slint_debug_property)]
-                debug_name: alloc::format("{}*", prop1.debug_name.borrow()).into(),
+                debug_name: debug_name.clone().into(),
             });
             // Safety: TwoWayBinding's T is the same as the type for both properties
             unsafe {
@@ -1190,7 +1209,6 @@ impl<T: PartialEq + Clone + 'static> Property<T> {
             }
             common_property
         };
-        prop2.handle.remove_binding();
         Self::link_two_way_with_map_to_common_property(common_property, prop2, map_to, map_from);
     }
 
@@ -1209,20 +1227,20 @@ impl<T: PartialEq + Clone + 'static> Property<T> {
             marker: PhantomData<(T, T2)>,
         }
         unsafe impl<
-                T: PartialEq + Clone + 'static,
-                T2: PartialEq + Clone + 'static,
-                M1: Fn(&T) -> T2 + Clone + 'static,
-                M2: Fn(&mut T, &T2) + Clone + 'static,
-            > BindingCallable for TwoWayBindingWithMap<T, T2, M1, M2>
+            T: PartialEq + Clone + 'static,
+            T2: PartialEq + Clone + 'static,
+            M1: Fn(&T) -> T2 + Clone + 'static,
+            M2: Fn(&mut T, &T2) + Clone + 'static,
+        > BindingCallable<T2> for TwoWayBindingWithMap<T, T2, M1, M2>
         {
-            unsafe fn evaluate(self: Pin<&Self>, value: *mut ()) -> BindingResult {
-                *(value as *mut T2) = (self.map_to)(&self.common_property.as_ref().get());
+            fn evaluate(self: Pin<&Self>, value: &mut T2) -> BindingResult {
+                *value = (self.map_to)(&self.common_property.as_ref().get());
                 BindingResult::KeepBinding
             }
 
-            unsafe fn intercept_set(self: Pin<&Self>, value: *const ()) -> bool {
+            fn intercept_set(self: Pin<&Self>, value: &T2) -> bool {
                 let mut old = self.common_property.as_ref().get();
-                (self.map_from)(&mut old, &*(value as *const T2));
+                (self.map_from)(&mut old, value);
                 self.common_property.as_ref().set(old);
                 true
             }
@@ -1244,31 +1262,35 @@ impl<T: PartialEq + Clone + 'static> Property<T> {
 
         /// Given a binding for T2, maps to a binding for T
         struct BindingMapper<T, T2, M1, M2> {
-            /// Binding that returns a `T`
+            /// Binding that returns a `T2`
             b: *mut BindingHolder,
             map_to: M1,
             map_from: M2,
             marker: PhantomData<(T, T2)>,
         }
         unsafe impl<
-                T: PartialEq + Clone + 'static,
-                T2: PartialEq + Clone + 'static,
-                M1: Fn(&T) -> T2 + 'static,
-                M2: Fn(&mut T, &T2) + 'static,
-            > BindingCallable for BindingMapper<T, T2, M1, M2>
+            T: PartialEq + Clone + 'static,
+            T2: PartialEq + Clone + 'static,
+            M1: Fn(&T) -> T2 + 'static,
+            M2: Fn(&mut T, &T2) + 'static,
+        > BindingCallable<T> for BindingMapper<T, T2, M1, M2>
         {
-            unsafe fn evaluate(self: Pin<&Self>, value: *mut ()) -> BindingResult {
-                let value = &mut *(value as *mut T);
+            fn evaluate(self: Pin<&Self>, value: &mut T) -> BindingResult {
                 let mut sub_value = (self.map_to)(value);
-                ((*self.b).vtable.evaluate)(self.b, &mut sub_value as *mut T2 as *mut ());
+                // Safety: `self.b` is a BindingHolder that expects a `T2`
+                unsafe {
+                    ((*self.b).vtable.evaluate)(self.b, &mut sub_value as *mut T2 as *mut ());
+                }
                 (self.map_from)(value, &sub_value);
                 BindingResult::KeepBinding
             }
 
-            unsafe fn intercept_set(self: Pin<&Self>, value: *const ()) -> bool {
-                let value = &mut *(value as *mut T);
+            fn intercept_set(self: Pin<&Self>, value: &T) -> bool {
                 let sub_value = (self.map_to)(value);
-                ((*self.b).vtable.intercept_set)(self.b, &sub_value as *const T2 as *const ())
+                // Safety: `self.b` is a BindingHolder that expects a `T2`
+                unsafe {
+                    ((*self.b).vtable.intercept_set)(self.b, &sub_value as *const T2 as *const ())
+                }
             }
         }
         impl<T, T2, M1, M2> Drop for BindingMapper<T, T2, M1, M2> {
@@ -1583,10 +1605,8 @@ struct StateInfoBinding<F> {
     binding: F,
 }
 
-unsafe impl<F: Fn() -> i32> crate::properties::BindingCallable for StateInfoBinding<F> {
-    unsafe fn evaluate(self: Pin<&Self>, value: *mut ()) -> BindingResult {
-        // Safety: We should only set this binding on a property of type StateInfo
-        let value = &mut *(value as *mut StateInfo);
+unsafe impl<F: Fn() -> i32> crate::properties::BindingCallable<StateInfo> for StateInfoBinding<F> {
+    fn evaluate(self: Pin<&Self>, value: &mut StateInfo) -> BindingResult {
         let new_state = (self.binding)();
         let timestamp = self.dirty_time.take();
         if new_state != value.current_state {
@@ -1759,7 +1779,9 @@ impl<DirtyHandler: PropertyDirtyHandler> PropertyTracker<DirtyHandler> {
             was_dirty: bool,
         ) {
             if !was_dirty {
-                Pin::new_unchecked(&(*(_self as *const BindingHolder<B>)).binding).notify();
+                unsafe {
+                    Pin::new_unchecked(&(*(_self as *const BindingHolder<B>)).binding).notify()
+                };
             }
         }
 

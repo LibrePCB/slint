@@ -64,7 +64,12 @@ function(SLINT_TARGET_SOURCES target)
         set(translation_domain_prop "$<TARGET_GENEX_EVAL:${target},$<TARGET_PROPERTY:${target},SLINT_TRANSLATION_DOMAIN>>")
         set(translation_domain_arg "$<IF:$<STREQUAL:${translation_domain_prop},>,${target},${translation_domain_prop}>")
 
+        set(no_default_translation_context_bool "$<BOOL:$<TARGET_PROPERTY:${target},SLINT_NO_DEFAULT_TRANSLATION_CONTEXT>>")
+        set(no_default_translation_context_arg "$<IF:${no_default_translation_context_bool},--no-default-translation-context,>")
+
         if (compilation_units GREATER 0)
+            # We need to set this to empty, as this variable is reused in every foreach iteration.
+            set(cpp_files "")
             foreach(cpp_num RANGE 1 ${compilation_units})
                 list(APPEND cpp_files "${CMAKE_CURRENT_BINARY_DIR}/slint_generated_${_SLINT_BASE_NAME}_${cpp_num}.cpp")
             endforeach()
@@ -80,6 +85,7 @@ function(SLINT_TARGET_SOURCES target)
                 --style ${_SLINT_STYLE}
                 --embed-resources=${embed}
                 --translation-domain=${translation_domain_arg}
+                ${no_default_translation_context_arg}
                 ${_SLINT_CPP_NAMESPACE_ARG}
                 ${_SLINT_CPP_LIBRARY_PATHS_ARG}
                 ${scale_factor_arg}

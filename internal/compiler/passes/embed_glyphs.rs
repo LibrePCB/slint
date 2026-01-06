@@ -1,6 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+use crate::CompilerConfiguration;
 use crate::diagnostics::BuildDiagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::embedded_resources::{BitmapFont, BitmapGlyph, BitmapGlyphs, CharacterMapEntry};
@@ -8,7 +9,6 @@ use crate::embedded_resources::{BitmapFont, BitmapGlyph, BitmapGlyphs, Character
 use crate::expression_tree::BuiltinFunction;
 use crate::expression_tree::{Expression, Unit};
 use crate::object_tree::*;
-use crate::CompilerConfiguration;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -269,47 +269,28 @@ pub fn embed_glyphs<'a>(
 
 #[inline(never)] // workaround https://github.com/rust-lang/rust/issues/104099
 fn get_fallback_fonts(compiler_config: &CompilerConfiguration) -> Vec<Font> {
-    #[allow(unused)]
-    let mut fallback_families: Vec<String> = Vec::new();
+    let mut fallback_fonts = Vec::new();
 
-    #[cfg(target_os = "macos")]
-    {
-        fallback_families = ["Menlo", "Apple Symbols", "Apple Color Emoji"]
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<String>>();
-    }
+    let mut collection = sharedfontique::get_collection();
+    let mut query = collection.query();
+    query.set_families(
+        sharedfontique::FALLBACK_FAMILIES.into_iter().map(fontique::QueryFamily::Generic).chain(
+            core::iter::once(fontique::QueryFamily::Generic(fontique::GenericFamily::Emoji)),
+        ),
+    );
 
-    #[cfg(target_family = "windows")]
-    {
-        fallback_families = ["Segoe UI Emoji", "Segoe UI Symbol", "Arial", "Wingdings"]
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<String>>();
-    }
+    query.matches_with(|query_font| {
+        if let Some(font) = compiler_config
+            .load_font_by_id(&query_font)
+            .ok()
+            .map(|fontdue_font| Font { font: query_font.clone(), fontdue_font })
+        {
+            fallback_fonts.push(font);
+        }
 
-    let fallback_fonts = fallback_families
-        .iter()
-        .filter_map(|fallback_family| {
-            let mut collection = sharedfontique::get_collection();
-            let mut query = collection.query();
-            query.set_families(std::iter::once(fontique::QueryFamily::from(
-                fallback_family.as_str(),
-            )));
-            let mut font = None;
-            query.matches_with(|query_font| {
-                font = Some(query_font.clone());
-                fontique::QueryStatus::Stop
-            });
+        fontique::QueryStatus::Continue
+    });
 
-            font.and_then(|font| {
-                compiler_config
-                    .load_font_by_id(&font)
-                    .ok()
-                    .map(|fontdue_font| Font { font, fontdue_font })
-            })
-        })
-        .collect::<Vec<_>>();
     fallback_fonts
 }
 
@@ -423,7 +404,7 @@ fn embed_sdf_glyphs(
     const RANGE: f64 = 6.;
 
     let Some(max_size) = pixel_sizes.iter().max() else {
-        return vec![];
+        return Vec::new();
     };
     let min_size = pixel_sizes.iter().min().expect("we have a 'max' so the vector is not empty");
     let target_pixel_size = (max_size * 2 / 3).max(16).min(RANGE as i16 * min_size);
@@ -565,7 +546,7 @@ pub fn collect_font_sizes_used(
         .to_string()
         .as_str()
     {
-        "TextInput" | "Text" | "SimpleText" | "ComplexText" | "MarkdownText" => {
+        "TextInput" | "Text" | "SimpleText" | "ComplexText" | "StyledTextItem" => {
             if let Some(font_size) = try_extract_font_size_from_element(elem, "font-size") {
                 add_font_size(font_size)
             }

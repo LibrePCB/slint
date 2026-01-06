@@ -18,7 +18,7 @@ use core::{mem::MaybeUninit, ptr::addr_of_mut};
 use alloc::{boxed::Box, rc::Rc};
 use defmt::{error, info, unwrap};
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_stm32::{
     bind_interrupts,
     exti::ExtiInput,
@@ -35,15 +35,15 @@ use embassy_time::{Duration, Timer};
 use gt911::Gt911Blocking;
 use mcu_embassy::{
     controller::{self, Action, Controller},
-    mcu::{double_buffer::DoubleBuffer, hardware::HardwareMcu, rcc_setup, ALLOCATOR},
-    slint_backend::{StmBackend, TargetPixelType, DISPLAY_HEIGHT, DISPLAY_WIDTH},
+    mcu::{ALLOCATOR, double_buffer::DoubleBuffer, hardware::HardwareMcu, rcc_setup},
+    slint_backend::{DISPLAY_HEIGHT, DISPLAY_WIDTH, StmBackend, TargetPixelType},
 };
 use slint::{
-    platform::{
-        software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel},
-        PointerEventButton, WindowEvent,
-    },
     ComponentHandle,
+    platform::{
+        PointerEventButton, WindowEvent,
+        software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel},
+    },
 };
 use slint_generated::MainWindow;
 use static_cell::StaticCell;
@@ -217,20 +217,24 @@ async fn main(spawner: Spawner) {
 
 unsafe fn init_heap_in_place(buf: &mut MaybeUninit<[u8; HEAP_SIZE]>) -> &mut [u8; HEAP_SIZE] {
     let ptr = buf.as_mut_ptr();
-    addr_of_mut!((*ptr)).write([0u8; HEAP_SIZE]);
+    unsafe {
+        addr_of_mut!((*ptr)).write([0u8; HEAP_SIZE]);
 
-    // Safety: we have written valid bytes to the data structure
-    buf.assume_init_mut()
+        // Safety: we have written valid bytes to the data structure
+        buf.assume_init_mut()
+    }
 }
 
 unsafe fn init_fb_in_place(
     buf: &mut MaybeUninit<[TargetPixelType; DISPLAY_WIDTH * DISPLAY_HEIGHT]>,
 ) -> &mut [TargetPixelType; DISPLAY_WIDTH * DISPLAY_HEIGHT] {
     let ptr = buf.as_mut_ptr();
-    addr_of_mut!((*ptr)).write([Rgb565Pixel(0); DISPLAY_WIDTH * DISPLAY_HEIGHT]);
+    unsafe {
+        addr_of_mut!((*ptr)).write([Rgb565Pixel(0); DISPLAY_WIDTH * DISPLAY_HEIGHT]);
 
-    // Safety: we have written valid bytes to the data structure
-    buf.assume_init_mut()
+        // Safety: we have written valid bytes to the data structure
+        buf.assume_init_mut()
+    }
 }
 
 #[embassy_executor::task(pool_size = MY_TASK_POOL_SIZE)]

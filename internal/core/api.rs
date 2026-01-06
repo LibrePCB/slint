@@ -7,13 +7,19 @@ This module contains types that are public and re-exported in the slint-rs as we
 
 #![warn(missing_docs)]
 
-#[cfg(target_has_atomic = "ptr")]
-pub use crate::future::*;
-use crate::graphics::{Rgba8Pixel, SharedPixelBuffer};
 use crate::input::{KeyEventType, MouseEvent};
 use crate::window::{WindowAdapter, WindowInner};
 use alloc::boxed::Box;
 use alloc::string::String;
+
+#[cfg(target_has_atomic = "ptr")]
+pub use crate::future::*;
+pub use crate::graphics::{
+    Brush, Color, Image, LoadImageError, Rgb8Pixel, Rgba8Pixel, RgbaColor, SharedPixelBuffer,
+};
+pub use crate::sharedvector::SharedVector;
+pub use crate::styled_text::StyledText;
+pub use crate::{format, string::SharedString, string::ToSharedString};
 
 /// A position represented in the coordinate space of logical pixels. That is the space before applying
 /// a display device specific scale factor.
@@ -590,6 +596,27 @@ impl Window {
         self.0.set_minimized(minimized);
     }
 
+    /// The area of the window covered by the software keyboard is changing (animated).
+    #[doc(hidden)]
+    pub fn set_virtual_keyboard(
+        &self,
+        origin: LogicalPosition,
+        size: LogicalSize,
+        _: crate::InternalToken,
+    ) {
+        self.0.set_window_item_virtual_keyboard(origin.to_euclid(), size.to_euclid());
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_keyboard(
+        &self,
+        _: crate::InternalToken,
+    ) -> Option<(LogicalPosition, LogicalSize)> {
+        self.0.window_item_virtual_keyboard().map(|(origin, size)| {
+            (LogicalPosition::from_euclid(origin), LogicalSize::from_euclid(size))
+        })
+    }
+
     /// Dispatch a window event to the scene.
     ///
     /// Use this when you're implementing your own backend and want to forward user input events.
@@ -769,8 +796,6 @@ impl Window {
         self.0.window_adapter().renderer().take_snapshot()
     }
 }
-
-pub use crate::SharedString;
 
 #[i_slint_core_macros::slint_doc]
 /// This trait is used to obtain references to global singletons exported in `.slint`

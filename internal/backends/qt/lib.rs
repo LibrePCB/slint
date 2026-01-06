@@ -6,6 +6,8 @@
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
 #![recursion_limit = "2048"]
+#![cfg_attr(slint_nightly_test, feature(non_exhaustive_omitted_patterns_lint))]
+#![cfg_attr(slint_nightly_test, warn(non_exhaustive_omitted_patterns))]
 
 extern crate alloc;
 
@@ -226,7 +228,7 @@ impl i_slint_core::platform::Platform for Backend {
                        ~EventHolder() {
                            if (fnbox.a != nullptr || fnbox.b != nullptr) {
                                rust!(Slint_delete_event_holder [fnbox: *mut dyn FnOnce() as "TraitObject"] {
-                                   drop(Box::from_raw(fnbox))
+                                   unsafe { drop(Box::from_raw(fnbox)) }
                                });
                            }
                        }
@@ -241,7 +243,7 @@ impl i_slint_core::platform::Platform for Backend {
                                 TraitObject fnbox = std::move(this->fnbox);
                                 this->fnbox = {nullptr, nullptr};
                                 rust!(Slint_call_event_holder [fnbox: *mut dyn FnOnce() as "TraitObject"] {
-                                   let b = Box::from_raw(fnbox);
+                                   let b = unsafe { Box::from_raw(fnbox) };
                                    b();
                                    // in case the callback started a new timer
                                    crate::qt_window::restart_timer();
@@ -337,7 +339,7 @@ impl QtWidgetAccessor for i_slint_core::api::Window {
         i_slint_core::window::WindowInner::from_pub(self)
             .window_adapter()
             .internal(i_slint_core::InternalToken)
-            .and_then(|wa| wa.as_any().downcast_ref::<qt_window::QtWindow>())
+            .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<qt_window::QtWindow>())
             .map(qt_window::QtWindow::widget_ptr)
     }
 }

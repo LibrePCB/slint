@@ -57,6 +57,7 @@ fn main() -> std::io::Result<()> {
             write!(
                 output,
                 r"
+#[rust_analyzer::skip]
 #[test] {} fn t_{}() -> ::std::result::Result<(), ::std::boxed::Box<dyn ::std::error::Error>> {{
     use i_slint_backend_testing as slint_testing;
     slint_testing::init_no_event_loop();
@@ -173,6 +174,10 @@ fn generate_source(
         compiler_config.translation_domain =
             Some(testcase.absolute_path.file_stem().unwrap().to_str().unwrap().to_string());
     }
+    if source.contains("//no-default-translation-context") {
+        compiler_config.default_translation_context =
+            i_slint_compiler::DefaultTranslationContext::None;
+    }
     let (root_component, diag, loader) =
         spin_on::spin_on(compile_syntax_node(syntax_node, diag, compiler_config));
 
@@ -189,6 +194,7 @@ fn generate_source(
     generator::generate(
         generator::OutputFormat::Rust,
         output,
+        None,
         &root_component,
         &loader.compiler_config,
     )?;

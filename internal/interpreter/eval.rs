@@ -83,7 +83,7 @@ impl<Item: vtable::HasStaticVTable<corelib::items::ItemVTable>> ErasedPropertyIn
     }
     unsafe fn link_two_ways(&self, item: Pin<ItemRef>, property2: *const ()) {
         // Safety: ErasedPropertyInfo::link_two_ways and PropertyInfo::link_two_ways have the same safety requirement
-        (*self).link_two_ways(ItemRef::downcast_pin(item).unwrap(), property2)
+        unsafe { (*self).link_two_ways(ItemRef::downcast_pin(item).unwrap(), property2) }
     }
 
     fn prepare_for_two_way_binding(&self, item: Pin<ItemRef>) -> Pin<Rc<corelib::Property<Value>>> {
@@ -169,29 +169,35 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
         Expression::StringLiteral(s) => Value::String(s.as_str().into()),
         Expression::NumberLiteral(n, unit) => Value::Number(unit.normalize(*n)),
         Expression::BoolLiteral(b) => Value::Bool(*b),
-        Expression::ElementReference(_) => todo!("Element references are only supported in the context of built-in function calls at the moment"),
-        Expression::PropertyReference(nr) => {
-            load_property_helper(&ComponentInstance::InstanceRef(local_context.component_instance), &nr.element(), nr.name()).unwrap()
-        }
-        Expression::RepeaterIndexReference { element } => load_property_helper(&ComponentInstance::InstanceRef(local_context.component_instance),
+        Expression::ElementReference(_) => todo!(
+            "Element references are only supported in the context of built-in function calls at the moment"
+        ),
+        Expression::PropertyReference(nr) => load_property_helper(
+            &ComponentInstance::InstanceRef(local_context.component_instance),
+            &nr.element(),
+            nr.name(),
+        )
+        .unwrap(),
+        Expression::RepeaterIndexReference { element } => load_property_helper(
+            &ComponentInstance::InstanceRef(local_context.component_instance),
             &element.upgrade().unwrap().borrow().base_type.as_component().root_element,
             crate::dynamic_item_tree::SPECIAL_PROPERTY_INDEX,
         )
         .unwrap(),
         Expression::RepeaterModelReference { element } => {
-            let value = load_property_helper(&ComponentInstance::InstanceRef(local_context.component_instance),
-                    &element.upgrade().unwrap().borrow().base_type.as_component().root_element,
-                    crate::dynamic_item_tree::SPECIAL_PROPERTY_MODEL_DATA,
-                )
-                .unwrap();
+            let value = load_property_helper(
+                &ComponentInstance::InstanceRef(local_context.component_instance),
+                &element.upgrade().unwrap().borrow().base_type.as_component().root_element,
+                crate::dynamic_item_tree::SPECIAL_PROPERTY_MODEL_DATA,
+            )
+            .unwrap();
             if matches!(value, Value::Void) {
                 // Uninitialized model data (because the model returned None) should still be initialized to the default value of the type
                 default_value_for_type(&expression.ty())
             } else {
                 value
             }
-
-        },
+        }
         Expression::FunctionParameterReference { index, .. } => {
             local_context.function_arguments[*index].clone()
         }
@@ -206,12 +212,10 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
             let array = eval_expression(array, local_context);
             let index = eval_expression(index, local_context);
             match (array, index) {
-                (Value::Model(model), Value::Number(index)) => {
-                    model.row_data_tracked(index as isize as usize).unwrap_or_else(|| default_value_for_type(&expression.ty()))
-                }
-                _ => {
-                    Value::Void
-                }
+                (Value::Model(model), Value::Number(index)) => model
+                    .row_data_tracked(index as isize as usize)
+                    .unwrap_or_else(|| default_value_for_type(&expression.ty())),
+                _ => Value::Void,
             }
         }
         Expression::Cast { from, to } => {
@@ -239,20 +243,42 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
         }
         Expression::FunctionCall { function, arguments, source_location } => match &function {
             Callable::Function(nr) => {
-                let is_item_member = nr.element().borrow().native_class().is_some_and(|n| n.properties.contains_key(nr.name()));
+                let is_item_member = nr
+                    .element()
+                    .borrow()
+                    .native_class()
+                    .is_some_and(|n| n.properties.contains_key(nr.name()));
                 if is_item_member {
                     call_item_member_function(nr, local_context)
                 } else {
-                    let args = arguments.iter().map(|e| eval_expression(e, local_context)).collect::<Vec<_>>();
-                    call_function(&ComponentInstance::InstanceRef(local_context.component_instance), &nr.element(), nr.name(), args).unwrap()
+                    let args = arguments
+                        .iter()
+                        .map(|e| eval_expression(e, local_context))
+                        .collect::<Vec<_>>();
+                    call_function(
+                        &ComponentInstance::InstanceRef(local_context.component_instance),
+                        &nr.element(),
+                        nr.name(),
+                        args,
+                    )
+                    .unwrap()
                 }
             }
             Callable::Callback(nr) => {
-                let args = arguments.iter().map(|e| eval_expression(e, local_context)).collect::<Vec<_>>();
-                invoke_callback(&ComponentInstance::InstanceRef(local_context.component_instance), &nr.element(), nr.name(), &args).unwrap()
+                let args =
+                    arguments.iter().map(|e| eval_expression(e, local_context)).collect::<Vec<_>>();
+                invoke_callback(
+                    &ComponentInstance::InstanceRef(local_context.component_instance),
+                    &nr.element(),
+                    nr.name(),
+                    &args,
+                )
+                .unwrap()
             }
-            Callable::Builtin(f) => call_builtin_function(f.clone(), arguments, local_context, source_location),
-        }
+            Callable::Builtin(f) => {
+                call_builtin_function(f.clone(), arguments, local_context, source_location)
+            }
+        },
         Expression::SelfAssignment { lhs, rhs, op, .. } => {
             let rhs = eval_expression(rhs, local_context);
             eval_assignment(lhs, *op, rhs, local_context);
@@ -263,11 +289,14 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
             let rhs = eval_expression(rhs, local_context);
 
             match (op, lhs, rhs) {
-                ('+', Value::String(mut a), Value::String(b)) => { a.push_str(b.as_str()); Value::String(a) },
+                ('+', Value::String(mut a), Value::String(b)) => {
+                    a.push_str(b.as_str());
+                    Value::String(a)
+                }
                 ('+', Value::Number(a), Value::Number(b)) => Value::Number(a + b),
                 ('+', a @ Value::Struct(_), b @ Value::Struct(_)) => {
-                    let a : Option<corelib::layout::LayoutInfo> = a.try_into().ok();
-                    let b : Option<corelib::layout::LayoutInfo> = b.try_into().ok();
+                    let a: Option<corelib::layout::LayoutInfo> = a.try_into().ok();
+                    let b: Option<corelib::layout::LayoutInfo> = b.try_into().ok();
                     if let (Some(a), Some(b)) = (a, b) {
                         a.merge(&b).into()
                     } else {
@@ -301,21 +330,22 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                 (sub, op) => panic!("unsupported {op} {sub:?}"),
             }
         }
-        Expression::ImageReference{ resource_ref, nine_slice, .. } => {
+        Expression::ImageReference { resource_ref, nine_slice, .. } => {
             let mut image = match resource_ref {
-                i_slint_compiler::expression_tree::ImageReference::None => {
-                    Ok(Default::default())
-                }
+                i_slint_compiler::expression_tree::ImageReference::None => Ok(Default::default()),
                 i_slint_compiler::expression_tree::ImageReference::AbsolutePath(path) => {
                     let path = std::path::Path::new(path);
                     if path.starts_with("builtin:/") {
-                        i_slint_compiler::fileaccess::load_file(path).and_then(|virtual_file| virtual_file.builtin_contents).map(|virtual_file| {
-                            let extension = path.extension().unwrap().to_str().unwrap();
-                            corelib::graphics::load_image_from_embedded_data(
-                                corelib::slice::Slice::from_slice(virtual_file),
-                                corelib::slice::Slice::from_slice(extension.as_bytes())
-                            )
-                        }).ok_or_else(Default::default)
+                        i_slint_compiler::fileaccess::load_file(path)
+                            .and_then(|virtual_file| virtual_file.builtin_contents)
+                            .map(|virtual_file| {
+                                let extension = path.extension().unwrap().to_str().unwrap();
+                                corelib::graphics::load_image_from_embedded_data(
+                                    corelib::slice::Slice::from_slice(virtual_file),
+                                    corelib::slice::Slice::from_slice(extension.as_bytes()),
+                                )
+                            })
+                            .ok_or_else(Default::default)
                     } else {
                         corelib::graphics::Image::load_from_path(path)
                     }
@@ -326,8 +356,9 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                 i_slint_compiler::expression_tree::ImageReference::EmbeddedTexture { .. } => {
                     todo!()
                 }
-            }.unwrap_or_else(|_| {
-                eprintln!("Could not load image {resource_ref:?}" );
+            }
+            .unwrap_or_else(|_| {
+                eprintln!("Could not load image {resource_ref:?}");
                 Default::default()
             });
             if let Some(n) = nine_slice {
@@ -336,28 +367,30 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
             Value::Image(image)
         }
         Expression::Condition { condition, true_expr, false_expr } => {
-            match eval_expression(condition, local_context).try_into()
-                as Result<bool, _>
-            {
+            match eval_expression(condition, local_context).try_into() as Result<bool, _> {
                 Ok(true) => eval_expression(true_expr, local_context),
                 Ok(false) => eval_expression(false_expr, local_context),
-                _ => local_context.return_value.clone().expect("conditional expression did not evaluate to boolean"),
+                _ => local_context
+                    .return_value
+                    .clone()
+                    .expect("conditional expression did not evaluate to boolean"),
             }
         }
-        Expression::Array { values, .. } => Value::Model(
-            ModelRc::new(corelib::model::SharedVectorModel::from(
-                values.iter().map(|e| eval_expression(e, local_context)).collect::<SharedVector<_>>()
-            )
-        )),
+        Expression::Array { values, .. } => {
+            Value::Model(ModelRc::new(corelib::model::SharedVectorModel::from(
+                values
+                    .iter()
+                    .map(|e| eval_expression(e, local_context))
+                    .collect::<SharedVector<_>>(),
+            )))
+        }
         Expression::Struct { values, .. } => Value::Struct(
             values
                 .iter()
                 .map(|(k, v)| (k.to_string(), eval_expression(v, local_context)))
                 .collect(),
         ),
-        Expression::PathData(data)  => {
-            Value::PathData(convert_path(data, local_context))
-        }
+        Expression::PathData(data) => Value::PathData(convert_path(data, local_context)),
         Expression::StoreLocalVariable { name, value } => {
             let value = eval_expression(value, local_context);
             local_context.local_variables.insert(name.clone(), value);
@@ -378,27 +411,34 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                 corelib::animations::EasingCurve::CubicBezier([*a, *b, *c, *d])
             }
         }),
-        Expression::LinearGradient{angle, stops} => {
+        Expression::LinearGradient { angle, stops } => {
             let angle = eval_expression(angle, local_context);
-            Value::Brush(Brush::LinearGradient(LinearGradientBrush::new(angle.try_into().unwrap(), stops.iter().map(|(color, stop)| {
-                let color = eval_expression(color, local_context).try_into().unwrap();
-                let position = eval_expression(stop, local_context).try_into().unwrap();
-                GradientStop{ color, position }
-            }))))
+            Value::Brush(Brush::LinearGradient(LinearGradientBrush::new(
+                angle.try_into().unwrap(),
+                stops.iter().map(|(color, stop)| {
+                    let color = eval_expression(color, local_context).try_into().unwrap();
+                    let position = eval_expression(stop, local_context).try_into().unwrap();
+                    GradientStop { color, position }
+                }),
+            )))
         }
-        Expression::RadialGradient{stops} => {
-            Value::Brush(Brush::RadialGradient(RadialGradientBrush::new_circle(stops.iter().map(|(color, stop)| {
+        Expression::RadialGradient { stops } => Value::Brush(Brush::RadialGradient(
+            RadialGradientBrush::new_circle(stops.iter().map(|(color, stop)| {
                 let color = eval_expression(color, local_context).try_into().unwrap();
                 let position = eval_expression(stop, local_context).try_into().unwrap();
-                GradientStop{ color, position }
-            }))))
-        }
-        Expression::ConicGradient{stops} => {
-            Value::Brush(Brush::ConicGradient(ConicGradientBrush::new(stops.iter().map(|(color, stop)| {
-                let color = eval_expression(color, local_context).try_into().unwrap();
-                let position = eval_expression(stop, local_context).try_into().unwrap();
-                GradientStop{ color, position }
-            }))))
+                GradientStop { color, position }
+            })),
+        )),
+        Expression::ConicGradient { from_angle, stops } => {
+            let from_angle: f32 = eval_expression(from_angle, local_context).try_into().unwrap();
+            Value::Brush(Brush::ConicGradient(ConicGradientBrush::new(
+                from_angle,
+                stops.iter().map(|(color, stop)| {
+                    let color = eval_expression(color, local_context).try_into().unwrap();
+                    let position = eval_expression(stop, local_context).try_into().unwrap();
+                    GradientStop { color, position }
+                }),
+            )))
         }
         Expression::EnumerationValue(value) => {
             Value::EnumerationValue(value.enumeration.name.to_string(), value.to_string())
@@ -410,12 +450,41 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
             }
             local_context.return_value.clone().unwrap()
         }
-        Expression::LayoutCacheAccess { layout_cache_prop, index, repeater_index } => {
-            let cache = load_property_helper(&ComponentInstance::InstanceRef(local_context.component_instance), &layout_cache_prop.element(), layout_cache_prop.name()).unwrap();
+        Expression::LayoutCacheAccess {
+            layout_cache_prop,
+            index,
+            repeater_index,
+            entries_per_item,
+        } => {
+            let cache = load_property_helper(
+                &ComponentInstance::InstanceRef(local_context.component_instance),
+                &layout_cache_prop.element(),
+                layout_cache_prop.name(),
+            )
+            .unwrap();
             if let Value::LayoutCache(cache) = cache {
                 if let Some(ri) = repeater_index {
-                    let offset : usize = eval_expression(ri, local_context).try_into().unwrap();
-                    Value::Number(cache.get((cache[*index] as usize) + offset * 2).copied().unwrap_or(0.).into())
+                    let offset: usize = eval_expression(ri, local_context).try_into().unwrap();
+                    Value::Number(
+                        cache
+                            .get((cache[*index] as usize) + offset * entries_per_item)
+                            .copied()
+                            .unwrap_or(0.)
+                            .into(),
+                    )
+                } else {
+                    Value::Number(cache[*index].into())
+                }
+            } else if let Value::ArrayOfU16(cache) = cache {
+                if let Some(ri) = repeater_index {
+                    let offset: usize = eval_expression(ri, local_context).try_into().unwrap();
+                    Value::Number(
+                        cache
+                            .get((cache[*index] as usize) + offset * entries_per_item)
+                            .copied()
+                            .unwrap_or(0)
+                            .into(),
+                    )
                 } else {
                     Value::Number(cache[*index].into())
                 }
@@ -423,14 +492,61 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                 panic!("invalid layout cache")
             }
         }
-        Expression::ComputeLayoutInfo(lay, o) => crate::eval_layout::compute_layout_info(lay, *o, local_context),
+        Expression::ComputeLayoutInfo(lay, o) => {
+            crate::eval_layout::compute_layout_info(lay, *o, local_context)
+        }
+        Expression::ComputeGridLayoutInfo { layout_organized_data_prop, layout, orientation } => {
+            let cache = load_property_helper(
+                &ComponentInstance::InstanceRef(local_context.component_instance),
+                &layout_organized_data_prop.element(),
+                layout_organized_data_prop.name(),
+            )
+            .unwrap();
+            if let Value::ArrayOfU16(organized_data) = cache {
+                crate::eval_layout::compute_grid_layout_info(
+                    layout,
+                    &organized_data,
+                    *orientation,
+                    local_context,
+                )
+            } else {
+                panic!("invalid layout organized data cache")
+            }
+        }
+        Expression::OrganizeGridLayout(lay) => {
+            crate::eval_layout::organize_grid_layout(lay, local_context)
+        }
         Expression::SolveLayout(lay, o) => crate::eval_layout::solve_layout(lay, *o, local_context),
+        Expression::SolveGridLayout { layout_organized_data_prop, layout, orientation } => {
+            let cache = load_property_helper(
+                &ComponentInstance::InstanceRef(local_context.component_instance),
+                &layout_organized_data_prop.element(),
+                layout_organized_data_prop.name(),
+            )
+            .unwrap();
+            if let Value::ArrayOfU16(organized_data) = cache {
+                crate::eval_layout::solve_grid_layout(
+                    &organized_data,
+                    layout,
+                    *orientation,
+                    local_context,
+                )
+            } else {
+                panic!("invalid layout organized data cache")
+            }
+        }
         Expression::MinMax { ty: _, op, lhs, rhs } => {
             let Value::Number(lhs) = eval_expression(lhs, local_context) else {
-                return local_context.return_value.clone().expect("minmax lhs expression did not evaluate to number");
+                return local_context
+                    .return_value
+                    .clone()
+                    .expect("minmax lhs expression did not evaluate to number");
             };
-            let Value::Number(rhs) =  eval_expression(rhs, local_context) else {
-                return local_context.return_value.clone().expect("minmax rhs expression did not evaluate to number");
+            let Value::Number(rhs) = eval_expression(rhs, local_context) else {
+                return local_context
+                    .return_value
+                    .clone()
+                    .expect("minmax rhs expression did not evaluate to number");
             };
             match op {
                 MinMaxOp::Min => Value::Number(lhs.min(rhs)),
@@ -659,7 +775,7 @@ fn call_builtin_function(
 
                 crate::dynamic_item_tree::show_popup(
                     popup_window,
-                    component,
+                    enclosing_component,
                     popup,
                     |instance_ref| {
                         let comp = ComponentInstance::InstanceRef(instance_ref);
@@ -1172,8 +1288,14 @@ fn call_builtin_function(
             .into(),
         BuiltinFunction::SetupMenuBar => {
             let component = local_context.component_instance;
-            let [Expression::PropertyReference(entries_nr), Expression::PropertyReference(sub_menu_nr), Expression::PropertyReference(activated_nr), Expression::ElementReference(item_tree_root), Expression::BoolLiteral(no_native), rest @ ..] =
-                arguments
+            let [
+                Expression::PropertyReference(entries_nr),
+                Expression::PropertyReference(sub_menu_nr),
+                Expression::PropertyReference(activated_nr),
+                Expression::ElementReference(item_tree_root),
+                Expression::BoolLiteral(no_native),
+                rest @ ..,
+            ] = arguments
             else {
                 panic!("internal error: incorrect argument count to SetupMenuBar")
             };
@@ -1186,12 +1308,13 @@ fn call_builtin_function(
                 rest.first(),
             );
 
-            if let Some(w) = component.window_adapter().internal(i_slint_core::InternalToken) {
-                if !no_native && w.supports_native_menu_bar() {
-                    let menubar = vtable::VRc::into_dyn(menu_item_tree);
-                    w.setup_menubar(menubar);
-                    return Value::Void;
-                }
+            if let Some(w) = component.window_adapter().internal(i_slint_core::InternalToken)
+                && !no_native
+                && w.supports_native_menu_bar()
+            {
+                let menubar = vtable::VRc::into_dyn(menu_item_tree);
+                w.setup_menubar(menubar);
+                return Value::Void;
             }
 
             let (entries, sub_menu, activated) = menu_item_tree_properties(menu_item_tree);
@@ -1211,7 +1334,7 @@ fn call_builtin_function(
             set_callback_handler(i, &activated_nr.element(), activated_nr.name(), activated)
                 .unwrap();
 
-            return Value::Void;
+            Value::Void
         }
         BuiltinFunction::MonthDayCount => {
             let m: u32 = eval_expression(&arguments[0], local_context).try_into().unwrap();
@@ -1396,6 +1519,16 @@ fn call_builtin_function(
             corelib::open_url(&url);
             Value::Void
         }
+        BuiltinFunction::EscapeMarkdown => {
+            let text: SharedString =
+                eval_expression(&arguments[0], local_context).try_into().unwrap();
+            Value::String(corelib::escape_markdown(&text).into())
+        }
+        BuiltinFunction::ParseMarkdown => {
+            let text: SharedString =
+                eval_expression(&arguments[0], local_context).try_into().unwrap();
+            Value::StyledText(corelib::parse_markdown(&text))
+        }
     }
 }
 
@@ -1478,19 +1611,17 @@ fn eval_assignment(lhs: &Expression, op: char, rhs: Value, local_context: &mut E
                     }
 
                     let component = element.borrow().enclosing_component.upgrade().unwrap();
-                    if element.borrow().id == component.root_element.borrow().id {
-                        if let Some(x) =
+                    if element.borrow().id == component.root_element.borrow().id
+                        && let Some(x) =
                             enclosing_component.description.custom_properties.get(nr.name())
-                        {
-                            unsafe {
-                                let p = Pin::new_unchecked(
-                                    &*enclosing_component.as_ptr().add(x.offset),
-                                );
-                                x.prop.set(p, eval(x.prop.get(p).unwrap()), None).unwrap();
-                            }
-                            return;
+                    {
+                        unsafe {
+                            let p =
+                                Pin::new_unchecked(&*enclosing_component.as_ptr().add(x.offset));
+                            x.prop.set(p, eval(x.prop.get(p).unwrap()), None).unwrap();
                         }
-                    };
+                        return;
+                    }
                     let item_info =
                         &enclosing_component.description.items[element.borrow().id.as_str()];
                     let item =
@@ -1618,7 +1749,7 @@ pub fn store_property(
     component_instance: InstanceRef,
     element: &ElementRc,
     name: &str,
-    value: Value,
+    mut value: Value,
 ) -> Result<(), SetPropertyError> {
     generativity::make_guard!(guard);
     match enclosing_component_instance_for_element(
@@ -1649,7 +1780,7 @@ pub fn store_property(
                         .get(name)
                     {
                         // Do an extra type checking because PropertyInfo::set won't do it for custom structures or array
-                        if !check_value_type(&value, &orig_decl.property_type) {
+                        if !check_value_type(&mut value, &orig_decl.property_type) {
                             return Err(SetPropertyError::WrongType);
                         }
                     }
@@ -1678,7 +1809,7 @@ pub fn store_property(
 }
 
 /// Return true if the Value can be used for a property of the given type
-fn check_value_type(value: &Value, ty: &Type) -> bool {
+fn check_value_type(value: &mut Value, ty: &Type) -> bool {
     match ty {
         Type::Void => true,
         Type::Invalid
@@ -1707,16 +1838,29 @@ fn check_value_type(value: &Value, ty: &Type) -> bool {
         Type::Easing => matches!(value, Value::EasingCurve(_)),
         Type::Brush => matches!(value, Value::Brush(_)),
         Type::Array(inner) => {
-            matches!(value, Value::Model(m) if m.iter().all(|v| check_value_type(&v, inner)))
+            matches!(value, Value::Model(m) if m.iter().all(|mut v| check_value_type(&mut v, inner)))
         }
         Type::Struct(s) => {
-            matches!(value, Value::Struct(str) if str.iter().all(|(k, v)| s.fields.get(k).is_some_and(|ty| check_value_type(v, ty))))
+            let Value::Struct(str) = value else { return false };
+            if !str
+                .0
+                .iter_mut()
+                .all(|(k, v)| s.fields.get(k).is_some_and(|ty| check_value_type(v, ty)))
+            {
+                return false;
+            }
+            for (k, v) in &s.fields {
+                str.0.entry(k.clone()).or_insert_with(|| default_value_for_type(v));
+            }
+            true
         }
         Type::Enumeration(en) => {
             matches!(value, Value::EnumerationValue(name, _) if name == en.name.as_str())
         }
         Type::LayoutCache => matches!(value, Value::LayoutCache(_)),
+        Type::ArrayOfU16 => matches!(value, Value::ArrayOfU16(_)),
         Type::ComponentFactory => matches!(value, Value::ComponentFactory(_)),
+        Type::StyledText => matches!(value, Value::StyledText(_)),
     }
 }
 
@@ -2010,6 +2154,7 @@ pub fn default_value_for_type(ty: &Type) -> Value {
         Type::UnitProduct(_) => Value::Number(0.),
         Type::PathData => Value::PathData(Default::default()),
         Type::LayoutCache => Value::LayoutCache(Default::default()),
+        Type::ArrayOfU16 => Value::ArrayOfU16(Default::default()),
         Type::ComponentFactory => Value::ComponentFactory(Default::default()),
         Type::InferredProperty
         | Type::InferredCallback
@@ -2017,6 +2162,7 @@ pub fn default_value_for_type(ty: &Type) -> Value {
         | Type::Function { .. } => {
             panic!("There can't be such property")
         }
+        Type::StyledText => Value::StyledText(Default::default()),
     }
 }
 

@@ -114,31 +114,63 @@ inline static void register_item_tree(const vtable::VRc<ItemTreeVTable> *c,
 }
 
 inline SharedVector<float> solve_box_layout(const cbindgen_private::BoxLayoutData &data,
-                                            cbindgen_private::Slice<int> repeater_indexes)
+                                            cbindgen_private::Slice<int> repeater_indices)
 {
     SharedVector<float> result;
     cbindgen_private::Slice<uint32_t> ri =
-            make_slice(reinterpret_cast<uint32_t *>(repeater_indexes.ptr), repeater_indexes.len);
+            make_slice(reinterpret_cast<uint32_t *>(repeater_indices.ptr), repeater_indices.len);
     cbindgen_private::slint_solve_box_layout(&data, ri, &result);
     return result;
 }
 
-inline SharedVector<float> solve_grid_layout(const cbindgen_private::GridLayoutData &data)
+inline SharedVector<uint16_t>
+organize_grid_layout(cbindgen_private::Slice<cbindgen_private::GridLayoutInputData> input_data,
+                     cbindgen_private::Slice<int> repeater_indices)
+{
+    SharedVector<uint16_t> result;
+    cbindgen_private::Slice<uint32_t> ri =
+            make_slice(reinterpret_cast<uint32_t *>(repeater_indices.ptr), repeater_indices.len);
+    cbindgen_private::slint_organize_grid_layout(input_data, ri, &result);
+    return result;
+}
+
+inline SharedVector<uint16_t> organize_dialog_button_layout(
+        cbindgen_private::Slice<cbindgen_private::GridLayoutInputData> input_data,
+        cbindgen_private::Slice<DialogButtonRole> dialog_button_roles)
+{
+    SharedVector<uint16_t> result;
+    cbindgen_private::slint_organize_dialog_button_layout(input_data, dialog_button_roles, &result);
+    return result;
+}
+
+inline SharedVector<float>
+solve_grid_layout(const cbindgen_private::GridLayoutData &data,
+                  cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> constraints,
+                  cbindgen_private::Orientation orientation,
+                  cbindgen_private::Slice<int> repeater_indices)
 {
     SharedVector<float> result;
-    cbindgen_private::slint_solve_grid_layout(&data, &result);
+    cbindgen_private::Slice<uint32_t> ri =
+            make_slice(reinterpret_cast<uint32_t *>(repeater_indices.ptr), repeater_indices.len);
+    cbindgen_private::slint_solve_grid_layout(&data, constraints, orientation, ri, &result);
     return result;
 }
 
 inline cbindgen_private::LayoutInfo
-grid_layout_info(cbindgen_private::Slice<cbindgen_private::GridLayoutCellData> cells, float spacing,
-                 const cbindgen_private::Padding &padding)
+grid_layout_info(const cbindgen_private::GridLayoutOrganizedData &organized_data,
+                 cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> constraints,
+                 cbindgen_private::Slice<int> repeater_indices, float spacing,
+                 const cbindgen_private::Padding &padding,
+                 cbindgen_private::Orientation orientation)
 {
-    return cbindgen_private::slint_grid_layout_info(cells, spacing, &padding);
+    cbindgen_private::Slice<uint32_t> ri =
+            make_slice(reinterpret_cast<uint32_t *>(repeater_indices.ptr), repeater_indices.len);
+    return cbindgen_private::slint_grid_layout_info(&organized_data, constraints, ri, spacing,
+                                                    &padding, orientation);
 }
 
 inline cbindgen_private::LayoutInfo
-box_layout_info(cbindgen_private::Slice<cbindgen_private::BoxLayoutCellData> cells, float spacing,
+box_layout_info(cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> cells, float spacing,
                 const cbindgen_private::Padding &padding,
                 cbindgen_private::LayoutAlignment alignment)
 {
@@ -146,16 +178,18 @@ box_layout_info(cbindgen_private::Slice<cbindgen_private::BoxLayoutCellData> cel
 }
 
 inline cbindgen_private::LayoutInfo
-box_layout_info_ortho(cbindgen_private::Slice<cbindgen_private::BoxLayoutCellData> cells,
+box_layout_info_ortho(cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> cells,
                       const cbindgen_private::Padding &padding)
 {
     return cbindgen_private::slint_box_layout_info_ortho(cells, &padding);
 }
 
 /// Access the layout cache of an item within a repeater
-inline float layout_cache_access(const SharedVector<float> &cache, int offset, int repeater_index)
+template<typename T>
+inline T layout_cache_access(const SharedVector<T> &cache, int offset, int repeater_index,
+                             int entries_per_item)
 {
-    size_t idx = size_t(cache[offset]) + repeater_index * 2;
+    size_t idx = size_t(cache[offset]) + repeater_index * entries_per_item;
     return idx < cache.size() ? cache[idx] : 0;
 }
 
@@ -225,6 +259,20 @@ inline SharedString translate(const SharedString &original, const SharedString &
 {
     SharedString result = original;
     cbindgen_private::slint_translate(&result, &context, &domain, arguments, n, &plural);
+    return result;
+}
+
+inline SharedString escape_markdown(const SharedString &text)
+{
+    SharedString result = text;
+    cbindgen_private::slint_escape_markdown(&result);
+    return result;
+}
+
+inline StyledText parse_markdown(const SharedString &text)
+{
+    StyledText result;
+    cbindgen_private::slint_parse_markdown(&text, &result);
     return result;
 }
 

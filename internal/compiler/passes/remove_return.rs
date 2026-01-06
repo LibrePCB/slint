@@ -1,12 +1,12 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-use smol_str::{format_smolstr, SmolStr};
+use smol_str::{SmolStr, format_smolstr};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use crate::expression_tree::Expression;
-use crate::langtype::{Struct, Type};
+use crate::langtype::{Struct, StructName, Type};
 
 pub fn remove_return(doc: &crate::object_tree::Document) {
     doc.visit_all_used_components(|component| {
@@ -56,7 +56,7 @@ fn process_expression(
                 }
                 (ExpressionResult::Just(te), ExpressionResult::Return(fe)) => {
                     ExpressionResult::MaybeReturn {
-                        pre_statements: vec![],
+                        pre_statements: Vec::new(),
                         condition: *condition,
                         returned_value: fe,
                         actual_value: cleanup_empty_block(te),
@@ -64,7 +64,7 @@ fn process_expression(
                 }
                 (ExpressionResult::Return(te), ExpressionResult::Just(fe)) => {
                     ExpressionResult::MaybeReturn {
-                        pre_statements: vec![],
+                        pre_statements: Vec::new(),
                         condition: Expression::UnaryOp { sub: condition, op: '!' },
                         returned_value: te,
                         actual_value: cleanup_empty_block(fe),
@@ -73,8 +73,8 @@ fn process_expression(
                 (ExpressionResult::Return(te), ExpressionResult::Return(fe)) => {
                     ExpressionResult::Return(Some(Expression::Condition {
                         condition,
-                        true_expr: te.unwrap_or(Expression::CodeBlock(vec![])).into(),
-                        false_expr: fe.unwrap_or(Expression::CodeBlock(vec![])).into(),
+                        true_expr: te.unwrap_or(Expression::CodeBlock(Vec::new())).into(),
+                        false_expr: fe.unwrap_or(Expression::CodeBlock(Vec::new())).into(),
                     }))
                 }
                 (te, fe) => {
@@ -112,11 +112,7 @@ fn process_expression(
 
 /// Return the expression, unless it is an empty codeblock, then return None
 fn cleanup_empty_block(te: Expression) -> Option<Expression> {
-    if matches!(&te, Expression::CodeBlock(stmts) if stmts.is_empty()) {
-        None
-    } else {
-        Some(te)
-    }
+    if matches!(&te, Expression::CodeBlock(stmts) if stmts.is_empty()) { None } else { Some(te) }
 }
 
 fn process_codeblock(
@@ -125,7 +121,7 @@ fn process_codeblock(
     ty: &Type,
     ctx: &RemoveReturnContext,
 ) -> ExpressionResult {
-    let mut stmts = vec![];
+    let mut stmts = Vec::new();
     while let Some(e) = iter.next() {
         let is_last = iter.peek().is_none();
         match process_expression(e, toplevel, ctx, if is_last { ty } else { &Type::Void }) {
@@ -171,7 +167,7 @@ fn process_codeblock(
                         ty,
                         ctx,
                         ExpressionResult::MaybeReturn {
-                            pre_statements: vec![],
+                            pre_statements: Vec::new(),
                             condition,
                             returned_value,
                             actual_value,
@@ -277,7 +273,7 @@ impl ExpressionResult {
     fn to_expression(self, ty: &Type) -> Expression {
         match self {
             ExpressionResult::Just(e) => e,
-            ExpressionResult::Return(e) => e.unwrap_or(Expression::CodeBlock(vec![])),
+            ExpressionResult::Return(e) => e.unwrap_or(Expression::CodeBlock(Vec::new())),
             ExpressionResult::MaybeReturn {
                 mut pre_statements,
                 condition,
@@ -286,8 +282,8 @@ impl ExpressionResult {
             } => {
                 pre_statements.push(Expression::Condition {
                     condition: condition.into(),
-                    true_expr: actual_value.unwrap_or(Expression::CodeBlock(vec![])).into(),
-                    false_expr: returned_value.unwrap_or(Expression::CodeBlock(vec![])).into(),
+                    true_expr: actual_value.unwrap_or(Expression::CodeBlock(Vec::new())).into(),
+                    false_expr: returned_value.unwrap_or(Expression::CodeBlock(Vec::new())).into(),
                 });
                 Expression::CodeBlock(pre_statements)
             }
@@ -496,10 +492,7 @@ fn make_struct(it: impl Iterator<Item = (&'static str, Type, Expression)>) -> Ex
     }
     codeblock_with_expr(
         voids,
-        Expression::Struct {
-            ty: Rc::new(Struct { fields, name: None, node: None, rust_attributes: None }),
-            values,
-        },
+        Expression::Struct { ty: Rc::new(Struct { fields, name: StructName::None }), values },
     )
 }
 

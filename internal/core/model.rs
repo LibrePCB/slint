@@ -572,11 +572,7 @@ impl Model for bool {
     type Data = ();
 
     fn row_count(&self) -> usize {
-        if *self {
-            1
-        } else {
-            0
-        }
+        if *self { 1 } else { 0 }
     }
 
     fn row_data(&self, row: usize) -> Option<Self::Data> {
@@ -825,12 +821,20 @@ pub trait RepeatedItemTree:
         LogicalLength::default()
     }
 
-    /// Returns what's needed to perform the layout if this ItemTrees is in a box layout
-    fn box_layout_data(
+    /// Returns what's needed to perform the layout if this ItemTree is in a layout
+    fn layout_item_info(
         self: Pin<&Self>,
         _orientation: Orientation,
-    ) -> crate::layout::BoxLayoutCellData {
-        crate::layout::BoxLayoutCellData::default()
+    ) -> crate::layout::LayoutItemInfo {
+        crate::layout::LayoutItemInfo::default()
+    }
+
+    /// Returns what's needed to call organize_grid_layout layout if this ItemTree is in a grid layout
+    fn grid_layout_input_data(
+        self: Pin<&Self>,
+        new_row: bool,
+    ) -> crate::layout::GridLayoutInputData {
+        crate::layout::GridLayoutInputData { new_row, ..Default::default() }
     }
 }
 
@@ -1540,7 +1544,7 @@ mod tests {
         model.insert(0, 255);
         assert!(tracker.is_dirty());
 
-        model.set_vec(vec![]);
+        model.set_vec(Vec::new());
         assert!(tracker.is_dirty());
     }
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use super::writer::TokenWriter;
-use i_slint_compiler::parser::{syntax_nodes, NodeOrToken, SyntaxKind, SyntaxNode};
+use i_slint_compiler::parser::{NodeOrToken, SyntaxKind, SyntaxNode, syntax_nodes};
 
 pub fn format_document(
     doc: syntax_nodes::Document,
@@ -165,6 +165,9 @@ fn format_node(
         SyntaxKind::ImportSpecifier => {
             return format_import_specifier(node, writer, state);
         }
+        SyntaxKind::UsesSpecifier => {
+            return format_uses_specifier(node, writer, state);
+        }
         _ => (),
     }
 
@@ -299,7 +302,7 @@ fn format_component(
             && whitespace_to(&mut sub, SyntaxKind::DeclaredIdentifier, writer, state, " ")?;
         let r = whitespace_to_one_of(
             &mut sub,
-            &[SyntaxKind::Identifier, SyntaxKind::Element],
+            &[SyntaxKind::Identifier, SyntaxKind::UsesSpecifier, SyntaxKind::Element],
             writer,
             state,
             " ",
@@ -1488,6 +1491,51 @@ fn format_import_identifier(
     Ok(())
 }
 
+/// Formats a uses specifier.
+///
+/// Ensures that the QualifiedName and `from` Identifier are separated by a space.
+fn format_uses_specifier(
+    node: &SyntaxNode,
+    writer: &mut impl TokenWriter,
+    state: &mut FormatState,
+) -> Result<(), std::io::Error> {
+    let sub = node.children_with_tokens();
+    for n in sub {
+        match n.kind() {
+            SyntaxKind::Whitespace => {
+                fold(n, writer, state)?;
+            }
+            SyntaxKind::LBrace => {
+                fold(n, writer, state)?;
+            }
+            SyntaxKind::UsesIdentifier => {
+                if let Some(uses_node) = n.as_node() {
+                    state.skip_all_whitespace = true;
+                    for child in uses_node.children_with_tokens() {
+                        match child.kind() {
+                            SyntaxKind::Identifier => {
+                                state.whitespace_to_add = Some(" ".into());
+                                fold(child, writer, state)?;
+                            }
+                            _ => {
+                                fold(child, writer, state)?;
+                            }
+                        }
+                    }
+                }
+            }
+            SyntaxKind::RBrace => {
+                fold(n, writer, state)?;
+            }
+            _ => {
+                state.skip_all_whitespace = true;
+                fold(n, writer, state)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2029,7 +2077,8 @@ A := B {
         return 0;
     }
 }
-");
+",
+        );
     }
 
     #[test]
@@ -2309,7 +2358,8 @@ export component MainWindow2 inherits Rectangle {
         }
     }
 }
-"# );
+"#,
+        );
     }
 
     #[test]

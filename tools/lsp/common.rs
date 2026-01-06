@@ -4,7 +4,7 @@
 //! Data structures common between LSP and previewer
 
 use i_slint_compiler::object_tree::ElementRc;
-use i_slint_compiler::parser::{syntax_nodes, SyntaxKind, SyntaxNode, TextSize};
+use i_slint_compiler::parser::{SyntaxKind, SyntaxNode, TextSize, syntax_nodes};
 use lsp_types::{TextEdit, Url, WorkspaceEdit};
 
 use std::path::Path;
@@ -13,6 +13,7 @@ use std::{collections::HashMap, path::PathBuf};
 pub mod component_catalog;
 pub mod document_cache;
 pub use document_cache::{DocumentCache, SourceFileVersion};
+pub use i_slint_compiler::diagnostics::ByteFormat;
 pub mod rename_component;
 pub mod rename_element_id;
 #[cfg(test)]
@@ -117,7 +118,7 @@ pub fn is_element_node_ignored(node: &syntax_nodes::Element) -> bool {
 }
 
 pub fn uri_to_file(uri: &Url) -> Option<PathBuf> {
-    if uri.scheme() == "builtin" {
+    if ["builtin", "vscode-remote"].contains(&uri.scheme()) {
         Some(PathBuf::from(uri.to_string()))
     } else {
         let path = uri.to_file_path().ok()?;
@@ -127,7 +128,7 @@ pub fn uri_to_file(uri: &Url) -> Option<PathBuf> {
 }
 
 pub fn file_to_uri(path: &Path) -> Option<Url> {
-    if path.starts_with("builtin:/") {
+    if ["builtin:/", "vscode-remote:/"].iter().any(|prefix| path.starts_with(prefix)) {
         Url::parse(path.to_str()?).ok()
     } else {
         Url::from_file_path(path).ok()
@@ -537,6 +538,7 @@ pub struct PreviewConfig {
     pub style: String,
     pub include_paths: Vec<PathBuf>,
     pub library_paths: HashMap<String, PathBuf>,
+    pub format_utf8: bool,
 }
 
 /// The Component to preview
@@ -728,7 +730,7 @@ pub fn fuzzy_filter_iter<T: std::fmt::Debug>(
     transformer: impl Fn(&T) -> String,
     needle: &str,
 ) -> Vec<T> {
-    use nucleo_matcher::{pattern, Config, Matcher};
+    use nucleo_matcher::{Config, Matcher, pattern};
 
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let pattern = pattern::Pattern::parse(
@@ -791,5 +793,16 @@ mod tests {
         assert_eq!(back_conversion1, back_conversion3);
 
         assert_eq!(back_conversion1, builtin_path1);
+    }
+
+    #[test]
+    fn test_uri_to_file_vscode_remote() {
+        let vscode_remote_path = PathBuf::from("vscode-remote://wsl%2Bubuntu/path/to/file.slint");
+
+        let url = file_to_uri(&vscode_remote_path).unwrap();
+
+        let back_conversion = uri_to_file(&url).unwrap();
+
+        assert_eq!(vscode_remote_path, back_conversion);
     }
 }

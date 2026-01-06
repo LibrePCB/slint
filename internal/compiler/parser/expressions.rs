@@ -104,7 +104,10 @@ fn parse_expression_helper(p: &mut impl Parser, precedence: OperatorPrecedence) 
                 let mut p = p.start_node_at(checkpoint.clone(), SyntaxKind::MemberAccess);
                 p.consume(); // '.'
                 if possible_range && p.peek().kind() == SyntaxKind::NumberLiteral {
-                    let error = format!("Parse error. Range expressions are not supported in Slint. You can use an integer as a model to repeat something multiple time. Eg: `for i in {} : ...`", p.peek().as_str());
+                    let error = format!(
+                        "Parse error. Range expressions are not supported in Slint. You can use an integer as a model to repeat something multiple time. Eg: `for i in {} : ...`",
+                        p.peek().as_str()
+                    );
                     p.error(error);
                     p.consume();
                     return false;
@@ -251,6 +254,9 @@ fn parse_at_keyword(p: &mut impl Parser) {
         }
         "tr" => {
             parse_tr(p);
+        }
+        "markdown" => {
+            parse_markdown(p);
         }
         _ => {
             p.consume();
@@ -425,6 +431,44 @@ fn parse_tr(p: &mut impl Parser) {
             return;
         }
         parse_expression(&mut *p);
+    }
+
+    while p.test(SyntaxKind::Comma) {
+        if !parse_expression(&mut *p) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::RParent);
+}
+
+/// ```test,AtTr
+/// @markdown("foo")
+/// @markdown("foo{}", bar(42))
+/// @markdown("foo{0}", bar(42))
+/// @markdown("foo{1}{0}", 555, bar(42))
+/// @markdown("foo{1}{0}{1}", 555, bar(42))
+/// ```
+fn parse_markdown(p: &mut impl Parser) {
+    let mut p = p.start_node(SyntaxKind::AtMarkdown);
+    p.expect(SyntaxKind::At);
+    debug_assert!(p.peek().as_str().ends_with("markdown"));
+    p.expect(SyntaxKind::Identifier); //eg "markdown"
+    p.expect(SyntaxKind::LParent);
+
+    fn consume_literal(p: &mut impl Parser) -> bool {
+        let peek = p.peek();
+        if peek.kind() != SyntaxKind::StringLiteral
+            || !peek.as_str().starts_with('"')
+            || !peek.as_str().ends_with('"')
+        {
+            p.error("Expected plain string literal");
+            return false;
+        }
+        p.expect(SyntaxKind::StringLiteral)
+    }
+
+    if !consume_literal(&mut *p) {
+        return;
     }
 
     while p.test(SyntaxKind::Comma) {

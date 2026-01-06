@@ -221,9 +221,9 @@ impl<'a> LocalFocusForwards<'a> {
                         function.name().into(),
                         PropertyDeclaration {
                             property_type: Type::Function(Rc::new(Function {
-                                return_type: Type::Void.into(),
-                                args: vec![],
-                                arg_names: vec![],
+                                return_type: Type::Void,
+                                args: Vec::new(),
+                                arg_names: Vec::new(),
                             })),
                             visibility: PropertyVisibility::Public,
                             pure: Some(false),
@@ -289,7 +289,7 @@ fn call_set_focus_function(
                 element,
                 SmolStr::new_static(function_name),
             )),
-            arguments: vec![],
+            arguments: Vec::new(),
             source_location: source_location.cloned(),
         })
     } else if builtin_focus_function {

@@ -46,6 +46,7 @@ members = [
   'internal/backends/selector',
   #'internal/backends/testing',
   #'internal/backends/linuxkms',
+  #'internal/renderers/software',
   #'internal/renderers/skia',
   #'internal/renderers/femtovg',
   'internal/common',
@@ -59,6 +60,7 @@ members = [
   #'tests/driver/driverlib',
   #'tests/driver/interpreter',
   #'tests/driver/nodejs',
+  #'tests/driver/python',
   #'tests/driver/rust',
   #'tests/screenshots',
   #'tests/manual/windowattributes',
@@ -110,7 +112,7 @@ resolver = "3"
 description = "GUI toolkit to efficiently develop fluid graphical user interfaces for embedded devices and desktop applications"
 authors = ["Slint Developers <info@slint.dev>"]
 documentation = "https://slint.dev/docs"
-edition = "2021"
+edition = "2024"
 homepage = "https://slint.dev"
 keywords = ["gui", "toolkit", "graphics", "design", "ui"]
 license = "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0"
@@ -131,6 +133,7 @@ i-slint-core = { version = "=1.15.0", path = "internal/core", default-features =
 i-slint-core-macros = { version = "=1.15.0", path = "internal/core-macros", default-features = false }
 i-slint-renderer-femtovg = { version = "=1.15.0", path = "internal/renderers/femtovg", default-features = false }
 i-slint-renderer-skia = { version = "=1.15.0", path = "internal/renderers/skia", default-features = false }
+i-slint-renderer-software = { version = "=1.15.0", path = "internal/renderers/software", default-features = false }
 slint = { version = "=1.15.0", path = "api/rs/slint", default-features = false }
 slint-build = { version = "=1.15.0", path = "api/rs/build", default-features = false }
 slint-cpp = { version = "=1.15.0", path = "api/cpp", default-features = false }
@@ -162,7 +165,7 @@ serde_json = { version = "1.0.96" }
 softbuffer = { version = "0.4.4", default-features = false }
 spin_on = { version = "0.1" }
 strum = { version = "0.27.1", default-features = false, features = ["derive"] }
-toml_edit = { version = "0.23.0" }
+toml_edit = { version = "0.24.0" }
 ttf-parser = { version = "0.25" }
 typed-index-collections = "3.2"
 web-sys = { version = "0.3.72", default-features = false }
@@ -176,7 +179,7 @@ wgpu-26 = { package = "wgpu", version = "26", default-features = false }
 wgpu-27 = { package = "wgpu", version = "27", default-features = false }
 input = { version = "0.9.0", default-features = false }
 tr = { version = "0.1", default-features = false }
-fontique = { version = "0.6.0" }
+fontique = { version = "0.7.0" }
 read-fonts = { version = "0.35" }
 skrifa = { version = "0.37" }
 windows = { version = "0.62" }

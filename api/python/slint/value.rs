@@ -1,9 +1,10 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+use i_slint_compiler::generator::python::ident;
 use pyo3::types::PyDict;
-use pyo3::{prelude::*, PyVisit};
 use pyo3::{IntoPyObjectExt, PyTraverseError};
+use pyo3::{PyVisit, prelude::*};
 use pyo3_stub_gen::{derive::gen_stub_pyclass, derive::gen_stub_pymethods};
 
 use std::cell::OnceCell;
@@ -51,7 +52,9 @@ impl<'py> IntoPyObject<'py> for SlintToPyValue {
                 type_collection.enum_to_py(&enum_name, &enum_value, py)?.into_bound_py_any(py)
             }
             v @ _ => {
-                eprintln!("Python: conversion from slint to python needed for {v:#?} and not implemented yet");
+                eprintln!(
+                    "Python: conversion from slint to python needed for {v:#?} and not implemented yet"
+                );
                 ().into_bound_py_any(py)
             }
         }
@@ -216,17 +219,14 @@ impl TypeCollection {
                                 en.name.to_string(),
                                 en.values
                                     .iter()
-                                    .map(|val| {
-                                        let val = val.to_string();
-                                        (val.clone(), val)
-                                    })
+                                    .map(|val| (ident(&val).to_string(), val.to_string()))
                                     .collect::<Vec<_>>(),
                             ),
                             None,
                         )
                         .unwrap();
 
-                    enum_classes.insert(en.name.to_string(), enum_type);
+                    enum_classes.insert(ident(&en.name).into(), enum_type);
                 }
                 _ => {}
             }
@@ -250,7 +250,7 @@ impl TypeCollection {
         enum_value: &str,
         py: Python<'_>,
     ) -> Result<Py<PyAny>, PyErr> {
-        let enum_cls = self.enum_classes.get(enum_name).ok_or_else(|| {
+        let enum_cls = self.enum_classes.get(ident(enum_name).as_str()).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
                 "Slint provided enum {enum_name} is unknown"
             ))

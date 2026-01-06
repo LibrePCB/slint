@@ -37,9 +37,7 @@ fn enums(path: &Path) -> anyhow::Result<()> {
         };
     }
     macro_rules! enum_sub_namespace {
-        (AccessibleRole) => {{
-            Some("testing")
-        }};
+        (AccessibleRole) => {{ Some("testing") }};
         ($_:ident) => {
             None
         };
@@ -140,7 +138,7 @@ fn builtin_structs(path: &Path) -> anyhow::Result<()> {
             $(#[non_exhaustive])?
             $(#[derive(Copy, Eq)])?
             struct $Name:ident {
-                @name = $inner_name:literal
+                @name = $inner_name:expr,
                 export {
                     $( $(#[doc = $pub_doc:literal])* $pub_field:ident : $pub_type:ty, )*
                 }
@@ -234,6 +232,7 @@ fn default_config() -> cbindgen::Config {
             // therefore it is ok to reinterpret_cast
             ("MenuEntryModel".into(), "std::shared_ptr<slint::Model<MenuEntry>>".into()),
             ("Coord".into(), "float".into()),
+            ("Channel".into(), "uint8_t".into()),
         ]
         .iter()
         .cloned()
@@ -304,7 +303,6 @@ fn gen_corelib(
         "Flickable",
         "SimpleText",
         "ComplexText",
-        "MarkdownText",
         "Path",
         "WindowItem",
         "TextInput",
@@ -343,7 +341,6 @@ fn gen_corelib(
         "Rect",
         "SortOrder",
         "BitmapFont",
-        "PhysicalRegion",
     ]
     .iter()
     .chain(items.iter())
@@ -366,6 +363,7 @@ fn gen_corelib(
 
     config.export.exclude = [
         "SharedString",
+        "StyledText",
         "SharedVector",
         "ImageInner",
         "ImageCacheKey",
@@ -397,6 +395,7 @@ fn gen_corelib(
         "MenuEntryModel",
         "MenuEntryArg",
         "Coord",
+        "Channel",
         "LogicalRect",
         "LogicalPoint",
         "LogicalPosition",
@@ -413,7 +412,7 @@ fn gen_corelib(
     ensure_cargo_rerun_for_crate(&crate_dir, dependencies)?;
 
     let mut string_config = config.clone();
-    string_config.export.exclude = vec!["SharedString".into()];
+    string_config.export.exclude = vec!["SharedString".into(), "StyledText".into()];
     string_config.export.body.insert(
         "Slice".to_owned(),
         "    const T &operator[](int i) const { return ptr[i]; }".to_owned(),
@@ -421,8 +420,9 @@ fn gen_corelib(
     cbindgen::Builder::new()
         .with_config(string_config)
         .with_src(crate_dir.join("string.rs"))
+        .with_src(crate_dir.join("styled_text.rs"))
         .with_src(crate_dir.join("slice.rs"))
-        .with_after_include("namespace slint { struct SharedString; }")
+        .with_after_include("namespace slint { struct SharedString; struct StyledText; }")
         .generate()
         .context("Unable to generate bindings for slint_string_internal.h")?
         .write_to_file(include_dir.join("slint_string_internal.h"));
@@ -495,10 +495,12 @@ fn gen_corelib(
                 "SharedPixelBuffer",
                 "SharedImageBuffer",
                 "StaticTextures",
-                "BorrowedOpenGLTextureOrigin"
+                "BorrowedOpenGLTextureOrigin",
+                "PhysicalRegion",
+                "PHYSICAL_REGION_MAX_SIZE",
             ],
             "slint_image_internal.h",
-            "#include \"slint_color.h\"\nnamespace slint::cbindgen_private { struct ParsedSVG{}; struct HTMLImage{}; using namespace vtable; namespace types{ struct NineSliceImage{}; } }",
+            "#include \"slint_color.h\"\nnamespace slint::cbindgen_private { struct ParsedSVG{}; struct HTMLImage{}; struct PhysicalPx; using namespace vtable; namespace types{ struct NineSliceImage{}; } }",
         ),
         (
             vec!["Color", "slint_color_brighter", "slint_color_darker",
@@ -516,7 +518,8 @@ fn gen_corelib(
             "#include \"slint_sharedvector.h\"\n#include \"slint_point.h\"",
         ),
         (
-            vec!["Brush", "LinearGradient", "GradientStop", "RadialGradient"],
+            vec!["Brush", "LinearGradient", "GradientStop", "RadialGradient", "ConicGradientBrush",
+                 "slint_conic_gradient_normalize_stops", "slint_conic_gradient_apply_rotation"],
             "slint_brush_internal.h",
             "",
         ),
@@ -576,6 +579,16 @@ fn gen_corelib(
             "slint_windowrc_is_minimized",
             "slint_windowrc_is_maximized",
             "slint_windowrc_take_snapshot",
+            "slint_windowrc_hwnd_win32",
+            "slint_windowrc_hinstance_win32",
+            "slint_windowrc_wlsurface_wayland",
+            "slint_windowrc_wldisplay_wayland",
+            "slint_windowrc_nsview_appkit",
+            "GradientStop",
+            "ConicGradientBrush",
+            "slint_conic_gradient_normalize_stops",
+            "slint_conic_gradient_apply_rotation",
+            "PHYSICAL_REGION_MAX_SIZE",
         ]
         .into_iter()
         .chain(config.export.exclude.iter().map(|s| s.as_str()))
@@ -616,6 +629,7 @@ fn gen_corelib(
             .with_src(crate_dir.join("input.rs"))
             .with_src(crate_dir.join("item_rendering.rs"))
             .with_src(crate_dir.join("window.rs"))
+            .with_src(crate_dir.join("../renderers/software/lib.rs"))
             .with_include("slint_enums_internal.h")
             .generate()
             .with_context(|| format!("Unable to generate bindings for {internal_header}"))?
@@ -875,6 +889,7 @@ namespace slint::cbindgen_private {
     using slint::cbindgen_private::types::TexturePixelFormat;
     struct DrawTextureArgs;
     struct DrawRectangleArgs;
+    using types::PhysicalRegion;
 }
 ",
         )

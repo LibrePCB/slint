@@ -6,17 +6,17 @@
 use std::pin::Pin;
 
 use super::{PhysicalBorderRadius, PhysicalLength, PhysicalPoint, PhysicalRect, PhysicalSize};
+use i_slint_core::graphics::ApproxEq;
 use i_slint_core::graphics::boxshadowcache::BoxShadowCache;
 use i_slint_core::graphics::euclid::num::Zero;
 use i_slint_core::graphics::euclid::{self, Vector2D};
-use i_slint_core::graphics::ApproxEq;
 use i_slint_core::item_rendering::{
     CachedRenderingData, ItemCache, ItemRenderer, ItemRendererFeatures, RenderImage, RenderText,
 };
 use i_slint_core::items::{ImageFit, ImageRendering, ItemRc, Layer, Opacity, RenderingResult};
 use i_slint_core::lengths::{
     LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalPx, LogicalRect, LogicalSize,
-    LogicalVector, PhysicalPx, RectLengths, ScaleFactor, SizeLengths,
+    LogicalVector, PhysicalPx, RectLengths, ScaleFactor, SizeLengths, logical_size_from_api,
 };
 use i_slint_core::textlayout::sharedparley::{self, GlyphRenderer};
 use i_slint_core::window::WindowInner;
@@ -39,6 +39,7 @@ pub struct SkiaItemRenderer<'a> {
     state_stack: Vec<RenderState>,
     current_state: RenderState,
     image_cache: &'a ItemCache<Option<skia_safe::Image>>,
+    layer_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Image)>>,
     path_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Path)>>,
     box_shadow_cache: &'a mut SkiaBoxShadowCache,
 }
@@ -49,6 +50,7 @@ impl<'a> SkiaItemRenderer<'a> {
         window: &'a i_slint_core::api::Window,
         surface: Option<&'a dyn crate::Surface>,
         image_cache: &'a ItemCache<Option<skia_safe::Image>>,
+        layer_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Image)>>,
         path_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Path)>>,
         box_shadow_cache: &'a mut SkiaBoxShadowCache,
     ) -> Self {
@@ -57,9 +59,10 @@ impl<'a> SkiaItemRenderer<'a> {
             scale_factor: ScaleFactor::new(window.scale_factor()),
             window,
             surface,
-            state_stack: vec![],
+            state_stack: Vec::new(),
             current_state: RenderState { alpha: 1.0, translation: Default::default() },
             image_cache,
+            layer_cache,
             path_cache,
             box_shadow_cache,
         }
@@ -271,8 +274,8 @@ impl<'a> SkiaItemRenderer<'a> {
 
             let filter_mode: skia_safe::sampling_options::SamplingOptions =
                 match item.rendering() {
-                    ImageRendering::Smooth => skia_safe::sampling_options::FilterMode::Linear,
                     ImageRendering::Pixelated => skia_safe::sampling_options::FilterMode::Nearest,
+                    ImageRendering::Smooth | _ => skia_safe::sampling_options::FilterMode::Linear,
                 }
                 .into();
 
@@ -321,20 +324,18 @@ impl<'a> SkiaItemRenderer<'a> {
 
     fn render_and_blend_layer(&mut self, item_rc: &ItemRc) -> RenderingResult {
         let current_clip = self.get_current_clip();
-        if let Some(layer_image) = self.render_layer(item_rc, &|| {
+        if let Some((layer_offset, layer_image)) = self.render_layer(item_rc, &|| {
             // We don't need to include the size of the "layer" item itself, since it has no content.
-            let children_rect = i_slint_core::properties::evaluate_no_tracking(|| {
-                item_rc.geometry().union(
-                    &i_slint_core::item_rendering::item_children_bounding_rect(
-                        item_rc.item_tree(),
-                        item_rc.index() as isize,
-                        &current_clip,
-                    ),
+            i_slint_core::properties::evaluate_no_tracking(|| {
+                i_slint_core::item_rendering::item_children_bounding_rect(
+                    item_rc.item_tree(),
+                    item_rc.index() as isize,
+                    &current_clip,
                 )
-            });
-            children_rect.size_length()
+            })
         }) {
             let _saved_canvas = self.pixel_align_origin();
+            self.canvas.translate(skia_safe::Vector::from((layer_offset.x, layer_offset.y)));
             self.canvas.draw_image_with_sampling_options(
                 layer_image,
                 skia_safe::Point::default(),
@@ -348,10 +349,12 @@ impl<'a> SkiaItemRenderer<'a> {
     fn render_layer(
         &mut self,
         item_rc: &ItemRc,
-        layer_logical_size_fn: &dyn Fn() -> LogicalSize,
-    ) -> Option<skia_safe::Image> {
-        self.image_cache.get_or_update_cache_entry(item_rc, || {
-            let layer_size = layer_logical_size_fn() * self.scale_factor;
+        layer_bounding_rect_fn: &dyn Fn() -> LogicalRect,
+    ) -> Option<(Vector2D<f32, PhysicalPx>, skia_safe::Image)> {
+        self.layer_cache.get_or_update_cache_entry(item_rc, || {
+            let bounding_rect = layer_bounding_rect_fn();
+            let physical_origin = bounding_rect.origin * self.scale_factor;
+            let layer_size = bounding_rect.size * self.scale_factor;
 
             let image_info = skia_safe::ImageInfo::new(
                 to_skia_size(&layer_size).to_ceil(),
@@ -368,9 +371,11 @@ impl<'a> SkiaItemRenderer<'a> {
                 self.window,
                 self.surface,
                 self.image_cache,
+                self.layer_cache,
                 self.path_cache,
                 self.box_shadow_cache,
             );
+            sub_renderer.translate(-bounding_rect.origin.to_vector());
 
             i_slint_core::item_rendering::render_item_children(
                 &mut sub_renderer,
@@ -379,7 +384,7 @@ impl<'a> SkiaItemRenderer<'a> {
                 &WindowInner::from_pub(self.window).window_adapter(),
             );
 
-            Some(surface.image_snapshot())
+            Some((physical_origin.to_vector(), surface.image_snapshot()))
         })
     }
 
@@ -533,7 +538,7 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         size: LogicalSize,
         _cache: &CachedRenderingData,
     ) {
-        sharedparley::draw_text(self, text, Some(text.font_request(self_rc)), size);
+        sharedparley::draw_text(self, text, Some(self_rc), size);
     }
 
     fn draw_text_input(
@@ -542,13 +547,7 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         self_rc: &i_slint_core::items::ItemRc,
         size: LogicalSize,
     ) {
-        sharedparley::draw_text_input(
-            self,
-            text_input,
-            Some(text_input.font_request(self_rc)),
-            size,
-            None,
-        );
+        sharedparley::draw_text_input(self, text_input, self_rc, size, None);
     }
 
     fn draw_path(
@@ -652,14 +651,14 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
             border_paint.set_anti_alias(anti_alias);
             border_paint.set_stroke_width((path.stroke_width() * self.scale_factor).get());
             border_paint.set_stroke_cap(match path.stroke_line_cap() {
-                i_slint_core::items::LineCap::Butt => skia_safe::PaintCap::Butt,
                 i_slint_core::items::LineCap::Round => skia_safe::PaintCap::Round,
                 i_slint_core::items::LineCap::Square => skia_safe::PaintCap::Square,
+                i_slint_core::items::LineCap::Butt | _ => skia_safe::PaintCap::Butt,
             });
             border_paint.set_stroke_join(match path.stroke_line_join() {
-                i_slint_core::items::LineJoin::Miter => skia_safe::PaintJoin::Miter,
                 i_slint_core::items::LineJoin::Round => skia_safe::PaintJoin::Round,
                 i_slint_core::items::LineJoin::Bevel => skia_safe::PaintJoin::Bevel,
+                i_slint_core::items::LineJoin::Miter | _ => skia_safe::PaintJoin::Miter,
             });
             border_paint.set_stroke(true);
             self.canvas.draw_path(&skpath, &border_paint);
@@ -834,7 +833,7 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
             self,
             std::pin::pin!((SharedString::from(string), Brush::from(color))),
             None,
-            LogicalSize::new(1., 1.), // Non-zero size to avoid an early return
+            logical_size_from_api(self.window.size().to_logical(self.scale_factor())),
         );
     }
 

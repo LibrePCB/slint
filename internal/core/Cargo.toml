@@ -6,7 +6,7 @@ name = "i-slint-core"
 description = "Internal Slint Runtime Library."
 authors.workspace = true
 documentation.workspace = true
-edition.workspace = true
+edition = "2024"
 homepage.workspace = true
 keywords.workspace = true
 license.workspace = true
@@ -42,6 +42,11 @@ std = [
   "chrono/clock",
   "dep:sys-locale",
   #"dep:webbrowser",
+  "shared-fontique",
+  "dep:pulldown-cmark",
+  "dep:thiserror",
+  "dep:htmlparser",
+  "i-slint-common/color-parsing",
 ]
 # Unsafe feature meaning that there is only one core running and all thread_local are static.
 # You can only enable this feature if you are sure that any API of this crate is only called
@@ -49,9 +54,6 @@ std = [
 unsafe-single-threaded = []
 
 unicode = ["unicode-script", "unicode-linebreak"]
-
-software-renderer-systemfonts = ["shared-fontique", "skrifa", "fontdue", "software-renderer", "shared-parley"]
-software-renderer = ["bytemuck"]
 
 image-decoders = ["dep:image", "dep:clru"]
 image-default-formats = ["image?/default-formats"]
@@ -63,18 +65,17 @@ shared-fontique = ["i-slint-common/shared-fontique"]
 
 raw-window-handle-06 = ["dep:raw-window-handle-06"]
 
-experimental = []
-
-experimental-rich-text = ["dep:pulldown-cmark"]
+experimental-rich-text = []
 
 unstable-wgpu-26 = ["dep:wgpu-26"]
 unstable-wgpu-27 = ["dep:wgpu-27"]
 
 tr = ["dep:tr"]
 
-default = ["std", "unicode"]
+32-bit-color = []
+default = ["std", "unicode", "shared-parley"]
 
-shared-parley = ["shared-fontique", "dep:parley"]
+shared-parley = ["shared-fontique", "dep:parley", "dep:skrifa"]
 
 [dependencies]
 i-slint-common = { workspace = true, features = ["default"] }
@@ -106,10 +107,8 @@ strum = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-linebreak = { version = "0.1.5", optional = true }
 unicode-script = { version = "0.5.7", optional = true }
-integer-sqrt = { version = "0.1.5" }
-bytemuck = { workspace = true, optional = true, features = ["derive"] }
-sys-locale = { version = "0.3.2", optional = true }
-parley = { version = "0.6.0", optional = true }
+sys-locale = { version = "0.3.2", optional = true, features = ["js"] }
+parley = { version = "0.7.0", optional = true }
 pulldown-cmark = { version = "0.13.0", optional = true }
 
 image = { workspace = true, optional = true, default-features = false }
@@ -123,7 +122,6 @@ bitflags = { version = "2.4.2" }
 
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 skrifa = { workspace = true, optional = true }
-fontdue = { workspace = true, optional = true }
 
 wgpu-26 = { workspace = true, optional = true }
 wgpu-27 = { workspace = true, optional = true }
@@ -131,6 +129,8 @@ wgpu-27 = { workspace = true, optional = true }
 tr = { workspace = true, optional = true }
 
 #webbrowser = { version = "1.0.6", optional = true }
+htmlparser = { version = "0.2.1", optional = true }
+thiserror = { version = "2.0.17", optional = true }
 
 [target.'cfg(target_family = "unix")'.dependencies]
 gettext-rs = { version = "0.7.1", optional = true, features = ["gettext-system"] }
@@ -142,7 +142,7 @@ web-sys = { workspace = true, features = ["HtmlImageElement", "Navigator"] }
 
 
 [dev-dependencies]
-slint = { path = "../../api/rs/slint", default-features = false, features = ["std", "compat-1-2"] }
+slint = { path = "../../api/rs/slint", default-features = false, features = ["std", "compat-1-2", "renderer-software"] }
 i-slint-backend-testing = { path = "../backends/testing" }
 rustybuzz = { workspace = true }
 ttf-parser = { workspace = true }
@@ -154,7 +154,7 @@ tempfile = { version = "3.12.0" }
 fontique = { workspace = true }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(slint_debug_property)", "cfg(cbindgen)", "cfg(slint_int_coord)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(slint_debug_property)", "cfg(cbindgen)", "cfg(slint_int_coord)", "cfg(slint_nightly_test)"] }
 
 [lints.clippy]
 # Coord is an alias for f32 in most architectures, but not always, so the cast

@@ -66,8 +66,8 @@ fn expression_cost(exp: &Expression, ctx: &EvaluationContext) -> isize {
         Expression::ConicGradient { .. } => ALLOC_COST,
         Expression::EnumerationValue(_) => 0,
         Expression::LayoutCacheAccess { .. } => PROPERTY_ACCESS_COST,
-        Expression::BoxLayoutFunction { .. } => return isize::MAX,
-        Expression::ComputeDialogLayoutCells { .. } => return isize::MAX,
+        Expression::WithLayoutItemInfo { .. } => return isize::MAX,
+        Expression::WithGridInputData { .. } => return isize::MAX,
         Expression::MinMax { .. } => 10,
         Expression::EmptyComponentFactory => 10,
         Expression::TranslationReference { .. } => PROPERTY_ACCESS_COST + 2 * ALLOC_COST,
@@ -78,7 +78,7 @@ fn expression_cost(exp: &Expression, ctx: &EvaluationContext) -> isize {
     cost
 }
 
-fn callback_cost(_callback: &crate::llr::PropertyReference, _ctx: &EvaluationContext) -> isize {
+fn callback_cost(_callback: &crate::llr::MemberReference, _ctx: &EvaluationContext) -> isize {
     // TODO: lookup the callback and find out what it does
     isize::MAX
 }
@@ -156,6 +156,7 @@ fn builtin_function_cost(function: &BuiltinFunction) -> isize {
         BuiltinFunction::StopTimer => 10,
         BuiltinFunction::RestartTimer => 10,
         BuiltinFunction::OpenUrl => isize::MAX,
+        BuiltinFunction::ParseMarkdown | BuiltinFunction::EscapeMarkdown => isize::MAX,
     }
 }
 
@@ -190,21 +191,21 @@ fn inline_simple_expressions_in_expression(expr: &mut Expression, ctx: &Evaluati
                         map.map_expression(expr);
                         // adjust use count
                         binding.use_count.set(use_count - 1);
-                        if let Some(prop_decl) = prop_info.property_decl {
-                            prop_decl.use_count.set(prop_decl.use_count.get() - 1);
+                        if let Some(use_count) = prop_info.use_count {
+                            use_count.set(use_count.get() - 1);
                         }
                         adjust_use_count(expr, ctx, 1);
                         if use_count == 1 {
                             adjust_use_count(&binding.expression.borrow(), &mapped_ctx, -1);
-                            binding.expression.replace(Expression::CodeBlock(vec![]));
+                            binding.expression.replace(Expression::CodeBlock(Vec::new()));
                         }
                     }
                 }
-            } else if let Some(prop_decl) = prop_info.property_decl {
-                if let Some(e) = Expression::default_value_for_type(&prop_decl.ty) {
-                    prop_decl.use_count.set(prop_decl.use_count.get() - 1);
-                    *expr = e;
-                }
+            } else if let Some(use_count) = prop_info.use_count
+                && let Some(e) = Expression::default_value_for_type(&prop_info.ty)
+            {
+                use_count.set(use_count.get() - 1);
+                *expr = e;
             }
         }
     };
@@ -215,10 +216,8 @@ fn inline_simple_expressions_in_expression(expr: &mut Expression, ctx: &Evaluati
 fn adjust_use_count(expr: &Expression, ctx: &EvaluationContext, adjust: isize) {
     expr.visit_property_references(ctx, &mut |p, ctx| {
         let prop_info = ctx.property_info(p);
-        if let Some(property_decl) = prop_info.property_decl {
-            property_decl
-                .use_count
-                .set(property_decl.use_count.get().checked_add_signed(adjust).unwrap());
+        if let Some(use_count) = prop_info.use_count {
+            use_count.set(use_count.get().checked_add_signed(adjust).unwrap());
         }
         if let Some((binding, _)) = prop_info.binding {
             let use_count = binding.use_count.get().checked_add_signed(adjust).unwrap();

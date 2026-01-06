@@ -1,4 +1,3 @@
-<!-- Copyright © SixtyFPS GmbH <info@slint.dev> ; SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0 -->
 
 # Slint for Visual Studio Code
 
@@ -29,7 +28,7 @@ visible, it is not necessary to save the file.
 
 ## Reporting Issues
 
-Issues should be reported in the [Slint issue tracker](https://github.com/slint-ui/slint/labels/vscode-extension).
+Issues should be reported in the [Slint issue tracker](https://github.com/slint-ui/slint/labels/a:editor%20integration).
 
 <!-- lines below this marker are stripped from the release -->
 

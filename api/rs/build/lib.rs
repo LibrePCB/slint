@@ -59,6 +59,10 @@ use std::path::Path;
 
 use i_slint_compiler::diagnostics::BuildDiagnostics;
 
+/// Argument of [`CompilerConfiguration::with_default_translation_context()`]
+///
+pub use i_slint_compiler::DefaultTranslationContext;
+
 /// The structure for configuring aspects of the compilation of `.slint` markup files to Rust.
 #[derive(Clone)]
 pub struct CompilerConfiguration {
@@ -196,6 +200,20 @@ impl CompilerConfiguration {
         Self { config }
     }
 
+    /// Unless explicitly specified with the `@tr("context" => ...)`, the default translation context is the component name.
+    /// Use this option with [`DefaultTranslationContext::None`] to disable the default translation context.
+    ///
+    /// The translation file must also not have context
+    /// (`--no-default-translation-context` argument of `slint-tr-extractor`)
+    #[must_use]
+    pub fn with_default_translation_context(
+        mut self,
+        default_translation_context: DefaultTranslationContext,
+    ) -> Self {
+        self.config.default_translation_context = default_translation_context;
+        self
+    }
+
     /// Configures the compiler to emit additional debug info when compiling Slint code.
     ///
     /// This is the equivalent to setting `SLINT_EMIT_DEBUG_INFO=1` and using the `slint!()` macro
@@ -278,7 +296,9 @@ impl CompilerConfiguration {
 #[non_exhaustive]
 pub enum CompileError {
     /// Cannot read environment variable CARGO_MANIFEST_DIR or OUT_DIR. The build script need to be run via cargo.
-    #[display("Cannot read environment variable CARGO_MANIFEST_DIR or OUT_DIR. The build script need to be run via cargo.")]
+    #[display(
+        "Cannot read environment variable CARGO_MANIFEST_DIR or OUT_DIR. The build script need to be run via cargo."
+    )]
     NotRunViaCargo,
     /// Parse error. The error are printed in the stderr, and also are in the vector
     #[display("{_0:?}")]

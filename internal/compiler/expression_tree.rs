@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use crate::diagnostics::{BuildDiagnostics, SourceLocation, Spanned};
-use crate::langtype::{BuiltinElement, EnumerationValue, Function, Struct, Type};
+use crate::langtype::{
+    BuiltinElement, BuiltinPublicStruct, EnumerationValue, Function, Struct, Type,
+};
 use crate::layout::Orientation;
 use crate::lookup::LookupCtx;
 use crate::object_tree::*;
 use crate::parser::{NodeOrToken, SyntaxNode};
 use crate::typeregister;
 use core::cell::RefCell;
-use smol_str::{format_smolstr, SmolStr};
+use smol_str::{SmolStr, format_smolstr};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -112,6 +114,8 @@ pub enum BuiltinFunction {
     StopTimer,
     RestartTimer,
     OpenUrl,
+    ParseMarkdown,
+    EscapeMarkdown,
 }
 
 #[derive(Debug, Clone)]
@@ -154,7 +158,7 @@ macro_rules! declare_builtin_function_types {
                     $($Name : Rc::new(Function{
                         args: vec![$($Arg),*],
                         return_type: $ReturnType,
-                        arg_names: vec![],
+                        arg_names: Vec::new(),
                     })),*
                 }
             }
@@ -215,9 +219,7 @@ declare_builtin_function_types!(
             (SmolStr::new_static("alpha"), Type::Int32),
         ])
         .collect(),
-        name: Some("Color".into()),
-        node: None,
-        rust_attributes: None,
+        name: BuiltinPublicStruct::Color.into(),
     })),
     ColorHsvaStruct: (Type::Color) -> Type::Struct(Rc::new(Struct {
         fields: IntoIterator::into_iter([
@@ -227,9 +229,7 @@ declare_builtin_function_types!(
             (SmolStr::new_static("alpha"), Type::Float32),
         ])
         .collect(),
-        name: Some("Color".into()),
-        node: None,
-        rust_attributes: None,
+        name: BuiltinPublicStruct::Color.into(),
     })),
     ColorBrighter: (Type::Brush, Type::Float32) -> Type::Brush,
     ColorDarker: (Type::Brush, Type::Float32) -> Type::Brush,
@@ -242,9 +242,7 @@ declare_builtin_function_types!(
             (SmolStr::new_static("height"), Type::Int32),
         ])
         .collect(),
-        name: Some("Size".into()),
-        node: None,
-        rust_attributes: None,
+        name: crate::langtype::BuiltinPrivateStruct::Size.into(),
     })),
     ArrayLength: (Type::Model) -> Type::Int32,
     Rgb: (Type::Int32, Type::Int32, Type::Int32, Type::Float32) -> Type::Color,
@@ -277,7 +275,9 @@ declare_builtin_function_types!(
     StartTimer: (Type::ElementReference) -> Type::Void,
     StopTimer: (Type::ElementReference) -> Type::Void,
     RestartTimer: (Type::ElementReference) -> Type::Void,
-    OpenUrl: (Type::String) -> Type::Void
+    OpenUrl: (Type::String) -> Type::Void,
+    EscapeMarkdown: (Type::String) -> Type::String,
+    ParseMarkdown: (Type::String) -> Type::StyledText
 );
 
 impl BuiltinFunction {
@@ -374,6 +374,7 @@ impl BuiltinFunction {
             BuiltinFunction::StopTimer => false,
             BuiltinFunction::RestartTimer => false,
             BuiltinFunction::OpenUrl => false,
+            BuiltinFunction::ParseMarkdown | BuiltinFunction::EscapeMarkdown => false,
         }
     }
 
@@ -452,6 +453,7 @@ impl BuiltinFunction {
             BuiltinFunction::StopTimer => false,
             BuiltinFunction::RestartTimer => false,
             BuiltinFunction::OpenUrl => false,
+            BuiltinFunction::ParseMarkdown | BuiltinFunction::EscapeMarkdown => true,
         }
     }
 }
@@ -739,6 +741,8 @@ pub enum Expression {
     },
 
     ConicGradient {
+        /// The starting angle (rotation) of the gradient, corresponding to CSS `from <angle>`
+        from_angle: Box<Expression>,
         /// First expression in the tuple is a color, second expression is the stop angle
         stops: Vec<(Expression, Expression)>,
     },
@@ -748,16 +752,35 @@ pub enum Expression {
     ReturnStatement(Option<Box<Expression>>),
 
     LayoutCacheAccess {
+        /// This property holds an array of entries
         layout_cache_prop: NamedReference,
+        /// The index into that array. If repeater_index is None, then the code will be `layout_cache_prop[index]`
         index: usize,
         /// When set, this is the index within a repeater, and the index is then the location of another offset.
-        /// So this looks like `layout_cache_prop[layout_cache_prop[index] + repeater_index]`
+        /// So this looks like `layout_cache_prop[layout_cache_prop[index] + repeater_index * entries_per_item]`
         repeater_index: Option<Box<Expression>>,
+        /// The number of entries per item (2 for LayoutCache, 4 for GridLayoutInputData)
+        /// This is only used when repeater_index is set
+        entries_per_item: usize,
     },
+
+    /// Organize a grid layout, i.e. decide what goes where
+    OrganizeGridLayout(crate::layout::GridLayout),
+
     /// Compute the LayoutInfo for the given layout.
     /// The orientation is the orientation of the cache, not the orientation of the layout
     ComputeLayoutInfo(crate::layout::Layout, crate::layout::Orientation),
+    ComputeGridLayoutInfo {
+        layout_organized_data_prop: NamedReference,
+        layout: crate::layout::GridLayout,
+        orientation: crate::layout::Orientation,
+    },
     SolveLayout(crate::layout::Layout, crate::layout::Orientation),
+    SolveGridLayout {
+        layout_organized_data_prop: NamedReference,
+        layout: crate::layout::GridLayout,
+        orientation: crate::layout::Orientation,
+    },
 
     MinMax {
         ty: Type,
@@ -828,11 +851,7 @@ impl Expression {
                     Type::Bool
                 } else if *op == '+' || *op == '-' {
                     let (rhs_ty, lhs_ty) = (rhs.ty(), lhs.ty());
-                    if rhs_ty == lhs_ty {
-                        rhs_ty
-                    } else {
-                        Type::Invalid
-                    }
+                    if rhs_ty == lhs_ty { rhs_ty } else { Type::Invalid }
                 } else {
                     debug_assert!(*op == '*' || *op == '/');
                     let unit_vec = |ty| {
@@ -841,7 +860,7 @@ impl Expression {
                         } else if let Some(u) = ty.default_unit() {
                             vec![(u, 1)]
                         } else {
-                            vec![]
+                            Vec::new()
                         }
                     };
                     let mut l_units = unit_vec(lhs.ty());
@@ -889,8 +908,11 @@ impl Expression {
             // invalid because the expression is unreachable
             Expression::ReturnStatement(_) => Type::Invalid,
             Expression::LayoutCacheAccess { .. } => Type::LogicalLength,
+            Expression::OrganizeGridLayout(..) => Type::ArrayOfU16,
             Expression::ComputeLayoutInfo(..) => typeregister::layout_info_type().into(),
+            Expression::ComputeGridLayoutInfo { .. } => typeregister::layout_info_type().into(),
             Expression::SolveLayout(..) => Type::LayoutCache,
+            Expression::SolveGridLayout { .. } => Type::LayoutCache,
             Expression::MinMax { ty, .. } => ty.clone(),
             Expression::EmptyComponentFactory => Type::ComponentFactory,
             Expression::DebugHook { expression, .. } => expression.ty(),
@@ -974,7 +996,8 @@ impl Expression {
                     visitor(s);
                 }
             }
-            Expression::ConicGradient { stops } => {
+            Expression::ConicGradient { from_angle, stops } => {
+                visitor(from_angle);
                 for (c, s) in stops {
                     visitor(c);
                     visitor(s);
@@ -987,8 +1010,11 @@ impl Expression {
             Expression::LayoutCacheAccess { repeater_index, .. } => {
                 repeater_index.as_deref().map(visitor);
             }
+            Expression::OrganizeGridLayout(..) => {}
             Expression::ComputeLayoutInfo(..) => {}
+            Expression::ComputeGridLayoutInfo { .. } => {}
             Expression::SolveLayout(..) => {}
+            Expression::SolveGridLayout { .. } => {}
             Expression::MinMax { lhs, rhs, .. } => {
                 visitor(lhs);
                 visitor(rhs);
@@ -1077,7 +1103,8 @@ impl Expression {
                     visitor(s);
                 }
             }
-            Expression::ConicGradient { stops } => {
+            Expression::ConicGradient { from_angle, stops } => {
+                visitor(from_angle);
                 for (c, s) in stops {
                     visitor(c);
                     visitor(s);
@@ -1090,8 +1117,11 @@ impl Expression {
             Expression::LayoutCacheAccess { repeater_index, .. } => {
                 repeater_index.as_deref_mut().map(visitor);
             }
+            Expression::OrganizeGridLayout(..) => {}
             Expression::ComputeLayoutInfo(..) => {}
+            Expression::ComputeGridLayoutInfo { .. } => {}
             Expression::SolveLayout(..) => {}
+            Expression::SolveGridLayout { .. } => {}
             Expression::MinMax { lhs, rhs, .. } => {
                 visitor(lhs);
                 visitor(rhs);
@@ -1174,17 +1204,21 @@ impl Expression {
             Expression::RadialGradient { stops } => {
                 stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
             }
-            Expression::ConicGradient { stops } => {
-                stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
+            Expression::ConicGradient { from_angle, stops } => {
+                from_angle.is_constant(ga)
+                    && stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
             }
             Expression::EnumerationValue(_) => true,
             Expression::ReturnStatement(expr) => {
-                expr.as_ref().map_or(true, |expr| expr.is_constant(ga))
+                expr.as_ref().is_none_or(|expr| expr.is_constant(ga))
             }
             // TODO:  detect constant property within layouts
             Expression::LayoutCacheAccess { .. } => false,
+            Expression::OrganizeGridLayout { .. } => false,
             Expression::ComputeLayoutInfo(..) => false,
+            Expression::ComputeGridLayoutInfo { .. } => false,
             Expression::SolveLayout(..) => false,
+            Expression::SolveGridLayout { .. } => false,
             Expression::MinMax { lhs, rhs, .. } => lhs.is_constant(ga) && rhs.is_constant(ga),
             Expression::EmptyComponentFactory => true,
             Expression::DebugHook { .. } => false,
@@ -1212,7 +1246,11 @@ impl Expression {
                     Expression::LinearGradient { .. }
                     | Expression::RadialGradient { .. }
                     | Expression::ConicGradient { .. } => {
-                        let message = format!("Narrowing conversion from {0} to {1}. This can lead to unexpected behavior because the {0} is a gradient", Type::Brush, Type::Color);
+                        let message = format!(
+                            "Narrowing conversion from {0} to {1}. This can lead to unexpected behavior because the {0} is a gradient",
+                            Type::Brush,
+                            Type::Color
+                        );
                         diag.push_warning(message, node);
                         self
                     }
@@ -1277,7 +1315,7 @@ impl Expression {
                                             lhs: Box::new(result),
                                             rhs: Box::new(Expression::FunctionCall {
                                                 function: Callable::Builtin(builtin_fn.clone()),
-                                                arguments: vec![],
+                                                arguments: Vec::new(),
                                                 source_location: Some(node.to_source_location()),
                                             }),
                                             op,
@@ -1354,18 +1392,18 @@ impl Expression {
                     message =
                         format!("{message}. Divide by 1{from_unit} to convert to a plain number");
                 }
-            } else if let Some(to_unit) = target_type.default_unit() {
-                if matches!(ty, Type::Int32 | Type::Float32) {
-                    if let Expression::NumberLiteral(value, Unit::None) = self {
-                        if value == 0. {
-                            // Allow conversion from literal 0 to any unit
-                            return Expression::NumberLiteral(0., to_unit);
-                        }
-                    }
-                    message = format!(
-                        "{message}. Use an unit, or multiply by 1{to_unit} to convert explicitly"
-                    );
+            } else if let Some(to_unit) = target_type.default_unit()
+                && matches!(ty, Type::Int32 | Type::Float32)
+            {
+                if let Expression::NumberLiteral(value, Unit::None) = self
+                    && value == 0.
+                {
+                    // Allow conversion from literal 0 to any unit
+                    return Expression::NumberLiteral(0., to_unit);
                 }
+                message = format!(
+                    "{message}. Use an unit, or multiply by 1{to_unit} to convert explicitly"
+                );
             }
             diag.push_error(message, node);
             self
@@ -1381,8 +1419,9 @@ impl Expression {
             | Type::InferredProperty
             | Type::InferredCallback
             | Type::ElementReference
-            | Type::LayoutCache => Expression::Invalid,
-            Type::Void => Expression::CodeBlock(vec![]),
+            | Type::LayoutCache
+            | Type::ArrayOfU16 => Expression::Invalid,
+            Type::Void => Expression::CodeBlock(Vec::new()),
             Type::Float32 => Expression::NumberLiteral(0., Unit::None),
             Type::String => Expression::StringLiteral(SmolStr::default()),
             Type::Int32 | Type::Color | Type::UnitProduct(_) => Expression::Cast {
@@ -1402,9 +1441,9 @@ impl Expression {
             },
             Type::Bool => Expression::BoolLiteral(false),
             Type::Model => Expression::Invalid,
-            Type::PathData => Expression::PathData(Path::Elements(vec![])),
+            Type::PathData => Expression::PathData(Path::Elements(Vec::new())),
             Type::Array(element_ty) => {
-                Expression::Array { element_ty: (**element_ty).clone(), values: vec![] }
+                Expression::Array { element_ty: (**element_ty).clone(), values: Vec::new() }
             }
             Type::Struct(s) => Expression::Struct {
                 ty: s.clone(),
@@ -1423,6 +1462,7 @@ impl Expression {
                 Expression::EnumerationValue(enumeration.clone().default_value())
             }
             Type::ComponentFactory => Expression::EmptyComponentFactory,
+            Type::StyledText => Expression::Invalid,
         }
     }
 
@@ -1538,7 +1578,7 @@ impl TwoWayBinding {
 
 impl From<NamedReference> for TwoWayBinding {
     fn from(nr: NamedReference) -> Self {
-        Self { property: nr, field_access: vec![] }
+        Self { property: nr, field_access: Vec::new() }
     }
 }
 
@@ -1550,8 +1590,8 @@ pub struct BindingExpression {
     pub expression: Expression,
     /// The location of this expression in the source code
     pub span: Option<SourceLocation>,
-    /// How deep is this binding declared in the hierarchy. When two binding are conflicting
-    /// for the same priority (because of two way binding), the lower priority wins.
+    /// How deep is this binding declared in the hierarchy. When two bindings are conflicting
+    /// for the same priority (because of a two way binding), the lower priority wins.
     /// The priority starts at 1, and each level of inlining adds one to the priority.
     /// 0 means the expression was added by some passes and it is not explicit in the source code
     pub priority: i32,
@@ -1827,14 +1867,11 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             }
             write!(f, ")")
         }
-        Expression::ConicGradient { stops } => {
-            write!(f, "@conic-gradient(")?;
-            let mut first = true;
+        Expression::ConicGradient { from_angle, stops } => {
+            write!(f, "@conic-gradient(from ")?;
+            pretty_print(f, from_angle)?;
             for (c, s) in stops {
-                if !first {
-                    write!(f, ", ")?;
-                }
-                first = false;
+                write!(f, ", ")?;
                 pretty_print(f, c)?;
                 write!(f, " ")?;
                 pretty_print(f, s)?;
@@ -1849,17 +1886,27 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             write!(f, "return ")?;
             e.as_ref().map(|e| pretty_print(f, e)).unwrap_or(Ok(()))
         }
-        Expression::LayoutCacheAccess { layout_cache_prop, index, repeater_index } => {
-            write!(
-                f,
-                "{:?}[{}{}]",
-                layout_cache_prop,
-                index,
-                if repeater_index.is_some() { " + $index" } else { "" }
-            )
+        Expression::LayoutCacheAccess {
+            layout_cache_prop,
+            index,
+            repeater_index,
+            entries_per_item,
+        } => {
+            if repeater_index.is_some() {
+                write!(
+                    f,
+                    "{:?}[{:?}[{}] + $repeater_index * {}]",
+                    layout_cache_prop, layout_cache_prop, index, entries_per_item
+                )
+            } else {
+                write!(f, "{:?}[{}]", layout_cache_prop, index)
+            }
         }
+        Expression::OrganizeGridLayout(..) => write!(f, "organize_grid_layout(..)"),
         Expression::ComputeLayoutInfo(..) => write!(f, "layout_info(..)"),
+        Expression::ComputeGridLayoutInfo { .. } => write!(f, "grid_layout_info(..)"),
         Expression::SolveLayout(..) => write!(f, "solve_layout(..)"),
+        Expression::SolveGridLayout { .. } => write!(f, "solve_grid_layout(..)"),
         Expression::MinMax { ty: _, op, lhs, rhs } => {
             match op {
                 MinMaxOp::Min => write!(f, "min(")?,

@@ -18,15 +18,20 @@ impl TextOffsetAdjustment {
     pub fn new(
         edit: &lsp_types::TextEdit,
         source_file: &i_slint_compiler::diagnostics::SourceFile,
+        format: common::ByteFormat,
     ) -> Self {
         let new_text_length = edit.new_text.len() as u32;
         let (start_offset, end_offset) = {
             let so = source_file.offset(
                 edit.range.start.line as usize + 1,
                 edit.range.start.character as usize + 1,
+                format,
             );
-            let eo = source_file
-                .offset(edit.range.end.line as usize + 1, edit.range.end.character as usize + 1);
+            let eo = source_file.offset(
+                edit.range.end.line as usize + 1,
+                edit.range.end.character as usize + 1,
+                format,
+            );
             (
                 TextSize::new(std::cmp::min(so, eo) as u32),
                 TextSize::new(std::cmp::max(so, eo) as u32),
@@ -195,9 +200,13 @@ impl TextEditor {
         })
     }
 
-    pub fn apply(&mut self, text_edit: &lsp_types::TextEdit) -> crate::Result<()> {
+    pub fn apply(
+        &mut self,
+        text_edit: &lsp_types::TextEdit,
+        format: common::ByteFormat,
+    ) -> crate::Result<()> {
         let current_range =
-            crate::util::lsp_range_to_text_range(&self.source_file, text_edit.range);
+            crate::util::lsp_range_to_text_range(&self.source_file, text_edit.range, format);
         let adjusted_range = self.adjustments.adjust_range(current_range);
 
         if self.contents.len() < adjusted_range.end().into() {
@@ -212,7 +221,11 @@ impl TextEditor {
         let r: std::ops::Range<usize> = adjusted_range.start().into()..adjusted_range.end().into();
         self.contents.replace_range(r, &text_edit.new_text);
 
-        self.adjustments.add_adjustment(TextOffsetAdjustment::new(text_edit, &self.source_file));
+        self.adjustments.add_adjustment(TextOffsetAdjustment::new(
+            text_edit,
+            &self.source_file,
+            format,
+        ));
 
         Ok(())
     }
@@ -255,7 +268,10 @@ pub fn apply_workspace_edit(
             processing.insert(doc.uri.clone(), editor);
         }
 
-        processing.get_mut(&doc.uri).expect("just added if missing").apply(edit)?;
+        processing
+            .get_mut(&doc.uri)
+            .expect("just added if missing")
+            .apply(edit, document_cache.format)?;
     }
 
     Ok(processing
@@ -309,7 +325,11 @@ pub fn reversed_edit(
             .edits
             .into_iter()
             .map(|e| {
-                let orig_range = crate::util::lsp_range_to_text_range(&helper.source_file, e.range);
+                let orig_range = crate::util::lsp_range_to_text_range(
+                    &helper.source_file,
+                    e.range,
+                    document_cache.format,
+                );
                 let orig_string = source[orig_range].to_string();
 
                 // Count the number of \n in the original string and the replaced string
@@ -474,7 +494,7 @@ fn test_edit_iterator_changes_one_empty() {
     let workspace_edit = lsp_types::WorkspaceEdit {
         changes: Some(std::collections::HashMap::from([(
             lsp_types::Url::parse("file://foo/bar.slint").unwrap(),
-            vec![],
+            Vec::new(),
         )])),
         document_changes: None,
         change_annotations: None,
@@ -617,7 +637,7 @@ fn test_edit_iterator_changes_two() {
 fn test_edit_iterator_document_changes_empty() {
     let workspace_edit = lsp_types::WorkspaceEdit {
         changes: None,
-        document_changes: Some(lsp_types::DocumentChanges::Edits(vec![])),
+        document_changes: Some(lsp_types::DocumentChanges::Edits(Vec::new())),
         change_annotations: None,
     };
 
@@ -630,7 +650,7 @@ fn test_edit_iterator_document_changes_empty() {
 fn test_edit_iterator_document_changes_operations() {
     let workspace_edit = lsp_types::WorkspaceEdit {
         changes: None,
-        document_changes: Some(lsp_types::DocumentChanges::Operations(vec![])),
+        document_changes: Some(lsp_types::DocumentChanges::Operations(Vec::new())),
         change_annotations: None,
     };
 
@@ -645,7 +665,7 @@ fn test_edit_iterator_document_changes_one_empty() {
         changes: None,
         document_changes: Some(lsp_types::DocumentChanges::Edits(vec![
             lsp_types::TextDocumentEdit {
-                edits: vec![],
+                edits: Vec::new(),
                 text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
                     uri: lsp_types::Url::parse("file://foo/bar.slint").unwrap(),
                     version: Some(99),
@@ -937,7 +957,7 @@ fn test_texteditor_edit_out_of_range() {
         ),
         new_text: "Foobar".to_string(),
     };
-    assert!(editor.apply(&edit).is_err());
+    assert!(editor.apply(&edit, common::ByteFormat::Utf8).is_err());
 }
 
 #[test]
@@ -961,13 +981,13 @@ geh"#
         ),
         new_text: "".to_string(),
     };
-    assert!(editor.apply(&edit).is_ok());
+    assert!(editor.apply(&edit, common::ByteFormat::Utf8).is_ok());
 
     let result = editor.finalize().unwrap();
     assert!(result.0.is_empty());
     assert_eq!(result.1.adjust(42.into()), 31.into());
-    assert_eq!(result.2 .0, 0);
-    assert_eq!(result.2 .1, 3 * 3 + 2);
+    assert_eq!(result.2.0, 0);
+    assert_eq!(result.2.1, 3 * 3 + 2);
 }
 
 #[test]
@@ -991,7 +1011,7 @@ geh"#
         ),
         new_text: "REPLACEMENT".to_string(),
     };
-    assert!(editor.apply(&edit).is_ok());
+    assert!(editor.apply(&edit, common::ByteFormat::Utf8).is_ok());
 
     let result = editor.finalize().unwrap();
     assert_eq!(
@@ -1001,8 +1021,8 @@ REPLACEMENT
 geh"#
     );
     assert_eq!(result.1.adjust(42.into()), 50.into());
-    assert_eq!(result.2 .0, 3 + 1);
-    assert_eq!(result.2 .1, 3 + 1 + 3);
+    assert_eq!(result.2.0, 3 + 1);
+    assert_eq!(result.2.1, 3 + 1 + 3);
 }
 
 #[test]
@@ -1026,7 +1046,7 @@ geh"#
         ),
         new_text: "".to_string(),
     };
-    assert!(editor.apply(&edit).is_ok());
+    assert!(editor.apply(&edit, common::ByteFormat::Utf8).is_ok());
     let edit = lsp_types::TextEdit {
         range: lsp_types::Range::new(
             lsp_types::Position::new(0, 0),
@@ -1034,13 +1054,13 @@ geh"#
         ),
         new_text: "REPLACEMENT".to_string(),
     };
-    assert!(editor.apply(&edit).is_ok());
+    assert!(editor.apply(&edit, common::ByteFormat::Utf8).is_ok());
 
     let result = editor.finalize().unwrap();
     assert_eq!(&result.0, "REPLACEMENT");
     assert_eq!(result.1.adjust(42.into()), 42.into());
-    assert_eq!(result.2 .0, 0);
-    assert_eq!(result.2 .1, 3 * 3 + 2);
+    assert_eq!(result.2.0, 0);
+    assert_eq!(result.2.1, 3 * 3 + 2);
 }
 
 #[cfg(test)]
@@ -1113,7 +1133,15 @@ mod test_apply_reversed_edit {
         );
 
         assert_eq!(
-            document_cache.get_document(&url).unwrap().node.as_ref().unwrap().source_file.source().unwrap(),
+            document_cache
+                .get_document(&url)
+                .unwrap()
+                .node
+                .as_ref()
+                .unwrap()
+                .source_file
+                .source()
+                .unwrap(),
             "import { AboutSlint } from \"std-widgets.slint\";\ncomponent Foo {\n    AboutSlint {}\n}\n//comment\n\n"
         );
     }

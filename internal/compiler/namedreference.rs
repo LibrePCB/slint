@@ -50,7 +50,10 @@ impl NamedReference {
     }
     #[track_caller]
     pub fn element(&self) -> ElementRc {
-        self.0.element.upgrade().expect("NamedReference to a dead element")
+        self.0
+            .element
+            .upgrade()
+            .unwrap_or_else(|| panic!("{}: NamedReference to a dead element", self.0.name))
     }
     pub fn ty(&self) -> Type {
         self.element().borrow().lookup_property(self.name()).property_type
@@ -70,11 +73,12 @@ impl NamedReference {
     fn is_constant_impl(&self, mut check_binding: bool) -> bool {
         let mut elem = self.element();
         let e = elem.borrow();
-        if let Some(decl) = e.property_declarations.get(self.name()) {
-            if decl.expose_in_public_api && decl.visibility != PropertyVisibility::Input {
-                // could be set by the public API
-                return false;
-            }
+        if let Some(decl) = e.property_declarations.get(self.name())
+            && decl.expose_in_public_api
+            && decl.visibility != PropertyVisibility::Input
+        {
+            // could be set by the public API
+            return false;
         }
         if e.property_analysis.borrow().get(self.name()).is_some_and(|a| a.is_set_externally) {
             return false;
@@ -111,13 +115,15 @@ impl NamedReference {
                     continue;
                 }
                 ElementType::Builtin(b) => {
-                    return b.properties.get(self.name()).map_or(true, |pi| !pi.is_native_output())
+                    return b.properties.get(self.name()).is_none_or(|pi| !pi.is_native_output());
                 }
                 ElementType::Native(n) => {
-                    return n.properties.get(self.name()).map_or(true, |pi| !pi.is_native_output())
+                    return n.properties.get(self.name()).is_none_or(|pi| !pi.is_native_output());
                 }
-                crate::langtype::ElementType::Error | crate::langtype::ElementType::Global => {
-                    return true
+                crate::langtype::ElementType::Error
+                | crate::langtype::ElementType::Global
+                | crate::langtype::ElementType::Interface => {
+                    return true;
                 }
             }
         }

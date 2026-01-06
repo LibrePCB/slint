@@ -22,12 +22,19 @@ pub fn materialize_fake_properties(component: &Rc<Component>) {
     visit_all_named_references(component, &mut |nr| {
         let elem = nr.element();
         let elem = elem.borrow();
-        if !to_materialize.contains_key(nr) {
-            if let Some(ty) =
+        if !to_materialize.contains_key(nr)
+            && let Some(ty) =
                 should_materialize(&elem.property_declarations, &elem.base_type, nr.name())
-            {
-                to_materialize.insert(nr.clone(), ty);
+        {
+            // This only brings more trouble down the line
+            if elem.repeated.is_some() {
+                panic!(
+                    "Cannot materialize fake property {} on repeated element {}",
+                    nr.name(),
+                    elem.id
+                );
             }
+            to_materialize.insert(nr.clone(), ty);
         }
     });
 
@@ -97,7 +104,7 @@ fn should_materialize(
         ElementType::Component(c) => has_declared_property(&c.root_element.borrow(), prop),
         ElementType::Builtin(b) => b.native_class.lookup_property(prop).is_some(),
         ElementType::Native(n) => n.lookup_property(prop).is_some(),
-        ElementType::Global | ElementType::Error => false,
+        ElementType::Global | ElementType::Interface | ElementType::Error => false,
     };
 
     if !has_declared_property {
@@ -130,7 +137,7 @@ pub fn has_declared_property(elem: &Element, prop: &str) -> bool {
         ElementType::Component(c) => has_declared_property(&c.root_element.borrow(), prop),
         ElementType::Builtin(b) => b.native_class.lookup_property(prop).is_some(),
         ElementType::Native(n) => n.lookup_property(prop).is_some(),
-        ElementType::Global | ElementType::Error => false,
+        ElementType::Global | ElementType::Interface | ElementType::Error => false,
     }
 }
 
@@ -154,7 +161,7 @@ pub fn initialize(elem: &ElementRc, name: &str) -> Option<Expression> {
     // later optimization steps to eliminate these properties.
     // Note that Rectangles and Empties are similarly optimized in layout_constraint_prop, and
     // we rely on struct field access simplification for those.
-    if elem.borrow().builtin_type().map_or(false, |n| n.name == "Image") {
+    if elem.borrow().builtin_type().is_some_and(|n| n.name == "Image") {
         if elem.borrow().layout_info_prop(Orientation::Horizontal).is_none() {
             match name {
                 "min-width" => return Some(Expression::NumberLiteral(0., Unit::Px)),

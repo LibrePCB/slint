@@ -8,7 +8,7 @@ use i_slint_compiler::langtype::{ElementType, EnumerationValue, Type};
 use i_slint_compiler::lookup::{LookupObject, LookupResult, LookupResultCallable};
 use i_slint_compiler::namedreference::NamedReference;
 use i_slint_compiler::object_tree::ElementRc;
-use i_slint_compiler::parser::{syntax_nodes, SyntaxKind, SyntaxNode, SyntaxToken};
+use i_slint_compiler::parser::{SyntaxKind, SyntaxNode, SyntaxToken, syntax_nodes};
 use i_slint_compiler::pathutils::clean_path;
 use smol_str::{SmolStr, ToSmolStr};
 use std::path::Path;
@@ -35,7 +35,7 @@ impl TokenInfo {
     pub fn declaration(&self) -> Option<SyntaxNode> {
         match self {
             TokenInfo::Type(ty) => match ty {
-                Type::Struct(s) if s.node.is_some() => s.node.as_ref().unwrap().parent().clone(),
+                Type::Struct(s) if s.node().is_some() => s.node().unwrap().parent().clone(),
                 Type::Enumeration(e) => e.node.as_deref().cloned(),
                 _ => None,
             },
@@ -285,8 +285,7 @@ pub fn token_info(document_cache: &common::DocumentCache, token: SyntaxToken) ->
                     .lookup(i_slint_compiler::parser::normalize_identifier(token.text()).as_str());
                 match &ty {
                     Type::Struct(s)
-                        if s.node
-                            .as_ref()
+                        if s.node()
                             .and_then(|n| n.parent())
                             .map(|n| n.text_range().contains_range(token.text_range()))
                             .unwrap_or_default() =>

@@ -11,8 +11,8 @@ use crate::api::{
     WindowPosition, WindowSize,
 };
 use crate::input::{
-    key_codes, ClickState, FocusEvent, FocusReason, InternalKeyboardModifierState, KeyEvent,
-    KeyEventType, MouseEvent, MouseInputState, PointerEventButton, TextCursorBlinker,
+    ClickState, FocusEvent, FocusReason, InternalKeyboardModifierState, KeyEvent, KeyEventType,
+    MouseEvent, MouseInputState, PointerEventButton, TextCursorBlinker, key_codes,
 };
 use crate::item_tree::{
     ItemRc, ItemTreeRc, ItemTreeRef, ItemTreeVTable, ItemTreeWeak, ItemWeak,
@@ -61,13 +61,13 @@ fn previous_focus_item(item: ItemRc) -> ItemRc {
 /// experience unexpected behavior, or the intention of the developer calling functions on the [`Window`]
 /// API may not be fulfilled.
 ///
-/// Your implementation must hold a renderer, such as [`SoftwareRenderer`](crate::software_renderer::SoftwareRenderer).
+/// Your implementation must hold a renderer, such as `SoftwareRenderer` or `FemtoVGRenderer`.
 /// In the [`Self::renderer()`] function, you must return a reference to it.
 ///
 /// It is also required to hold a [`Window`] and return a reference to it in your
 /// implementation of [`Self::window()`].
 ///
-/// See also [`MinimalSoftwareWindow`](crate::software_renderer::MinimalSoftwareWindow)
+/// See also `slint::platform::software_renderer::MinimalSoftwareWindow`
 /// for a minimal implementation of this trait using the software renderer
 pub trait WindowAdapter {
     /// Returns the window API.
@@ -127,8 +127,6 @@ pub trait WindowAdapter {
     ///
     /// The `Renderer` trait is an internal trait that you are not expected to implement.
     /// In your implementation you should return a reference to an instance of one of the renderers provided by Slint.
-    ///
-    /// Currently, the only public struct that implement renderer is [`SoftwareRenderer`](crate::software_renderer::SoftwareRenderer).
     fn renderer(&self) -> &dyn Renderer;
 
     /// Re-implement this function to update the properties such as window title or layout constraints.
@@ -165,7 +163,7 @@ pub trait WindowAdapter {
 /// users to call or re-implement these functions.
 // TODO: add events for window receiving and loosing focus
 #[doc(hidden)]
-pub trait WindowAdapterInternal {
+pub trait WindowAdapterInternal: core::any::Any {
     /// This function is called by the generated code when a component and therefore its tree of items are created.
     fn register_item_tree(&self) {}
 
@@ -194,12 +192,6 @@ pub trait WindowAdapterInternal {
 
     /// This method allow editable input field to communicate with the platform about input methods
     fn input_method_request(&self, _: InputMethodRequest) {}
-
-    /// Return self as any so the backend can upcast
-    // TODO: consider using the as_any crate, or deriving the trait from Any to provide a better default
-    fn as_any(&self) -> &dyn core::any::Any {
-        &()
-    }
 
     /// Handle focus change
     // used for accessibility
@@ -1518,6 +1510,51 @@ impl WindowInner {
         }
     }
 
+    pub(crate) fn set_window_item_virtual_keyboard(
+        &self,
+        origin: crate::lengths::LogicalPoint,
+        size: crate::lengths::LogicalSize,
+    ) {
+        let Some(component_rc) = self.try_component() else {
+            return;
+        };
+        let component = ItemTreeRc::borrow_pin(&component_rc);
+        let root_item = component.as_ref().get_item_ref(0);
+        let Some(window_item) = ItemRef::downcast_pin::<crate::items::WindowItem>(root_item) else {
+            return;
+        };
+        for (property, value) in [
+            (&window_item.virtual_keyboard_x, origin.x),
+            (&window_item.virtual_keyboard_y, origin.y),
+            (&window_item.virtual_keyboard_width, size.width),
+            (&window_item.virtual_keyboard_height, size.height),
+        ] {
+            property.set(LogicalLength::new(value));
+        }
+        if let Some(focus_item) = self.focus_item.borrow().upgrade() {
+            focus_item.try_scroll_into_visible();
+        }
+    }
+
+    pub(crate) fn window_item_virtual_keyboard(
+        &self,
+    ) -> Option<(crate::lengths::LogicalPoint, crate::lengths::LogicalSize)> {
+        let component_rc = self.try_component()?;
+        let component = ItemTreeRc::borrow_pin(&component_rc);
+        let root_item = component.as_ref().get_item_ref(0);
+        let window_item = ItemRef::downcast_pin::<crate::items::WindowItem>(root_item)?;
+        Some((
+            crate::lengths::LogicalPoint::from_lengths(
+                window_item.virtual_keyboard_x(),
+                window_item.virtual_keyboard_y(),
+            ),
+            crate::lengths::LogicalSize::from_lengths(
+                window_item.virtual_keyboard_width(),
+                window_item.virtual_keyboard_height(),
+            ),
+        ))
+    }
+
     /// Sets the close_requested callback. The callback will be run when the user tries to close a window.
     pub fn on_close_requested(&self, mut callback: impl FnMut() -> CloseRequestResponse + 'static) {
         self.close_requested.set_handler(move |()| callback());
@@ -1605,11 +1642,11 @@ pub mod ffi {
     #![allow(missing_docs)]
 
     use super::*;
+    use crate::SharedVector;
     use crate::api::{RenderingNotifier, RenderingState, SetRenderingNotifierError};
     use crate::graphics::Size;
     use crate::graphics::{IntSize, Rgba8Pixel};
     use crate::items::WindowItem;
-    use crate::SharedVector;
 
     /// This enum describes a low-level access to specific graphics APIs used
     /// by the renderer.
@@ -1631,15 +1668,17 @@ pub mod ffi {
     /// Releases the reference to the windowrc held by handle.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_drop(handle: *mut WindowAdapterRcOpaque) {
-        assert_eq!(
-            core::mem::size_of::<Rc<dyn WindowAdapter>>(),
-            core::mem::size_of::<WindowAdapterRcOpaque>()
-        );
-        assert_eq!(
-            core::mem::size_of::<Option<Rc<dyn WindowAdapter>>>(),
-            core::mem::size_of::<WindowAdapterRcOpaque>()
-        );
-        drop(core::ptr::read(handle as *mut Option<Rc<dyn WindowAdapter>>));
+        unsafe {
+            assert_eq!(
+                core::mem::size_of::<Rc<dyn WindowAdapter>>(),
+                core::mem::size_of::<WindowAdapterRcOpaque>()
+            );
+            assert_eq!(
+                core::mem::size_of::<Option<Rc<dyn WindowAdapter>>>(),
+                core::mem::size_of::<WindowAdapterRcOpaque>()
+            );
+            drop(core::ptr::read(handle as *mut Option<Rc<dyn WindowAdapter>>));
+        }
     }
 
     /// Releases the reference to the component window held by handle.
@@ -1648,27 +1687,33 @@ pub mod ffi {
         source: *const WindowAdapterRcOpaque,
         target: *mut WindowAdapterRcOpaque,
     ) {
-        assert_eq!(
-            core::mem::size_of::<Rc<dyn WindowAdapter>>(),
-            core::mem::size_of::<WindowAdapterRcOpaque>()
-        );
-        let window = &*(source as *const Rc<dyn WindowAdapter>);
-        core::ptr::write(target as *mut Rc<dyn WindowAdapter>, window.clone());
+        unsafe {
+            assert_eq!(
+                core::mem::size_of::<Rc<dyn WindowAdapter>>(),
+                core::mem::size_of::<WindowAdapterRcOpaque>()
+            );
+            let window = &*(source as *const Rc<dyn WindowAdapter>);
+            core::ptr::write(target as *mut Rc<dyn WindowAdapter>, window.clone());
+        }
     }
 
     /// Spins an event loop and renders the items of the provided component in this window.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_show(handle: *const WindowAdapterRcOpaque) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
 
-        window_adapter.window().show().unwrap();
+            window_adapter.window().show().unwrap();
+        }
     }
 
     /// Spins an event loop and renders the items of the provided component in this window.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_hide(handle: *const WindowAdapterRcOpaque) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().hide().unwrap();
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().hide().unwrap();
+        }
     }
 
     /// Returns the visibility state of the window. This function can return false even if you previously called show()
@@ -1677,8 +1722,10 @@ pub mod ffi {
     pub unsafe extern "C" fn slint_windowrc_is_visible(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
-        let window = &*(handle as *const Rc<dyn WindowAdapter>);
-        window.window().is_visible()
+        unsafe {
+            let window = &*(handle as *const Rc<dyn WindowAdapter>);
+            window.window().is_visible()
+        }
     }
 
     /// Returns the window scale factor.
@@ -1686,12 +1733,14 @@ pub mod ffi {
     pub unsafe extern "C" fn slint_windowrc_get_scale_factor(
         handle: *const WindowAdapterRcOpaque,
     ) -> f32 {
-        assert_eq!(
-            core::mem::size_of::<Rc<dyn WindowAdapter>>(),
-            core::mem::size_of::<WindowAdapterRcOpaque>()
-        );
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        WindowInner::from_pub(window_adapter.window()).scale_factor()
+        unsafe {
+            assert_eq!(
+                core::mem::size_of::<Rc<dyn WindowAdapter>>(),
+                core::mem::size_of::<WindowAdapterRcOpaque>()
+            );
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            WindowInner::from_pub(window_adapter.window()).scale_factor()
+        }
     }
 
     /// Sets the window scale factor, merely for testing purposes.
@@ -1700,8 +1749,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         value: f32,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        WindowInner::from_pub(window_adapter.window()).set_const_scale_factor(value)
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            WindowInner::from_pub(window_adapter.window()).set_const_scale_factor(value)
+        }
     }
 
     /// Returns the text-input-focused property value.
@@ -1709,12 +1760,14 @@ pub mod ffi {
     pub unsafe extern "C" fn slint_windowrc_get_text_input_focused(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
-        assert_eq!(
-            core::mem::size_of::<Rc<dyn WindowAdapter>>(),
-            core::mem::size_of::<WindowAdapterRcOpaque>()
-        );
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        WindowInner::from_pub(window_adapter.window()).text_input_focused()
+        unsafe {
+            assert_eq!(
+                core::mem::size_of::<Rc<dyn WindowAdapter>>(),
+                core::mem::size_of::<WindowAdapterRcOpaque>()
+            );
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            WindowInner::from_pub(window_adapter.window()).text_input_focused()
+        }
     }
 
     /// Set the text-input-focused property.
@@ -1723,8 +1776,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         value: bool,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        WindowInner::from_pub(window_adapter.window()).set_text_input_focused(value)
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            WindowInner::from_pub(window_adapter.window()).set_text_input_focused(value)
+        }
     }
 
     /// Sets the focus item.
@@ -1735,8 +1790,11 @@ pub mod ffi {
         set_focus: bool,
         reason: FocusReason,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        WindowInner::from_pub(window_adapter.window()).set_focus_item(focus_item, set_focus, reason)
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            WindowInner::from_pub(window_adapter.window())
+                .set_focus_item(focus_item, set_focus, reason)
+        }
     }
 
     /// Associates the window with the given component.
@@ -1745,8 +1803,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         component: &ItemTreeRc,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        WindowInner::from_pub(window_adapter.window()).set_component(component)
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            WindowInner::from_pub(window_adapter.window()).set_component(component)
+        }
     }
 
     /// Show a popup and return its ID. The returned ID will always be non-zero.
@@ -1759,14 +1819,16 @@ pub mod ffi {
         parent_item: &ItemRc,
         is_menu: bool,
     ) -> NonZeroU32 {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        WindowInner::from_pub(window_adapter.window()).show_popup(
-            popup,
-            position,
-            close_policy,
-            parent_item,
-            is_menu,
-        )
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            WindowInner::from_pub(window_adapter.window()).show_popup(
+                popup,
+                position,
+                close_policy,
+                parent_item,
+                is_menu,
+            )
+        }
     }
 
     /// Close the popup by the given ID.
@@ -1775,8 +1837,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         popup_id: NonZeroU32,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        WindowInner::from_pub(window_adapter.window()).close_popup(popup_id);
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            WindowInner::from_pub(window_adapter.window()).close_popup(popup_id);
+        }
     }
 
     /// C binding to the set_rendering_notifier() API of Window
@@ -1792,46 +1856,52 @@ pub mod ffi {
         user_data: *mut c_void,
         error: *mut SetRenderingNotifierError,
     ) -> bool {
-        struct CNotifier {
-            callback: extern "C" fn(
-                rendering_state: RenderingState,
-                graphics_api: GraphicsAPI,
+        unsafe {
+            struct CNotifier {
+                callback: extern "C" fn(
+                    rendering_state: RenderingState,
+                    graphics_api: GraphicsAPI,
+                    user_data: *mut c_void,
+                ),
+                drop_user_data: extern "C" fn(*mut c_void),
                 user_data: *mut c_void,
-            ),
-            drop_user_data: extern "C" fn(*mut c_void),
-            user_data: *mut c_void,
-        }
-
-        impl Drop for CNotifier {
-            fn drop(&mut self) {
-                (self.drop_user_data)(self.user_data)
             }
-        }
 
-        impl RenderingNotifier for CNotifier {
-            fn notify(&mut self, state: RenderingState, graphics_api: &crate::api::GraphicsAPI) {
-                let cpp_graphics_api = match graphics_api {
-                    crate::api::GraphicsAPI::NativeOpenGL { .. } => GraphicsAPI::NativeOpenGL,
-                    crate::api::GraphicsAPI::WebGL { .. } => unreachable!(), // We don't support wasm with C++
-                    #[cfg(feature = "unstable-wgpu-26")]
-                    crate::api::GraphicsAPI::WGPU26 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
-                    #[cfg(feature = "unstable-wgpu-27")]
-                    crate::api::GraphicsAPI::WGPU27 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
-                };
-                (self.callback)(state, cpp_graphics_api, self.user_data)
+            impl Drop for CNotifier {
+                fn drop(&mut self) {
+                    (self.drop_user_data)(self.user_data)
+                }
             }
-        }
 
-        let window = &*(handle as *const Rc<dyn WindowAdapter>);
-        match window.renderer().set_rendering_notifier(Box::new(CNotifier {
-            callback,
-            drop_user_data,
-            user_data,
-        })) {
-            Ok(()) => true,
-            Err(err) => {
-                *error = err;
-                false
+            impl RenderingNotifier for CNotifier {
+                fn notify(
+                    &mut self,
+                    state: RenderingState,
+                    graphics_api: &crate::api::GraphicsAPI,
+                ) {
+                    let cpp_graphics_api = match graphics_api {
+                        crate::api::GraphicsAPI::NativeOpenGL { .. } => GraphicsAPI::NativeOpenGL,
+                        crate::api::GraphicsAPI::WebGL { .. } => unreachable!(), // We don't support wasm with C++
+                        #[cfg(feature = "unstable-wgpu-26")]
+                        crate::api::GraphicsAPI::WGPU26 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
+                        #[cfg(feature = "unstable-wgpu-27")]
+                        crate::api::GraphicsAPI::WGPU27 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
+                    };
+                    (self.callback)(state, cpp_graphics_api, self.user_data)
+                }
+            }
+
+            let window = &*(handle as *const Rc<dyn WindowAdapter>);
+            match window.renderer().set_rendering_notifier(Box::new(CNotifier {
+                callback,
+                drop_user_data,
+                user_data,
+            })) {
+                Ok(()) => true,
+                Err(err) => {
+                    *error = err;
+                    false
+                }
             }
         }
     }
@@ -1844,35 +1914,39 @@ pub mod ffi {
         drop_user_data: extern "C" fn(user_data: *mut c_void),
         user_data: *mut c_void,
     ) {
-        struct WithUserData {
-            callback: extern "C" fn(user_data: *mut c_void) -> CloseRequestResponse,
-            drop_user_data: extern "C" fn(*mut c_void),
-            user_data: *mut c_void,
-        }
-
-        impl Drop for WithUserData {
-            fn drop(&mut self) {
-                (self.drop_user_data)(self.user_data)
+        unsafe {
+            struct WithUserData {
+                callback: extern "C" fn(user_data: *mut c_void) -> CloseRequestResponse,
+                drop_user_data: extern "C" fn(*mut c_void),
+                user_data: *mut c_void,
             }
-        }
 
-        impl WithUserData {
-            fn call(&self) -> CloseRequestResponse {
-                (self.callback)(self.user_data)
+            impl Drop for WithUserData {
+                fn drop(&mut self) {
+                    (self.drop_user_data)(self.user_data)
+                }
             }
+
+            impl WithUserData {
+                fn call(&self) -> CloseRequestResponse {
+                    (self.callback)(self.user_data)
+                }
+            }
+
+            let with_user_data = WithUserData { callback, drop_user_data, user_data };
+
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().on_close_requested(move || with_user_data.call());
         }
-
-        let with_user_data = WithUserData { callback, drop_user_data, user_data };
-
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().on_close_requested(move || with_user_data.call());
     }
 
     /// This function issues a request to the windowing system to redraw the contents of the window.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_request_redraw(handle: *const WindowAdapterRcOpaque) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.request_redraw();
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.request_redraw();
+        }
     }
 
     /// Returns the position of the window on the screen, in physical screen coordinates and including
@@ -1882,8 +1956,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         pos: &mut euclid::default::Point2D<i32>,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        *pos = window_adapter.position().unwrap_or_default().to_euclid()
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            *pos = window_adapter.position().unwrap_or_default().to_euclid()
+        }
     }
 
     /// Sets the position of the window on the screen, in physical screen coordinates and including
@@ -1894,8 +1970,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         pos: &euclid::default::Point2D<i32>,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.set_position(crate::api::PhysicalPosition::new(pos.x, pos.y).into());
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.set_position(crate::api::PhysicalPosition::new(pos.x, pos.y).into());
+        }
     }
 
     /// Sets the position of the window on the screen, in physical screen coordinates and including
@@ -1906,16 +1984,20 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         pos: &euclid::default::Point2D<f32>,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.set_position(LogicalPosition::new(pos.x, pos.y).into());
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.set_position(LogicalPosition::new(pos.x, pos.y).into());
+        }
     }
 
     /// Returns the size of the window on the screen, in physical screen coordinates and excluding
     /// a window frame (if present).
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_size(handle: *const WindowAdapterRcOpaque) -> IntSize {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.size().to_euclid().cast()
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.size().to_euclid().cast()
+        }
     }
 
     /// Resizes the window to the specified size on the screen, in physical pixels and excluding
@@ -1925,8 +2007,12 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         size: &IntSize,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().set_size(crate::api::PhysicalSize::new(size.width, size.height));
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter
+                .window()
+                .set_size(crate::api::PhysicalSize::new(size.width, size.height));
+        }
     }
 
     /// Resizes the window to the specified size on the screen, in physical pixels and excluding
@@ -1936,8 +2022,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         size: &Size,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().set_size(crate::api::LogicalSize::new(size.width, size.height));
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().set_size(crate::api::LogicalSize::new(size.width, size.height));
+        }
     }
 
     /// Return whether the style is using a dark theme
@@ -1945,10 +2033,12 @@ pub mod ffi {
     pub unsafe extern "C" fn slint_windowrc_color_scheme(
         handle: *const WindowAdapterRcOpaque,
     ) -> ColorScheme {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter
-            .internal(crate::InternalToken)
-            .map_or(ColorScheme::Unknown, |x| x.color_scheme())
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter
+                .internal(crate::InternalToken)
+                .map_or(ColorScheme::Unknown, |x| x.color_scheme())
+        }
     }
 
     /// Return whether the platform supports native menu bars
@@ -1956,8 +2046,12 @@ pub mod ffi {
     pub unsafe extern "C" fn slint_windowrc_supports_native_menu_bar(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.internal(crate::InternalToken).is_some_and(|x| x.supports_native_menu_bar())
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter
+                .internal(crate::InternalToken)
+                .is_some_and(|x| x.supports_native_menu_bar())
+        }
     }
 
     /// Setup the native menu bar
@@ -1966,9 +2060,11 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         menu_instance: &vtable::VRc<MenuVTable>,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        if let Some(x) = window_adapter.internal(crate::InternalToken) {
-            x.setup_menubar(menu_instance.clone())
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            if let Some(x) = window_adapter.internal(crate::InternalToken) {
+                x.setup_menubar(menu_instance.clone())
+            }
         }
     }
 
@@ -1980,12 +2076,14 @@ pub mod ffi {
         position: LogicalPosition,
         parent_item: &ItemRc,
     ) -> bool {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        WindowInner::from_pub(window_adapter.window()).show_native_popup_menu(
-            context_menu.clone(),
-            position,
-            parent_item,
-        )
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            WindowInner::from_pub(window_adapter.window()).show_native_popup_menu(
+                context_menu.clone(),
+                position,
+                parent_item,
+            )
+        }
     }
 
     /// Return the default-font-size property of the WindowItem
@@ -2004,13 +2102,15 @@ pub mod ffi {
         text: &SharedString,
         repeat: bool,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().0.process_key_input(crate::items::KeyEvent {
-            text: text.clone(),
-            repeat,
-            event_type,
-            ..Default::default()
-        });
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().0.process_key_input(crate::items::KeyEvent {
+                text: text.clone(),
+                repeat,
+                event_type,
+                ..Default::default()
+            });
+        }
     }
 
     /// Dispatch a mouse event
@@ -2019,8 +2119,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         event: &crate::input::MouseEvent,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().0.process_mouse_input(event.clone());
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().0.process_mouse_input(event.clone());
+        }
     }
 
     /// Dispatch a window event
@@ -2029,32 +2131,40 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         event: &crate::platform::WindowEvent,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().dispatch_event(event.clone());
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().dispatch_event(event.clone());
+        }
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_is_fullscreen(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().is_fullscreen()
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().is_fullscreen()
+        }
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_is_minimized(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().is_minimized()
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().is_minimized()
+        }
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_is_maximized(
         handle: *const WindowAdapterRcOpaque,
     ) -> bool {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().is_maximized()
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().is_maximized()
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -2062,8 +2172,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         value: bool,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().set_fullscreen(value)
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().set_fullscreen(value)
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -2071,8 +2183,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         value: bool,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().set_minimized(value)
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().set_minimized(value)
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -2080,8 +2194,10 @@ pub mod ffi {
         handle: *const WindowAdapterRcOpaque,
         value: bool,
     ) {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter.window().set_maximized(value)
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            window_adapter.window().set_maximized(value)
+        }
     }
 
     /// Takes a snapshot of the window contents and returns it as RGBA8 encoded pixel buffer.
@@ -2092,40 +2208,136 @@ pub mod ffi {
         width: &mut u32,
         height: &mut u32,
     ) -> bool {
-        let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        if let Ok(snapshot) = window_adapter.window().take_snapshot() {
-            *data = snapshot.data.clone();
-            *width = snapshot.width();
-            *height = snapshot.height();
-            true
-        } else {
-            false
+        unsafe {
+            let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+            if let Ok(snapshot) = window_adapter.window().take_snapshot() {
+                *data = snapshot.data.clone();
+                *width = snapshot.width();
+                *height = snapshot.height();
+                true
+            } else {
+                false
+            }
         }
     }
 }
 
-#[cfg(feature = "software-renderer")]
-#[test]
-fn test_empty_window() {
-    // Test that when creating an empty window without a component, we don't panic when render() is called.
-    // This isn't typically done intentionally, but for example if we receive a paint event in Qt before a component
-    // is set, this may happen. Concretely as per #2799 this could happen with popups where the call to
-    // QWidget::show() with egl delivers an immediate paint event, before we've had a chance to call set_component.
-    // Let's emulate this scenario here using public platform API.
+/// This module contains the functions needed to interface with window handles from outside the Rust language.
+#[cfg(all(feature = "ffi", feature = "raw-window-handle-06"))]
+pub mod ffi_window {
+    #![allow(unsafe_code)]
+    #![allow(clippy::missing_safety_doc)]
 
-    let msw = crate::software_renderer::MinimalSoftwareWindow::new(
-        crate::software_renderer::RepaintBufferType::NewBuffer,
-    );
-    msw.window().request_redraw();
-    let mut region = None;
-    let render_called = msw.draw_if_needed(|renderer| {
-        let mut buffer =
-            crate::graphics::SharedPixelBuffer::<crate::graphics::Rgb8Pixel>::new(100, 100);
-        let stride = buffer.width() as usize;
-        region = Some(renderer.render(buffer.make_mut_slice(), stride));
-    });
-    assert!(render_called);
-    let region = region.unwrap();
-    assert_eq!(region.bounding_box_size(), PhysicalSize::default());
-    assert_eq!(region.bounding_box_origin(), PhysicalPosition::default());
+    use super::ffi::WindowAdapterRcOpaque;
+    use super::*;
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+    use std::sync::Arc;
+
+    /// Helper to grab the `HasWindowHandle` for the `WindowAdapter` behind `handle`.
+    fn has_window_handle(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> Option<Arc<dyn raw_window_handle_06::HasWindowHandle>> {
+        let window_adapter = unsafe { &*(handle as *const Rc<dyn WindowAdapter>) };
+        let window_adapter = window_adapter.internal(crate::InternalToken)?;
+        window_adapter.window_handle_06_rc().ok()
+    }
+
+    /// Helper to grab the `HasDisplayHandle` for the `WindowAdapter` behind `handle`.
+    fn has_display_handle(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> Option<Arc<dyn raw_window_handle_06::HasDisplayHandle>> {
+        let window_adapter = unsafe { &*(handle as *const Rc<dyn WindowAdapter>) };
+        let window_adapter = window_adapter.internal(crate::InternalToken)?;
+        window_adapter.display_handle_06_rc().ok()
+    }
+
+    /// Returns the `HWND` associated with this window, or null if it doesn't exist or isn't created yet.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_hwnd_win32(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> *mut c_void {
+        use raw_window_handle_06::HasWindowHandle;
+
+        if let Some(has_window_handle) = has_window_handle(handle)
+            && let Ok(window_handle) = has_window_handle.window_handle()
+            && let raw_window_handle_06::RawWindowHandle::Win32(win32) = window_handle.as_raw()
+        {
+            isize::from(win32.hwnd) as *mut c_void
+        } else {
+            null_mut()
+        }
+    }
+
+    /// Returns the `HINSTANCE` associated with this window, or null if it doesn't exist or isn't created yet.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_hinstance_win32(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> *mut c_void {
+        use raw_window_handle_06::HasWindowHandle;
+
+        if let Some(has_window_handle) = has_window_handle(handle)
+            && let Ok(window_handle) = has_window_handle.window_handle()
+            && let raw_window_handle_06::RawWindowHandle::Win32(win32) = window_handle.as_raw()
+        {
+            win32
+                .hinstance
+                .map(|hinstance| isize::from(hinstance) as *mut c_void)
+                .unwrap_or_default()
+        } else {
+            null_mut()
+        }
+    }
+
+    /// Returns the `wl_surface` associated with this window, or null if it doesn't exist or isn't created yet.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_wlsurface_wayland(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> *mut c_void {
+        use raw_window_handle_06::HasWindowHandle;
+
+        if let Some(has_window_handle) = has_window_handle(handle)
+            && let Ok(window_handle) = has_window_handle.window_handle()
+            && let raw_window_handle_06::RawWindowHandle::Wayland(wayland) = window_handle.as_raw()
+        {
+            wayland.surface.as_ptr()
+        } else {
+            null_mut()
+        }
+    }
+
+    /// Returns the `wl_display` associated with this window, or null if it doesn't exist or isn't created yet.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_wldisplay_wayland(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> *mut c_void {
+        use raw_window_handle_06::HasDisplayHandle;
+
+        if let Some(has_display_handle) = has_display_handle(handle)
+            && let Ok(display_handle) = has_display_handle.display_handle()
+            && let raw_window_handle_06::RawDisplayHandle::Wayland(wayland) =
+                display_handle.as_raw()
+        {
+            wayland.display.as_ptr()
+        } else {
+            null_mut()
+        }
+    }
+
+    /// Returns the `NSView` associated with this window, or null if it doesn't exist or isn't created yet.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_nsview_appkit(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> *mut c_void {
+        use raw_window_handle_06::HasWindowHandle;
+
+        if let Some(has_window_handle) = has_window_handle(handle)
+            && let Ok(window_handle) = has_window_handle.window_handle()
+            && let raw_window_handle_06::RawWindowHandle::AppKit(appkit) = window_handle.as_raw()
+        {
+            appkit.ns_view.as_ptr()
+        } else {
+            null_mut()
+        }
+    }
 }

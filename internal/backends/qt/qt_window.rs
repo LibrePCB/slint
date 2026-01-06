@@ -4,13 +4,13 @@
 // cSpell: ignore frameless qbrush qpointf qreal qwidgetsize svgz
 
 use cpp::*;
-use i_slint_common::sharedfontique;
+use i_slint_common::sharedfontique::{self, HashedBlob};
 use i_slint_core::graphics::rendering_metrics_collector::{
     RenderingMetrics, RenderingMetricsCollector,
 };
 use i_slint_core::graphics::{
-    euclid, Brush, Color, FontRequest, IntRect, Point, Rgba8Pixel, SharedImageBuffer,
-    SharedPixelBuffer,
+    Brush, Color, ImageCacheKey, IntRect, Point, Rgba8Pixel, SharedImageBuffer, SharedPixelBuffer,
+    euclid,
 };
 use i_slint_core::input::{KeyEvent, KeyEventType, MouseEvent};
 use i_slint_core::item_rendering::{
@@ -26,10 +26,10 @@ use i_slint_core::items::{
 use i_slint_core::layout::Orientation;
 use i_slint_core::lengths::{
     LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, LogicalVector,
-    PhysicalPx, ScaleFactor,
+    PhysicalPx, ScaleFactor, logical_size_from_api,
 };
 use i_slint_core::platform::{PlatformError, WindowEvent};
-use i_slint_core::textlayout::sharedparley::{self, parley, GlyphRenderer};
+use i_slint_core::textlayout::sharedparley::{self, GlyphRenderer, parley};
 use i_slint_core::window::{WindowAdapter, WindowAdapterInternal, WindowInner};
 use i_slint_core::{ImageInner, Property, SharedString};
 
@@ -684,7 +684,7 @@ impl ItemRenderer for QtItemRenderer<'_> {
         size: LogicalSize,
         _: &CachedRenderingData,
     ) {
-        sharedparley::draw_text(self, text, Some(text.font_request(self_rc)), size);
+        sharedparley::draw_text(self, text, Some(self_rc), size);
     }
 
     fn draw_text_input(
@@ -693,13 +693,7 @@ impl ItemRenderer for QtItemRenderer<'_> {
         self_rc: &ItemRc,
         size: LogicalSize,
     ) {
-        sharedparley::draw_text_input(
-            self,
-            text_input,
-            Some(text_input.font_request(self_rc)),
-            size,
-            Some(qt_password_character),
-        );
+        sharedparley::draw_text_input(self, text_input, self_rc, size, Some(qt_password_character));
     }
 
     fn draw_path(&mut self, path: Pin<&items::Path>, item_rc: &ItemRc, size: LogicalSize) {
@@ -715,19 +709,21 @@ impl ItemRenderer for QtItemRenderer<'_> {
             LineCap::Butt => 0x00,
             LineCap::Round => 0x20,
             LineCap::Square => 0x10,
+            _ => 0x00,
         };
         let stroke_pen_join_style: i32 = match path.stroke_line_join() {
             LineJoin::Miter => 0x00,
             LineJoin::Round => 0x80,
             LineJoin::Bevel => 0x40,
+            _ => 0x00,
         };
 
         let pos = qttypes::QPoint { x: offset.x as _, y: offset.y as _ };
         let mut painter_path = QPainterPath::default();
 
         painter_path.set_fill_rule(match path.fill_rule() {
-            FillRule::Nonzero => key_generated::Qt_FillRule_WindingFill,
             FillRule::Evenodd => key_generated::Qt_FillRule_OddEvenFill,
+            FillRule::Nonzero | _ => key_generated::Qt_FillRule_WindingFill,
         });
 
         for x in path_events.iter() {
@@ -976,7 +972,7 @@ impl ItemRenderer for QtItemRenderer<'_> {
             self,
             std::pin::pin!((SharedString::from(string), Brush::from(color))),
             None,
-            LogicalSize::new(1., 1.), // Non-zero size to avoid an early return
+            logical_size_from_api(self.window.size().to_logical(self.scale_factor())),
         );
     }
 
@@ -1170,7 +1166,7 @@ impl QRawFont {
 
 pub struct FontCache {
     /// Fonts are indexed by unique blob id (atomically incremented in fontique) and the font collection index.
-    fonts: HashMap<(u64, u32), Option<QRawFont>>,
+    fonts: HashMap<(HashedBlob, u32), Option<QRawFont>>,
 }
 
 impl Default for FontCache {
@@ -1182,15 +1178,11 @@ impl Default for FontCache {
 impl FontCache {
     pub fn font(&mut self, font: &parley::FontData) -> Option<QRawFont> {
         self.fonts
-            .entry((font.data.id(), font.index))
+            .entry((font.data.clone().into(), font.index))
             .or_insert_with(move || {
                 let mut raw_font = QRawFont::default();
                 raw_font.load_from_data(font.data.as_ref(), 12.0);
-                if raw_font.is_valid() {
-                    Some(raw_font)
-                } else {
-                    None
-                }
+                if raw_font.is_valid() { Some(raw_font) } else { None }
             })
             .clone()
     }
@@ -1553,6 +1545,9 @@ pub struct QtWindow {
     tree_structure_changed: RefCell<bool>,
 
     color_scheme: OnceCell<Pin<Box<Property<ColorScheme>>>>,
+
+    // Last icon image set on the window
+    window_icon_cache_key: RefCell<Option<ImageCacheKey>>,
 }
 
 impl Drop for QtWindow {
@@ -1587,6 +1582,7 @@ impl QtWindow {
                 cache: Default::default(),
                 tree_structure_changed: RefCell::new(false),
                 color_scheme: Default::default(),
+                window_icon_cache_key: Default::default(),
             }
         });
         let widget_ptr = rc.widget_ptr();
@@ -1850,16 +1846,30 @@ impl WindowAdapter for QtWindow {
         let background =
             into_qbrush(properties.background(), size.width.into(), size.height.into());
 
-        match (&window_item.icon()).into() {
-            &ImageInner::None => (),
+        let pixmap = match (&window_item.icon()).into() {
+            &ImageInner::None => {
+                if self.window_icon_cache_key.borrow().is_some() {
+                    self.window_icon_cache_key.borrow_mut().take();
+                    Some(qttypes::QPixmap::default())
+                } else {
+                    None
+                }
+            }
             r => {
-                if let Some(pixmap) = image_to_pixmap(r, None) {
-                    cpp! {unsafe [widget_ptr as "QWidget*", pixmap as "QPixmap"] {
-                        widget_ptr->setWindowIcon(QIcon(pixmap));
-                    }};
+                let icon_image_cache_key = ImageCacheKey::new(r);
+                if *self.window_icon_cache_key.borrow() != icon_image_cache_key {
+                    *self.window_icon_cache_key.borrow_mut() = icon_image_cache_key;
+                    image_to_pixmap(r, None)
+                } else {
+                    None
                 }
             }
         };
+        if let Some(pixmap) = pixmap {
+            cpp! {unsafe [widget_ptr as "QWidget*", pixmap as "QPixmap"] {
+                widget_ptr->setWindowIcon(QIcon(pixmap));
+            }};
+        }
 
         let fullscreen: bool = properties.is_fullscreen();
         let minimized: bool = properties.is_minimized();
@@ -2005,6 +2015,7 @@ impl WindowAdapterInternal for QtWindow {
             MouseCursor::NsResize => key_generated::Qt_CursorShape_SizeVerCursor,
             MouseCursor::NeswResize => key_generated::Qt_CursorShape_SizeBDiagCursor,
             MouseCursor::NwseResize => key_generated::Qt_CursorShape_SizeFDiagCursor,
+            _ => key_generated::Qt_CursorShape_ArrowCursor,
         };
         cpp! {unsafe [widget_ptr as "QWidget*", cursor_shape as "Qt::CursorShape"] {
             widget_ptr->setCursor(QCursor{cursor_shape});
@@ -2052,10 +2063,6 @@ impl WindowAdapterInternal for QtWindow {
         }};
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn handle_focus_change(&self, _old: Option<ItemRc>, new: Option<ItemRc>) {
         let widget_ptr = self.widget_ptr();
         if let Some(ai) = accessible_item(new) {
@@ -2098,19 +2105,26 @@ impl WindowAdapterInternal for QtWindow {
 impl i_slint_core::renderer::RendererSealed for QtWindow {
     fn text_size(
         &self,
-        font_request: FontRequest,
-        text: &str,
+        text_item: Pin<&dyn i_slint_core::item_rendering::RenderString>,
+        item_rc: &ItemRc,
         max_width: Option<LogicalLength>,
-        scale_factor: ScaleFactor,
         text_wrap: TextWrap,
     ) -> LogicalSize {
-        sharedparley::text_size(font_request, text, max_width, scale_factor, text_wrap)
+        sharedparley::text_size(self, text_item, item_rc, max_width, text_wrap)
+    }
+
+    fn char_size(
+        &self,
+        text_item: Pin<&dyn i_slint_core::item_rendering::HasFont>,
+        item_rc: &i_slint_core::item_tree::ItemRc,
+        ch: char,
+    ) -> LogicalSize {
+        sharedparley::char_size(text_item, item_rc, ch).unwrap_or_default()
     }
 
     fn font_metrics(
         &self,
         font_request: i_slint_core::graphics::FontRequest,
-        _scale_factor: ScaleFactor,
     ) -> i_slint_core::items::FontMetrics {
         sharedparley::font_metrics(font_request)
     }
@@ -2118,31 +2132,19 @@ impl i_slint_core::renderer::RendererSealed for QtWindow {
     fn text_input_byte_offset_for_position(
         &self,
         text_input: Pin<&i_slint_core::items::TextInput>,
+        item_rc: &i_slint_core::item_tree::ItemRc,
         pos: LogicalPoint,
-        font_request: FontRequest,
-        scale_factor: ScaleFactor,
     ) -> usize {
-        sharedparley::text_input_byte_offset_for_position(
-            text_input,
-            pos,
-            font_request,
-            scale_factor,
-        )
+        sharedparley::text_input_byte_offset_for_position(self, text_input, item_rc, pos)
     }
 
     fn text_input_cursor_rect_for_byte_offset(
         &self,
         text_input: Pin<&i_slint_core::items::TextInput>,
+        item_rc: &i_slint_core::item_tree::ItemRc,
         byte_offset: usize,
-        font_request: FontRequest,
-        scale_factor: ScaleFactor,
     ) -> LogicalRect {
-        sharedparley::text_input_cursor_rect_for_byte_offset(
-            text_input,
-            byte_offset,
-            font_request,
-            scale_factor,
-        )
+        sharedparley::text_input_cursor_rect_for_byte_offset(self, text_input, item_rc, byte_offset)
     }
 
     fn register_font_from_memory(
@@ -2185,6 +2187,10 @@ impl i_slint_core::renderer::RendererSealed for QtWindow {
 
     fn set_window_adapter(&self, _window_adapter: &Rc<dyn WindowAdapter>) {
         // No-op because QtWindow is also the WindowAdapter
+    }
+
+    fn window_adapter(&self) -> Option<Rc<dyn WindowAdapter>> {
+        Some(WindowInner::from_pub(&self.window).window_adapter())
     }
 
     fn take_snapshot(&self) -> Result<SharedPixelBuffer<Rgba8Pixel>, PlatformError> {
@@ -2241,11 +2247,7 @@ pub(crate) fn restart_timer() {
     let timeout = i_slint_core::timers::TimerList::next_timeout().map(|instant| {
         let now = std::time::Instant::now();
         let instant: std::time::Instant = instant.into();
-        if instant > now {
-            instant.duration_since(now).as_millis() as i32
-        } else {
-            0
-        }
+        if instant > now { instant.duration_since(now).as_millis() as i32 } else { 0 }
     });
     if let Some(timeout) = timeout {
         cpp! { unsafe [timeout as "int"] {
@@ -2376,7 +2378,7 @@ pub(crate) mod ffi {
     ) -> *mut c_void {
         window_adapter
             .internal(i_slint_core::InternalToken)
-            .and_then(|wa| <dyn std::any::Any>::downcast_ref(wa.as_any()))
+            .and_then(|wa| <dyn std::any::Any>::downcast_ref(wa))
             .map_or(std::ptr::null_mut(), |win: &QtWindow| {
                 win.widget_ptr().cast::<c_void>().as_ptr()
             })

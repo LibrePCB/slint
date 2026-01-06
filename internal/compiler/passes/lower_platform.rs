@@ -4,7 +4,7 @@
 //! This pass lowers the access to the global Platform to constants and builtin function calls.
 
 use crate::expression_tree::{BuiltinFunction, Expression};
-use crate::object_tree::{visit_all_expressions, Component};
+use crate::object_tree::{Component, visit_all_expressions};
 use std::rc::Rc;
 
 pub fn lower_platform(component: &Rc<Component>, type_loader: &mut crate::typeloader::TypeLoader) {
@@ -16,7 +16,7 @@ pub fn lower_platform(component: &Rc<Component>, type_loader: &mut crate::typelo
                 if nr.name() == "os" {
                     *e = Expression::FunctionCall {
                         function: BuiltinFunction::DetectOperatingSystem.into(),
-                        arguments: vec![],
+                        arguments: Vec::new(),
                         source_location: None,
                     };
                 } else if nr.name() == "style-name" {
@@ -27,7 +27,7 @@ pub fn lower_platform(component: &Rc<Component>, type_loader: &mut crate::typelo
                                 .strip_suffix("-light")
                                 .unwrap_or(&type_loader.resolved_style)
                         });
-                    *e = Expression::StringLiteral(style.into()).into();
+                    *e = Expression::StringLiteral(style.into());
                 }
             }
 

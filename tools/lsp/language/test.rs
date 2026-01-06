@@ -48,7 +48,7 @@ pub fn loaded_document_cache_with_file_name(
     let (extra_files, diag) =
         spin_on::spin_on(reload_document_impl(None, content, url.clone(), Some(42), &mut dc));
 
-    let diag = convert_diagnostics(&extra_files, diag);
+    let diag = convert_diagnostics(&extra_files, diag, dc.format);
     (dc, url, diag)
 }
 
@@ -127,7 +127,7 @@ pub fn load(
         document_cache,
     ));
 
-    (url, convert_diagnostics(&main_file, diag))
+    (url, convert_diagnostics(&main_file, diag, document_cache.format))
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn accurate_diagnostics_in_dependencies() {
         &std::env::current_dir().unwrap().join("xxx/bar.slint"),
         r#" export component Bar { property <int> hi; } "#,
     );
-    assert_eq!(diag, HashMap::from_iter([(bar_url.clone(), vec![])]));
+    assert_eq!(diag, HashMap::from_iter([(bar_url.clone(), Vec::new())]));
 
     let (reexport_url, diag) = load(
         None,
@@ -149,7 +149,7 @@ fn accurate_diagnostics_in_dependencies() {
         &std::env::current_dir().unwrap().join("xxx/reexport.slint"),
         r#"import { Bar } from "bar.slint"; export component Foo inherits Bar { in property <string> reexport; }"#,
     );
-    assert_eq!(diag, HashMap::from_iter([(reexport_url.clone(), vec![])]));
+    assert_eq!(diag, HashMap::from_iter([(reexport_url.clone(), Vec::new())]));
 
     let (foo_url, diag) = load(
         None,
@@ -182,9 +182,9 @@ fn accurate_diagnostics_in_dependencies() {
     assert_eq!(
         diag,
         HashMap::from_iter([
-            (reexport_url.clone(), vec![]),
-            (bar_url.clone(), vec![]),
-            (foo_url.clone(), vec![])
+            (reexport_url.clone(), Vec::new()),
+            (bar_url.clone(), Vec::new()),
+            (foo_url.clone(), Vec::new())
         ])
     );
 
@@ -209,7 +209,7 @@ fn accurate_diagnostics_in_dependencies() {
         &std::env::current_dir().unwrap().join("xxx/foo.slint"),
         r#"import { Foo } from "reexport.slint"; export component MainWindow inherits Window { Foo { hello: 12; } }"#,
     );
-    assert_eq!(diag[&foo_url], vec![]);
+    assert_eq!(diag[&foo_url], Vec::new());
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn accurate_diagnostics_in_dependencies_with_parse_errors() {
         &std::env::current_dir().unwrap().join("xxx/bar.slint"),
         r#" export component Bar { in property <int> hello; } "#,
     );
-    assert_eq!(diag, HashMap::from_iter([(bar_url.clone(), vec![])]));
+    assert_eq!(diag, HashMap::from_iter([(bar_url.clone(), Vec::new())]));
 
     ctx.open_urls.borrow_mut().insert(bar_url.clone());
 
@@ -268,7 +268,7 @@ fn accurate_diagnostics_in_dependencies_with_parse_errors() {
     );
 
     // bar still don't have error
-    assert_eq!(diag[&bar_url], vec![]);
+    assert_eq!(diag[&bar_url], Vec::new());
     // But reexport_url still have the same syntax error as before
     assert!(diag[&reexport_url].iter().any(|d| d.message.contains("Syntax error:")));
 }

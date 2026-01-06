@@ -58,10 +58,11 @@ fn forecast_graph_command(
     let day_width = width / days_count as f32;
     let max_day_shift = days_count as f32 * day_width;
 
-    let border_command =
-        format!(
+    let border_command = format!(
         "M 0 0 M {max_width} 0 M {max_width} {max_temperature_value} M 0 {max_temperature_value} ",
-        max_width=max_day_shift, max_temperature_value=max_temperature_value * temperature_ratio);
+        max_width = max_day_shift,
+        max_temperature_value = max_temperature_value * temperature_ratio
+    );
 
     let mut command = border_command;
 
@@ -114,10 +115,12 @@ impl WeatherDisplayController {
         let geo_location = window.global::<GeoLocation>();
 
         // initialized models
-        city_weather
-            .set_city_weather(ModelRc::from(Rc::new(VecModel::<CityWeatherInfo>::from(vec![]))));
-        geo_location
-            .set_result_list(ModelRc::from(Rc::new(VecModel::<GeoLocationEntry>::from(vec![]))));
+        city_weather.set_city_weather(ModelRc::from(Rc::new(VecModel::<CityWeatherInfo>::from(
+            Vec::new(),
+        ))));
+        geo_location.set_result_list(ModelRc::from(Rc::new(VecModel::<GeoLocationEntry>::from(
+            Vec::new(),
+        ))));
 
         // initialize state
         city_weather.set_can_add_city(support_add_city);

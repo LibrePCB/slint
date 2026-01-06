@@ -9,7 +9,8 @@ in particular the `BackendSelector` type.
 */
 
 use alloc::boxed::Box;
-use alloc::{format, string::String};
+use alloc::format;
+use alloc::string::{String, ToString};
 
 use i_slint_core::api::PlatformError;
 use i_slint_core::graphics::{RequestedGraphicsAPI, RequestedOpenGLVersion};
@@ -170,9 +171,9 @@ impl BackendSelector {
     pub fn with_winit_window_attributes_hook(
         mut self,
         hook: impl Fn(
-                i_slint_backend_winit::winit::window::WindowAttributes,
-            ) -> i_slint_backend_winit::winit::window::WindowAttributes
-            + 'static,
+            i_slint_backend_winit::winit::window::WindowAttributes,
+        ) -> i_slint_backend_winit::winit::window::WindowAttributes
+        + 'static,
     ) -> Self {
         self.winit_window_attributes_hook = Some(Box::new(hook));
         self
@@ -249,7 +250,12 @@ impl BackendSelector {
     /// enable the `backend-winit` feature and call this function with `winit` as argument.
     #[must_use]
     pub fn backend_name(mut self, name: String) -> Self {
-        self.backend = Some(name);
+        let lowercase = name.to_lowercase();
+        let (backend, renderer) = crate::parse_backend_env_var(&lowercase);
+        self.backend = Some(backend.to_string());
+        if self.renderer.is_none() && !renderer.is_empty() {
+            self.renderer = Some(renderer.to_string())
+        }
         self
     }
 
@@ -270,14 +276,15 @@ impl BackendSelector {
             feature = "i-slint-backend-linuxkms"
         ))]
         if self.backend.is_none() || self.renderer.is_none() {
-            let backend_config = std::env::var("SLINT_BACKEND").unwrap_or_default();
-            let backend_config = backend_config.to_lowercase();
-            let (backend, renderer) = super::parse_backend_env_var(backend_config.as_str());
-            if !backend.is_empty() {
-                self.backend.get_or_insert_with(|| backend.to_owned());
-            }
-            if !renderer.is_empty() {
-                self.renderer.get_or_insert_with(|| renderer.to_owned());
+            if let Ok(backend_config) = std::env::var("SLINT_BACKEND") {
+                let backend_config = backend_config.to_lowercase();
+                let (backend, renderer) = super::parse_backend_env_var(backend_config.as_str());
+                if !backend.is_empty() {
+                    self.backend.get_or_insert_with(|| backend.to_owned());
+                }
+                if !renderer.is_empty() {
+                    self.renderer.get_or_insert_with(|| renderer.to_owned());
+                }
             }
         }
 

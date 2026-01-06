@@ -7,7 +7,7 @@ use crate::diagnostics::BuildDiagnostics;
 use crate::expression_tree::{BindingExpression, Expression, NamedReference};
 use crate::object_tree::*;
 use std::cell::RefCell;
-use std::collections::{btree_map::Entry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, btree_map::Entry};
 use std::rc::Rc;
 
 // The property in the key is to be removed, and replaced by the property in the value
@@ -25,17 +25,15 @@ impl PropertySets {
         if !std::rc::Weak::ptr_eq(
             &e1.borrow().enclosing_component,
             &e2.borrow().enclosing_component,
-        ) {
-            if !(e1.borrow().enclosing_component.upgrade().unwrap().is_global()
-                && !e2.borrow().change_callbacks.contains_key(p2.name()))
-                && !(e2.borrow().enclosing_component.upgrade().unwrap().is_global()
-                    && !e1.borrow().change_callbacks.contains_key(p1.name()))
-            {
-                // We can only merge aliases if they are in the same Component. (unless one of them is global if the other one don't have change event)
-                // TODO: actually we could still merge two alias in a component pointing to the same
-                // property in a parent component
-                return;
-            }
+        ) && !(e1.borrow().enclosing_component.upgrade().unwrap().is_global()
+            && !e2.borrow().change_callbacks.contains_key(p2.name()))
+            && !(e2.borrow().enclosing_component.upgrade().unwrap().is_global()
+                && !e1.borrow().change_callbacks.contains_key(p1.name()))
+        {
+            // We can only merge aliases if they are in the same Component. (unless one of them is global if the other one don't have change event)
+            // TODO: actually we could still merge two alias in a component pointing to the same
+            // property in a parent component
+            return;
         }
 
         if let Some(s1) = self.map.get(&p1).cloned() {
@@ -241,11 +239,7 @@ fn best_property(p1: NamedReference, p2: NamedReference) -> NamedReference {
         }};
     }
 
-    if canonical_order!(p1) < canonical_order!(p2) {
-        p1
-    } else {
-        p2
-    }
+    if canonical_order!(p1) < canonical_order!(p2) { p1 } else { p2 }
 }
 
 /// Remove the `to` from the two_way_bindings

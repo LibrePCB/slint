@@ -147,7 +147,7 @@ impl NativeButton {
             Some(StandardButtonKind::Abort) => "Abort".into(),
             Some(StandardButtonKind::Retry) => "Retry".into(),
             Some(StandardButtonKind::Ignore) => "Ignore".into(),
-            None => self.text().as_str().into(),
+            _ => self.text().as_str().into(),
         }
     }
 
@@ -167,7 +167,7 @@ impl NativeButton {
             Some(StandardButtonKind::Abort) => QStyle_StandardPixmap_SP_DialogAbortButton,
             Some(StandardButtonKind::Retry) => QStyle_StandardPixmap_SP_DialogRetryButton,
             Some(StandardButtonKind::Ignore) => QStyle_StandardPixmap_SP_DialogIgnoreButton,
-            None => {
+            _ => {
                 let icon_size = self.icon_size().get().round() as u32;
                 let source_size = Some(euclid::Size2D::new(icon_size, icon_size));
                 return crate::qt_window::image_to_pixmap((&self.icon()).into(), source_size)
@@ -286,11 +286,11 @@ impl Item for NativeButton {
                     InputEventResult::GrabMouse
                 } else {
                     InputEventResult::EventAccepted
-                }
+                };
             }
             MouseEvent::Wheel { .. } => return InputEventResult::EventIgnored,
             MouseEvent::DragMove(..) | MouseEvent::Drop(..) => {
-                return InputEventResult::EventIgnored
+                return InputEventResult::EventIgnored;
             }
         });
         if let MouseEvent::Released { position, .. } = event {

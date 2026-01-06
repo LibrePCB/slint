@@ -4,6 +4,8 @@
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
 #![warn(missing_docs)]
+#![cfg_attr(slint_nightly_test, feature(non_exhaustive_omitted_patterns_lint))]
+#![cfg_attr(slint_nightly_test, warn(non_exhaustive_omitted_patterns))]
 
 extern crate alloc;
 
@@ -27,6 +29,8 @@ mod winitwindowadapter;
 use winitwindowadapter::*;
 pub(crate) mod event_loop;
 mod frame_throttle;
+#[cfg(target_os = "ios")]
+mod ios;
 
 /// Re-export of the winit crate.
 pub use winit;
@@ -60,7 +64,7 @@ mod renderer {
     use i_slint_core::platform::PlatformError;
     use winit::event_loop::ActiveEventLoop;
 
-    pub trait WinitCompatibleRenderer {
+    pub trait WinitCompatibleRenderer: std::any::Any {
         fn render(&self, window: &i_slint_core::api::Window) -> Result<(), PlatformError>;
 
         fn as_core_renderer(&self) -> &dyn i_slint_core::renderer::Renderer;
@@ -384,17 +388,14 @@ impl BackendBuilder {
             }
             #[cfg(feature = "renderer-femtovg-wgpu")]
             (Some("femtovg-wgpu"), maybe_graphics_api) => {
-                if !maybe_graphics_api.is_some_and(|_api| {
+                if let Some(_api) = maybe_graphics_api {
                     #[cfg(feature = "unstable-wgpu-27")]
-                    if matches!(_api, RequestedGraphicsAPI::WGPU27(..)) {
-                        return true;
+                    if !matches!(_api, RequestedGraphicsAPI::WGPU27(..)) {
+                        return Err(
+                           "The FemtoVG WGPU renderer only supports the WGPU27 graphics API selection"
+                                .into(),
+                        );
                     }
-                    false
-                }) {
-                    return Err(
-                        "The FemtoVG WGPU renderer only supports the WGPU27 graphics API selection"
-                            .into(),
-                    );
                 }
                 renderer::femtovg::WGPUFemtoVGRenderer::new_suspended
             }
@@ -525,7 +526,7 @@ pub(crate) struct SharedBackendData {
     _requested_graphics_api: Option<RequestedGraphicsAPI>,
     #[cfg(enable_skia_renderer)]
     skia_context: i_slint_renderer_skia::SkiaSharedContext,
-    active_windows: RefCell<HashMap<winit::window::WindowId, Weak<WinitWindowAdapter>>>,
+    active_windows: Rc<RefCell<HashMap<winit::window::WindowId, Weak<WinitWindowAdapter>>>>,
     /// List of visible windows that have been created when without the event loop and
     /// need to be mapped to a winit Window as soon as the event loop becomes active.
     inactive_windows: RefCell<Vec<Weak<WinitWindowAdapter>>>,
@@ -534,6 +535,9 @@ pub(crate) struct SharedBackendData {
     not_running_event_loop: RefCell<Option<winit::event_loop::EventLoop<SlintEvent>>>,
     event_loop_proxy: winit::event_loop::EventLoopProxy<SlintEvent>,
     is_wayland: bool,
+    #[cfg(target_os = "ios")]
+    #[allow(unused)]
+    keyboard_notifications: ios::KeyboardNotifications,
 }
 
 impl SharedBackendData {
@@ -585,6 +589,13 @@ impl SharedBackendData {
             }
         }
 
+        let active_windows =
+            Rc::<RefCell<HashMap<winit::window::WindowId, Weak<WinitWindowAdapter>>>>::default();
+
+        #[cfg(target_os = "ios")]
+        let keyboard_notifications =
+            ios::register_keyboard_notifications(Rc::downgrade(&active_windows));
+
         let event_loop_proxy = event_loop.create_proxy();
         #[cfg(not(target_arch = "wasm32"))]
         let clipboard = crate::clipboard::create_clipboard(
@@ -596,13 +607,15 @@ impl SharedBackendData {
             _requested_graphics_api: requested_graphics_api,
             #[cfg(enable_skia_renderer)]
             skia_context: i_slint_renderer_skia::SkiaSharedContext::default(),
-            active_windows: Default::default(),
+            active_windows,
             inactive_windows: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             clipboard: RefCell::new(clipboard),
             not_running_event_loop: RefCell::new(Some(event_loop)),
             event_loop_proxy,
             is_wayland,
+            #[cfg(target_os = "ios")]
+            keyboard_notifications,
         })
     }
 
@@ -891,7 +904,7 @@ pub trait WinitWindowAccessor: private::WinitWindowAccessorSealed {
     /// Invokes the specified callback with a reference to the [`winit::window::Window`] that exists for this Slint window
     /// and returns `Some(T)`; otherwise `None`.
     fn with_winit_window<T>(&self, callback: impl FnOnce(&winit::window::Window) -> T)
-        -> Option<T>;
+    -> Option<T>;
     /// Registers a window event filter callback for this Slint window.
     ///
     /// The callback is invoked in the winit event loop whenever a window event is received with a reference to the
@@ -902,7 +915,7 @@ pub trait WinitWindowAccessor: private::WinitWindowAccessorSealed {
     fn on_winit_window_event(
         &self,
         callback: impl FnMut(&i_slint_core::api::Window, &winit::event::WindowEvent) -> EventResult
-            + 'static,
+        + 'static,
     );
 
     /// Returns a future that resolves to the [`winit::window::Window`] for this Slint window.
@@ -957,7 +970,7 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
         i_slint_core::window::WindowInner::from_pub(self)
             .window_adapter()
             .internal(i_slint_core::InternalToken)
-            .and_then(|wa| wa.as_any().downcast_ref::<WinitWindowAdapter>())
+            .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<WinitWindowAdapter>())
             .is_some_and(|adapter| adapter.winit_window().is_some())
     }
 
@@ -968,7 +981,7 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
         i_slint_core::window::WindowInner::from_pub(self)
             .window_adapter()
             .internal(i_slint_core::InternalToken)
-            .and_then(|wa| wa.as_any().downcast_ref::<WinitWindowAdapter>())
+            .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<WinitWindowAdapter>())
             .and_then(|adapter| adapter.winit_window().map(|w| callback(&w)))
     }
 
@@ -979,7 +992,7 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
             let adapter_weak = i_slint_core::window::WindowInner::from_pub(self)
                 .window_adapter()
                 .internal(i_slint_core::InternalToken)
-                .and_then(|wa| wa.as_any().downcast_ref::<WinitWindowAdapter>())
+                .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<WinitWindowAdapter>())
                 .map(|wa| wa.self_weak.clone())
                 .ok_or_else(|| {
                     PlatformError::OtherError(
@@ -993,12 +1006,12 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
     fn on_winit_window_event(
         &self,
         mut callback: impl FnMut(&i_slint_core::api::Window, &winit::event::WindowEvent) -> EventResult
-            + 'static,
+        + 'static,
     ) {
         if let Some(adapter) = i_slint_core::window::WindowInner::from_pub(self)
             .window_adapter()
             .internal(i_slint_core::InternalToken)
-            .and_then(|wa| wa.as_any().downcast_ref::<WinitWindowAdapter>())
+            .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<WinitWindowAdapter>())
         {
             adapter
                 .window_event_filter

@@ -10,10 +10,10 @@
 
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::*;
-use crate::langtype::{ElementType, Struct, Type};
+use crate::langtype::{ElementType, Struct, StructName, Type};
 use crate::lookup::{LookupCtx, LookupObject, LookupResult, LookupResultCallable};
 use crate::object_tree::*;
-use crate::parser::{identifier_text, syntax_nodes, NodeOrToken, SyntaxKind, SyntaxNode};
+use crate::parser::{NodeOrToken, SyntaxKind, SyntaxNode, identifier_text, syntax_nodes};
 use crate::typeregister::TypeRegister;
 use core::num::IntErrorKind;
 use smol_str::{SmolStr, ToSmolStr};
@@ -43,11 +43,11 @@ fn resolve_expression(
             property_type,
             component_scope: scope,
             diag,
-            arguments: vec![],
+            arguments: Vec::new(),
             type_register,
             type_loader: Some(type_loader),
             current_token: None,
-            local_variables: vec![],
+            local_variables: Vec::new(),
         };
 
         let new_expr = match node.kind() {
@@ -79,7 +79,10 @@ fn resolve_expression(
                 }
             }
             SyntaxKind::TwoWayBinding => {
-                assert!(diag.has_errors(), "Two way binding should have been resolved already  (property: {property_name:?})");
+                assert!(
+                    diag.has_errors(),
+                    "Two way binding should have been resolved already  (property: {property_name:?})"
+                );
                 Expression::Invalid
             }
             _ => {
@@ -121,7 +124,7 @@ pub fn resolve_expressions(
     for component in doc.inner_components.iter() {
         recurse_elem_with_scope(
             &component.root_element,
-            ComponentScope(vec![]),
+            ComponentScope(Vec::new()),
             &mut |elem, scope| {
                 let mut is_repeated = elem.borrow().repeated.is_some();
                 visit_element_expressions(elem, |expr, property_name, property_type| {
@@ -332,7 +335,7 @@ impl Expression {
                 ctx.diag,
             )
         } else {
-            return Expression::Invalid;
+            Expression::Invalid
         }
     }
 
@@ -356,6 +359,7 @@ impl Expression {
                     SyntaxKind::AtImageUrl => Some(Self::from_at_image_url_node(node.into(), ctx)),
                     SyntaxKind::AtGradient => Some(Self::from_at_gradient(node.into(), ctx)),
                     SyntaxKind::AtTr => Some(Self::from_at_tr(node.into(), ctx)),
+                    SyntaxKind::AtMarkdown => Some(Self::from_at_markdown(node.into(), ctx)),
                     SyntaxKind::QualifiedName => Some(Self::from_qualified_name_node(
                         node.clone().into(),
                         ctx,
@@ -410,7 +414,7 @@ impl Expression {
                         ),
                     ),
                     SyntaxKind::ColorLiteral => Some(
-                        crate::literals::parse_color_literal(token.text())
+                        i_slint_common::color_parsing::parse_color_literal(token.text())
                             .map(|i| Expression::Cast {
                                 from: Box::new(Expression::NumberLiteral(i as _, Unit::None)),
                                 to: Type::Color,
@@ -511,27 +515,28 @@ impl Expression {
         enum GradKind {
             Linear { angle: Box<Expression> },
             Radial,
-            Conic,
+            Conic { from_angle: Box<Expression> },
         }
 
-        let mut subs = node
+        let all_subs: Vec<_> = node
             .children_with_tokens()
-            .filter(|n| matches!(n.kind(), SyntaxKind::Comma | SyntaxKind::Expression));
+            .filter(|n| matches!(n.kind(), SyntaxKind::Comma | SyntaxKind::Expression))
+            .collect();
 
         let grad_token = node.child_token(SyntaxKind::Identifier).unwrap();
         let grad_text = grad_token.text();
 
-        let grad_kind = if grad_text.starts_with("linear") {
-            let angle_expr = match subs.next() {
+        let (grad_kind, stops_start_idx) = if grad_text.starts_with("linear") {
+            let angle_expr = match all_subs.first() {
                 Some(e) if e.kind() == SyntaxKind::Expression => {
-                    syntax_nodes::Expression::from(e.into_node().unwrap())
+                    syntax_nodes::Expression::from(e.as_node().unwrap().clone())
                 }
                 _ => {
                     ctx.diag.push_error("Expected angle expression".into(), &node);
                     return Expression::Invalid;
                 }
             };
-            if subs.next().is_some_and(|s| s.kind() != SyntaxKind::Comma) {
+            if all_subs.get(1).is_none_or(|s| s.kind() != SyntaxKind::Comma) {
                 ctx.diag.push_error(
                     "Angle expression must be an angle followed by a comma".into(),
                     &node,
@@ -545,45 +550,80 @@ impl Expression {
                     ctx.diag,
                 ),
             );
-            GradKind::Linear { angle }
+            (GradKind::Linear { angle }, 2)
         } else if grad_text.starts_with("radial") {
-            if !matches!(subs.next(), Some(NodeOrToken::Node(n)) if n.text().to_string().trim() == "circle")
-            {
+            if !all_subs.first().is_some_and(|n| {
+                matches!(n, NodeOrToken::Node(node) if node.text().to_string().trim() == "circle")
+            }) {
                 ctx.diag.push_error("Expected 'circle': currently, only @radial-gradient(circle, ...) are supported".into(), &node);
                 return Expression::Invalid;
             }
-            let comma = subs.next();
+            let comma = all_subs.get(1);
             if matches!(&comma, Some(NodeOrToken::Node(n)) if n.text().to_string().trim() == "at") {
-                ctx.diag.push_error("'at' in @radial-gradient is not yet supported".into(), &comma);
-                return Expression::Invalid;
-            }
-            if comma.as_ref().is_some_and(|s| s.kind() != SyntaxKind::Comma) {
                 ctx.diag.push_error(
-                    "'circle' must be followed by a comma".into(),
-                    comma.as_ref().map_or(&node, |x| x as &dyn Spanned),
+                    "'at' in @radial-gradient is not yet supported".into(),
+                    comma.unwrap(),
                 );
                 return Expression::Invalid;
             }
-            GradKind::Radial
+            // Only error if there's something after 'circle' that's NOT a comma
+            if comma.is_some_and(|s| s.kind() != SyntaxKind::Comma) {
+                ctx.diag.push_error("'circle' must be followed by a comma".into(), comma.unwrap());
+                return Expression::Invalid;
+            }
+            (GradKind::Radial, 2)
         } else if grad_text.starts_with("conic") {
-            GradKind::Conic
+            // Check for optional "from <angle>" syntax
+            let (from_angle, start_idx) = if all_subs.first().is_some_and(|n| {
+                matches!(n, NodeOrToken::Node(node) if node.text().to_string().trim() == "from")
+            }) {
+                // Parse "from <angle>" syntax
+                let angle_expr = match all_subs.get(1) {
+                    Some(e) if e.kind() == SyntaxKind::Expression => {
+                        syntax_nodes::Expression::from(e.as_node().unwrap().clone())
+                    }
+                    _ => {
+                        ctx.diag.push_error("Expected angle expression after 'from'".into(), &node);
+                        return Expression::Invalid;
+                    }
+                };
+                if all_subs.get(2).is_none_or(|s| s.kind() != SyntaxKind::Comma) {
+                    ctx.diag.push_error(
+                        "'from <angle>' must be followed by a comma".into(),
+                        &node,
+                    );
+                    return Expression::Invalid;
+                }
+                let angle = Box::new(
+                    Expression::from_expression_node(angle_expr.clone(), ctx).maybe_convert_to(
+                        Type::Angle,
+                        &angle_expr,
+                        ctx.diag,
+                    ),
+                );
+                (angle, 3)
+            } else {
+                // Default to 0deg when "from" is omitted
+                (Box::new(Expression::NumberLiteral(0., Unit::Deg)), 0)
+            };
+            (GradKind::Conic { from_angle }, start_idx)
         } else {
             // Parser should have ensured we have one of the linear, radial or conic gradient
             panic!("Not a gradient {grad_text:?}");
         };
 
-        let mut stops = vec![];
+        let mut stops = Vec::new();
         enum Stop {
             Empty,
             Color(Expression),
             Finished,
         }
         let mut current_stop = Stop::Empty;
-        for n in subs {
+        for n in all_subs.iter().skip(stops_start_idx) {
             if n.kind() == SyntaxKind::Comma {
                 match std::mem::replace(&mut current_stop, Stop::Empty) {
                     Stop::Empty => {
-                        ctx.diag.push_error("Expected expression".into(), &n);
+                        ctx.diag.push_error("Expected expression".into(), n);
                         break;
                     }
                     Stop::Finished => {}
@@ -607,18 +647,18 @@ impl Expression {
                 };
                 match std::mem::replace(&mut current_stop, Stop::Finished) {
                     Stop::Empty => {
-                        current_stop = Stop::Color(e.maybe_convert_to(Type::Color, &n, ctx.diag))
+                        current_stop = Stop::Color(e.maybe_convert_to(Type::Color, n, ctx.diag))
                     }
                     Stop::Finished => {
-                        ctx.diag.push_error("Expected comma".into(), &n);
+                        ctx.diag.push_error("Expected comma".into(), n);
                         break;
                     }
                     Stop::Color(col) => {
                         let stop_type = match &grad_kind {
-                            GradKind::Conic => Type::Angle,
+                            GradKind::Conic { .. } => Type::Angle,
                             _ => Type::Float32,
                         };
-                        stops.push((col, e.maybe_convert_to(stop_type, &n, ctx.diag)))
+                        stops.push((col, e.maybe_convert_to(stop_type, n, ctx.diag)))
                     }
                 }
             }
@@ -678,19 +718,12 @@ impl Expression {
         match grad_kind {
             GradKind::Linear { angle } => Expression::LinearGradient { angle, stops },
             GradKind::Radial => Expression::RadialGradient { stops },
-            GradKind::Conic => {
-                // For conic gradients, we need to:
-                // 1. Ensure angle expressions are converted to Type::Angle
-                // 2. Normalize to 0-1 range for internal representation
+            GradKind::Conic { from_angle } => {
+                // Normalize stop angles to 0-1 range by dividing by 360deg
                 let normalized_stops = stops
                     .into_iter()
                     .map(|(color, angle_expr)| {
-                        // First ensure the angle expression is properly typed as Angle
-                        let angle_typed =
-                            angle_expr.maybe_convert_to(Type::Angle, &node, &mut ctx.diag);
-
-                        // Convert angle to 0-1 range by dividing by 360deg
-                        // This ensures all angle units (deg, rad, turn) are normalized
+                        let angle_typed = angle_expr.maybe_convert_to(Type::Angle, &node, ctx.diag);
                         let normalized_pos = Expression::BinaryExpression {
                             lhs: Box::new(angle_typed),
                             rhs: Box::new(Expression::NumberLiteral(360., Unit::Deg)),
@@ -699,8 +732,163 @@ impl Expression {
                         (color, normalized_pos)
                     })
                     .collect();
-                Expression::ConicGradient { stops: normalized_stops }
+
+                // Convert from_angle to degrees (don't normalize to 0-1)
+                let from_angle_degrees = from_angle.maybe_convert_to(Type::Angle, &node, ctx.diag);
+
+                Expression::ConicGradient {
+                    from_angle: Box::new(from_angle_degrees),
+                    stops: normalized_stops,
+                }
             }
+        }
+    }
+
+    fn from_at_markdown(node: syntax_nodes::AtMarkdown, ctx: &mut LookupCtx) -> Expression {
+        let Some(string) = node
+            .child_text(SyntaxKind::StringLiteral)
+            .and_then(|s| crate::literals::unescape_string(&s))
+        else {
+            ctx.diag.push_error("Cannot parse string literal".into(), &node);
+            return Expression::Invalid;
+        };
+
+        let subs = node.Expression().map(|n| {
+            Expression::from_expression_node(n.clone(), ctx).maybe_convert_to(
+                Type::String,
+                &n,
+                ctx.diag,
+            )
+        });
+        let values = subs.collect::<Vec<_>>();
+
+        let mut expr = None;
+
+        // check format string
+        {
+            let mut arg_idx = 0;
+            let mut pos_max = 0;
+            let mut pos = 0;
+            let mut literal_start_pos = 0;
+            while let Some(mut p) = string[pos..].find(['{', '}']) {
+                if string.len() - pos < p + 1 {
+                    ctx.diag.push_error(
+                        "Unescaped trailing '{' in format string. Escape '{' with '{{'".into(),
+                        &node,
+                    );
+                    break;
+                }
+                p += pos;
+
+                // Skip escaped }
+                if string.get(p..=p) == Some("}") {
+                    if string.get(p + 1..=p + 1) == Some("}") {
+                        pos = p + 2;
+                        continue;
+                    } else {
+                        ctx.diag.push_error(
+                            "Unescaped '}' in format string. Escape '}' with '}}'".into(),
+                            &node,
+                        );
+                        break;
+                    }
+                }
+
+                // Skip escaped {
+                if string.get(p + 1..=p + 1) == Some("{") {
+                    pos = p + 2;
+                    continue;
+                }
+
+                // Find the argument
+                let end = if let Some(end) = string[p..].find('}') {
+                    end + p
+                } else {
+                    ctx.diag.push_error(
+                        "Unterminated placeholder in format string. '{' must be escaped with '{{'"
+                            .into(),
+                        &node,
+                    );
+                    break;
+                };
+                let argument = &string[p + 1..end];
+                let argument_index = if argument.is_empty() {
+                    let argument_index = arg_idx;
+                    arg_idx += 1;
+                    argument_index
+                } else if let Ok(n) = argument.parse::<u16>() {
+                    pos_max = pos_max.max(n as usize + 1);
+                    n as usize
+                } else {
+                    ctx.diag
+                        .push_error("Invalid '{...}' placeholder in format string. The placeholder must be a number, or braces must be escaped with '{{' and '}}'".into(), &node);
+                    break;
+                };
+
+                let value = if let Some(value) = values.get(argument_index).cloned() {
+                    value
+                } else {
+                    // Will result in a `Format string contains {num} placeholders, but only {} extra arguments were given` error later
+                    break;
+                };
+
+                let add = Expression::BinaryExpression {
+                    lhs: Box::new(Expression::StringLiteral(
+                        (&string[literal_start_pos..p]).into(),
+                    )),
+                    op: '+',
+                    rhs: Box::new(Expression::FunctionCall {
+                        function: BuiltinFunction::EscapeMarkdown.into(),
+                        arguments: vec![value],
+                        source_location: Some(node.to_source_location()),
+                    }),
+                };
+                expr = Some(match expr {
+                    None => add,
+                    Some(expr) => Expression::BinaryExpression {
+                        lhs: Box::new(expr),
+                        op: '+',
+                        rhs: Box::new(add),
+                    },
+                });
+                pos = end + 1;
+                literal_start_pos = pos;
+            }
+            let trailing = &string[literal_start_pos..];
+            if !trailing.is_empty() {
+                let trailing = Expression::StringLiteral(trailing.into());
+                expr = Some(match expr {
+                    None => trailing,
+                    Some(expr) => Expression::BinaryExpression {
+                        lhs: Box::new(expr),
+                        op: '+',
+                        rhs: Box::new(trailing),
+                    },
+                });
+            }
+            if arg_idx > 0 && pos_max > 0 {
+                ctx.diag.push_error(
+                    "Cannot mix positional and non-positional placeholder in format string".into(),
+                    &node,
+                );
+            } else if (pos_max == 0 && arg_idx != values.len()) || pos_max > values.len() {
+                let num = arg_idx.max(pos_max);
+                ctx.diag.push_error(
+                    format!(
+                        "Format string contains {num} placeholders, but {} values were given",
+                        values.len()
+                    ),
+                    &node,
+                );
+            }
+        }
+
+        Expression::FunctionCall {
+            function: BuiltinFunction::ParseMarkdown.into(),
+            arguments: vec![
+                expr.unwrap_or_else(|| Expression::default_value_for_type(&Type::String)),
+            ],
+            source_location: Some(node.to_source_location()),
         }
     }
 
@@ -840,18 +1028,26 @@ impl Expression {
         let plural =
             plural.unwrap_or((SmolStr::default(), Expression::NumberLiteral(1., Unit::None)));
 
-        let get_component_name = || {
-            ctx.component_scope
-                .first()
-                .and_then(|e| e.borrow().enclosing_component.upgrade())
-                .map(|c| c.id.clone())
-        };
+        let context = context.or_else(|| {
+            if !ctx.type_loader.is_some_and(|tl| {
+                tl.compiler_config.default_translation_context
+                    == crate::DefaultTranslationContext::None
+            }) {
+                // Get the component name as a default
+                ctx.component_scope
+                    .first()
+                    .and_then(|e| e.borrow().enclosing_component.upgrade())
+                    .map(|c| c.id.clone())
+            } else {
+                None
+            }
+        });
 
         Expression::FunctionCall {
             function: BuiltinFunction::Translate.into(),
             arguments: vec![
                 Expression::StringLiteral(string),
-                Expression::StringLiteral(context.or_else(get_component_name).unwrap_or_default()),
+                Expression::StringLiteral(context.unwrap_or_default()),
                 Expression::StringLiteral(domain.into()),
                 Expression::Array { element_ty: Type::String, values },
                 plural.1,
@@ -1103,7 +1299,7 @@ impl Expression {
             OperatorClass::ComparisonOp => {
                 let ty =
                     Self::common_target_type_for_type_list([lhs.ty(), rhs.ty()].iter().cloned());
-                if !matches!(op, '=' | '!') && !ty.as_unit_product().is_some() && ty != Type::String
+                if !matches!(op, '=' | '!') && ty.as_unit_product().is_none() && ty != Type::String
                 {
                     ctx.diag.push_error(format!("Values of type {ty} cannot be compared"), &node);
                 }
@@ -1136,7 +1332,7 @@ impl Expression {
                                 lhs: Box::new(lhs),
                                 rhs: Box::new(rhs),
                                 op,
-                            }
+                            };
                         }
                         (true, false) => {
                             return Expression::BinaryExpression {
@@ -1147,7 +1343,7 @@ impl Expression {
                                     ctx.diag,
                                 )),
                                 op,
-                            }
+                            };
                         }
                         (false, true) => {
                             return Expression::BinaryExpression {
@@ -1158,7 +1354,7 @@ impl Expression {
                                 )),
                                 rhs: Box::new(rhs),
                                 op,
-                            }
+                            };
                         }
                         (false, false) => Type::Float32,
                     }
@@ -1275,9 +1471,7 @@ impl Expression {
             .collect();
         let ty = Rc::new(Struct {
             fields: values.iter().map(|(k, v)| (k.clone(), v.ty())).collect(),
-            name: None,
-            node: None,
-            rust_attributes: None,
+            name: StructName::None,
         });
         Expression::Struct { ty, values }
     }
@@ -1355,14 +1549,8 @@ impl Expression {
                             }
                         }
                         Type::Struct(Rc::new(Struct {
-                            name: result.name.as_ref().or(elem.name.as_ref()).cloned(),
+                            name: result.name.clone().or(elem.name.clone()),
                             fields,
-                            node: result.node.as_ref().or(elem.node.as_ref()).cloned(),
-                            rust_attributes: result
-                                .rust_attributes
-                                .as_ref()
-                                .or(elem.rust_attributes.as_ref())
-                                .cloned(),
                         }))
                     }
                     (Type::Array(lhs), Type::Array(rhs)) => Type::Array(if *lhs == Type::Void {
@@ -1409,7 +1597,7 @@ fn common_expression_type(true_expr: &Expression, false_expr: &Expression) -> Ty
     fn merge_struct(origin: &Struct, other: &Struct) -> Type {
         let mut fields = other.fields.clone();
         fields.extend(origin.fields.iter().map(|(k, v)| (k.clone(), v.clone())));
-        Rc::new(Struct { fields, name: None, node: None, rust_attributes: None }).into()
+        Rc::new(Struct { fields, name: StructName::None }).into()
     }
 
     if let Expression::Struct { ty, values } = true_expr {
@@ -1427,19 +1615,14 @@ fn common_expression_type(true_expr: &Expression, false_expr: &Expression) -> Ty
                     fields.insert(k.clone(), v.ty());
                 }
             }
-            return Type::Struct(Rc::new(Struct {
-                fields,
-                name: None,
-                node: None,
-                rust_attributes: None,
-            }));
+            return Type::Struct(Rc::new(Struct { fields, name: StructName::None }));
         } else if let Type::Struct(false_ty) = false_expr.ty() {
-            return merge_struct(&false_ty, &ty);
+            return merge_struct(&false_ty, ty);
         }
-    } else if let Expression::Struct { ty, .. } = false_expr {
-        if let Type::Struct(true_ty) = true_expr.ty() {
-            return merge_struct(&true_ty, &ty);
-        }
+    } else if let Expression::Struct { ty, .. } = false_expr
+        && let Type::Struct(true_ty) = true_expr.ty()
+    {
+        return merge_struct(&true_ty, ty);
     }
 
     if let Expression::Array { .. } = true_expr {
@@ -1448,10 +1631,10 @@ fn common_expression_type(true_expr: &Expression, false_expr: &Expression) -> Ty
         } else if let Type::Array(ty) = false_expr.ty() {
             return Type::Array(ty);
         }
-    } else if let Expression::Array { .. } = false_expr {
-        if let Type::Array(ty) = true_expr.ty() {
-            return Type::Array(ty);
-        }
+    } else if let Expression::Array { .. } = false_expr
+        && let Type::Array(ty) = true_expr.ty()
+    {
+        return Type::Array(ty);
     }
 
     Expression::common_target_type_for_type_list([true_expr.ty(), false_expr.ty()].into_iter())
@@ -1495,11 +1678,17 @@ fn lookup_qualified_name_node(
             for (prefix, e) in
                 [("self", ctx.component_scope.last()), ("root", ctx.component_scope.first())]
             {
-                if let Some(e) = e {
-                    if e.lookup(ctx, &first_str).is_some() {
-                        ctx.diag.push_error(format!("Unknown unqualified identifier '{0}'. Did you mean '{prefix}.{0}'?", first.text()), &node);
-                        return None;
-                    }
+                if let Some(e) = e
+                    && e.lookup(ctx, &first_str).is_some()
+                {
+                    ctx.diag.push_error(
+                        format!(
+                            "Unknown unqualified identifier '{0}'. Did you mean '{prefix}.{0}'?",
+                            first.text()
+                        ),
+                        &node,
+                    );
+                    return None;
                 }
             }
 
@@ -1626,7 +1815,10 @@ fn continue_lookup_within_element(
         ))))
     } else if let Type::Function(fun) = lookup_result.property_type {
         if lookup_result.property_visibility == PropertyVisibility::Private && !local_to_component {
-            let message = format!("The function '{}' is private. Annotate it with 'public' to make it accessible from other components", second.text());
+            let message = format!(
+                "The function '{}' is private. Annotate it with 'public' to make it accessible from other components",
+                second.text()
+            );
             if !lookup_result.is_local_to_component {
                 ctx.diag.push_error(message, &second);
             } else {
@@ -1662,10 +1854,10 @@ fn continue_lookup_within_element(
     } else {
         let mut err = |extra: &str| {
             let what = match &elem.borrow().base_type {
-                ElementType::Global => {
-                    let global = elem.borrow().enclosing_component.upgrade().unwrap();
-                    assert!(global.is_global());
-                    format!("'{}'", global.id)
+                ElementType::Global | ElementType::Interface => {
+                    let enclosing_type = elem.borrow().enclosing_component.upgrade().unwrap();
+                    assert!(enclosing_type.is_global() || enclosing_type.is_interface());
+                    format!("'{}'", enclosing_type.id)
                 }
                 ElementType::Component(c) => format!("Element '{}'", c.id),
                 ElementType::Builtin(b) => format!("Element '{}'", b.name),
@@ -1710,11 +1902,11 @@ fn maybe_lookup_object(
                 base = r;
             }
             None => {
-                if let Some(minus_pos) = next.text().find('-') {
-                    if base.lookup(ctx, &SmolStr::new(&next.text()[0..minus_pos])).is_some() {
-                        ctx.diag.push_error(format!("Cannot access the field '{}'. Use space before the '-' if you meant a subtraction", next.text()), &next);
-                        return None;
-                    }
+                if let Some(minus_pos) = next.text().find('-')
+                    && base.lookup(ctx, &SmolStr::new(&next.text()[0..minus_pos])).is_some()
+                {
+                    ctx.diag.push_error(format!("Cannot access the field '{}'. Use space before the '-' if you meant a subtraction", next.text()), &next);
+                    return None;
                 }
 
                 match base {
@@ -1750,7 +1942,10 @@ fn maybe_lookup_object(
                                     ) =>
                             {
                                 // usually something like `0..foo`
-                                format!(" of float. Range expressions are not supported in Slint, but you can use an integer as a model to repeat something multiple time. Eg: `for i in {}`", next.text())
+                                format!(
+                                    " of float. Range expressions are not supported in Slint, but you can use an integer as a model to repeat something multiple time. Eg: `for i in {}`",
+                                    next.text()
+                                )
                             }
 
                             ty => format!(" of {ty}"),
@@ -1777,134 +1972,127 @@ fn resolve_two_way_bindings(
     for component in doc.inner_components.iter() {
         recurse_elem_with_scope(
             &component.root_element,
-            ComponentScope(vec![]),
+            ComponentScope(Vec::new()),
             &mut |elem, scope| {
                 for (prop_name, binding) in &elem.borrow().bindings {
                     let mut binding = binding.borrow_mut();
                     if let Expression::Uncompiled(node) =
                         binding.expression.ignore_debug_hooks().clone()
+                        && let Some(n) = syntax_nodes::TwoWayBinding::new(node.clone())
                     {
-                        if let Some(n) = syntax_nodes::TwoWayBinding::new(node.clone()) {
-                            let lhs_lookup = elem.borrow().lookup_property(prop_name);
-                            if !lhs_lookup.is_valid() {
+                        let lhs_lookup = elem.borrow().lookup_property(prop_name);
+                        if !lhs_lookup.is_valid() {
+                            // An attempt to resolve this already failed when trying to resolve the property type
+                            assert!(diag.has_errors());
+                            continue;
+                        }
+                        let mut lookup_ctx = LookupCtx {
+                            property_name: Some(prop_name.as_str()),
+                            property_type: lhs_lookup.property_type.clone(),
+                            component_scope: &scope.0,
+                            diag,
+                            arguments: Vec::new(),
+                            type_register,
+                            type_loader: None,
+                            current_token: Some(node.clone().into()),
+                            local_variables: Vec::new(),
+                        };
+
+                        binding.expression = Expression::Invalid;
+
+                        if let Some(twb) = resolve_two_way_binding(n, &mut lookup_ctx) {
+                            let nr = twb.property.clone();
+                            binding.two_way_bindings.push(twb);
+
+                            nr.element()
+                                .borrow()
+                                .property_analysis
+                                .borrow_mut()
+                                .entry(nr.name().clone())
+                                .or_default()
+                                .is_linked = true;
+
+                            if matches!(
+                                lhs_lookup.property_visibility,
+                                PropertyVisibility::Private | PropertyVisibility::Output
+                            ) && !lhs_lookup.is_local_to_component
+                            {
+                                // invalid property assignment should have been reported earlier
+                                assert!(diag.has_errors() || elem.borrow().is_legacy_syntax);
+                                continue;
+                            }
+
+                            // Check the compatibility.
+                            let mut rhs_lookup = nr.element().borrow().lookup_property(nr.name());
+                            if rhs_lookup.property_type == Type::Invalid {
                                 // An attempt to resolve this already failed when trying to resolve the property type
                                 assert!(diag.has_errors());
                                 continue;
                             }
-                            let mut lookup_ctx = LookupCtx {
-                                property_name: Some(prop_name.as_str()),
-                                property_type: lhs_lookup.property_type.clone(),
-                                component_scope: &scope.0,
-                                diag,
-                                arguments: vec![],
-                                type_register,
-                                type_loader: None,
-                                current_token: Some(node.clone().into()),
-                                local_variables: vec![],
-                            };
+                            rhs_lookup.is_local_to_component &=
+                                lookup_ctx.is_local_element(&nr.element());
 
-                            binding.expression = Expression::Invalid;
-
-                            if let Some(twb) = resolve_two_way_binding(n, &mut lookup_ctx) {
-                                let nr = twb.property.clone();
-                                binding.two_way_bindings.push(twb);
-
-                                nr.element()
-                                    .borrow()
-                                    .property_analysis
-                                    .borrow_mut()
-                                    .entry(nr.name().clone())
-                                    .or_default()
-                                    .is_linked = true;
-
-                                if matches!(
+                            if !rhs_lookup.is_valid_for_assignment() {
+                                match (
                                     lhs_lookup.property_visibility,
-                                    PropertyVisibility::Private | PropertyVisibility::Output
-                                ) && !lhs_lookup.is_local_to_component
-                                {
-                                    // invalid property assignment should have been reported earlier
-                                    assert!(diag.has_errors() || elem.borrow().is_legacy_syntax);
-                                    continue;
-                                }
-
-                                // Check the compatibility.
-                                let mut rhs_lookup =
-                                    nr.element().borrow().lookup_property(nr.name());
-                                if rhs_lookup.property_type == Type::Invalid {
-                                    // An attempt to resolve this already failed when trying to resolve the property type
-                                    assert!(diag.has_errors());
-                                    continue;
-                                }
-                                rhs_lookup.is_local_to_component &=
-                                    lookup_ctx.is_local_element(&nr.element());
-
-                                if !rhs_lookup.is_valid_for_assignment() {
-                                    match (
-                                        lhs_lookup.property_visibility,
-                                        rhs_lookup.property_visibility,
-                                    ) {
-                                        (PropertyVisibility::Input, PropertyVisibility::Input)
-                                            if !lhs_lookup.is_local_to_component =>
-                                        {
-                                            assert!(rhs_lookup.is_local_to_component);
-                                            marked_linked_read_only(elem, prop_name);
-                                        }
-                                        (
-                                            PropertyVisibility::Output
-                                            | PropertyVisibility::Private,
-                                            PropertyVisibility::Output | PropertyVisibility::Input,
-                                        ) => {
-                                            assert!(lhs_lookup.is_local_to_component);
-                                            marked_linked_read_only(elem, prop_name);
-                                        }
-                                        (PropertyVisibility::Input, PropertyVisibility::Output)
-                                            if !lhs_lookup.is_local_to_component =>
-                                        {
-                                            assert!(!rhs_lookup.is_local_to_component);
-                                            marked_linked_read_only(elem, prop_name);
-                                        }
-                                        _ => {
-                                            if lookup_ctx.is_legacy_component() {
-                                                diag.push_warning(
-                                                    format!(
-                                                        "Link to a {} property is deprecated",
-                                                        rhs_lookup.property_visibility
-                                                    ),
-                                                    &node,
-                                                );
-                                            } else {
-                                                diag.push_error(
-                                                    format!(
-                                                        "Cannot link to a {} property",
-                                                        rhs_lookup.property_visibility
-                                                    ),
-                                                    &node,
-                                                )
-                                            }
-                                        }
-                                    }
-                                } else if !lhs_lookup.is_valid_for_assignment() {
-                                    if rhs_lookup.is_local_to_component
-                                        && rhs_lookup.property_visibility
-                                            == PropertyVisibility::InOut
+                                    rhs_lookup.property_visibility,
+                                ) {
+                                    (PropertyVisibility::Input, PropertyVisibility::Input)
+                                        if !lhs_lookup.is_local_to_component =>
                                     {
+                                        assert!(rhs_lookup.is_local_to_component);
+                                        marked_linked_read_only(elem, prop_name);
+                                    }
+                                    (
+                                        PropertyVisibility::Output | PropertyVisibility::Private,
+                                        PropertyVisibility::Output | PropertyVisibility::Input,
+                                    ) => {
+                                        assert!(lhs_lookup.is_local_to_component);
+                                        marked_linked_read_only(elem, prop_name);
+                                    }
+                                    (PropertyVisibility::Input, PropertyVisibility::Output)
+                                        if !lhs_lookup.is_local_to_component =>
+                                    {
+                                        assert!(!rhs_lookup.is_local_to_component);
+                                        marked_linked_read_only(elem, prop_name);
+                                    }
+                                    _ => {
                                         if lookup_ctx.is_legacy_component() {
-                                            debug_assert!(!diag.is_empty()); // warning should already be reported
-                                        } else {
-                                            diag.push_error(
-                                                "Cannot link input property".into(),
+                                            diag.push_warning(
+                                                format!(
+                                                    "Link to a {} property is deprecated",
+                                                    rhs_lookup.property_visibility
+                                                ),
                                                 &node,
                                             );
+                                        } else {
+                                            diag.push_error(
+                                                format!(
+                                                    "Cannot link to a {} property",
+                                                    rhs_lookup.property_visibility
+                                                ),
+                                                &node,
+                                            )
                                         }
-                                    } else if rhs_lookup.property_visibility
-                                        == PropertyVisibility::InOut
-                                    {
-                                        diag.push_warning("Linking input properties to input output properties is deprecated".into(), &node);
-                                        marked_linked_read_only(&nr.element(), nr.name());
-                                    } else {
-                                        // This is allowed, but then the rhs must also become read only.
-                                        marked_linked_read_only(&nr.element(), nr.name());
                                     }
+                                }
+                            } else if !lhs_lookup.is_valid_for_assignment() {
+                                if rhs_lookup.is_local_to_component
+                                    && rhs_lookup.property_visibility == PropertyVisibility::InOut
+                                {
+                                    if lookup_ctx.is_legacy_component() {
+                                        debug_assert!(!diag.is_empty()); // warning should already be reported
+                                    } else {
+                                        diag.push_error("Cannot link input property".into(), &node);
+                                    }
+                                } else if rhs_lookup.property_visibility
+                                    == PropertyVisibility::InOut
+                                {
+                                    diag.push_warning("Linking input properties to input output properties is deprecated".into(), &node);
+                                    marked_linked_read_only(&nr.element(), nr.name());
+                                } else {
+                                    // This is allowed, but then the rhs must also become read only.
+                                    marked_linked_read_only(&nr.element(), nr.name());
                                 }
                             }
                         }

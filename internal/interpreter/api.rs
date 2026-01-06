@@ -1,15 +1,17 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+use crate::dynamic_item_tree::{ErasedItemTreeBox, WindowOptions};
 use i_slint_compiler::langtype::Type as LangType;
+use i_slint_core::PathData;
 use i_slint_core::component_factory::ComponentFactory;
 #[cfg(feature = "internal")]
 use i_slint_core::component_factory::FactoryContext;
 use i_slint_core::graphics::euclid::approxeq::ApproxEq as _;
+use i_slint_core::items::*;
 use i_slint_core::model::{Model, ModelExt, ModelRc};
 #[cfg(feature = "internal")]
 use i_slint_core::window::WindowInner;
-use i_slint_core::{PathData, SharedVector};
 use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::future::Future;
@@ -19,15 +21,12 @@ use std::rc::Rc;
 #[doc(inline)]
 pub use i_slint_compiler::diagnostics::{Diagnostic, DiagnosticLevel};
 
-pub use i_slint_core::api::*;
-// keep in sync with api/rs/slint/lib.rs
 pub use i_slint_backend_selector::api::*;
-pub use i_slint_core::graphics::{
-    Brush, Color, Image, LoadImageError, Rgb8Pixel, Rgba8Pixel, RgbaColor, SharedPixelBuffer,
-};
-use i_slint_core::items::*;
+pub use i_slint_core::api::*;
 
-use crate::dynamic_item_tree::{ErasedItemTreeBox, WindowOptions};
+/// Argument of [`Compiler::set_default_translation_context()`]
+///
+pub use i_slint_compiler::DefaultTranslationContext;
 
 /// This enum represents the different public variants of the [`Value`] enum, without
 /// the contained values.
@@ -51,6 +50,8 @@ pub enum ValueType {
     Brush,
     /// Correspond to `image` type in .slint.
     Image,
+    /// Correspond to `styled-text` type in .slint.
+    StyledText,
     /// The type is not a public type but something internal.
     #[doc(hidden)]
     Other = -1,
@@ -75,6 +76,7 @@ impl From<LangType> for ValueType {
             LangType::Struct { .. } => Self::Struct,
             LangType::Void => Self::Void,
             LangType::Image => Self::Image,
+            LangType::StyledText => Self::StyledText,
             _ => Self::Other,
         }
     }
@@ -128,6 +130,10 @@ pub enum Value {
     #[doc(hidden)]
     /// Correspond to the `component-factory` type in .slint
     ComponentFactory(ComponentFactory) = 12,
+    /// Correspond to the `styled-text` type in .slint
+    StyledText(i_slint_core::api::StyledText) = 13,
+    #[doc(hidden)]
+    ArrayOfU16(SharedVector<u16>) = 14,
 }
 
 impl Value {
@@ -170,8 +176,12 @@ impl PartialEq for Value {
                 matches!(other, Value::EnumerationValue(rhs_name, rhs_value) if lhs_name == rhs_name && lhs_value == rhs_value)
             }
             Value::LayoutCache(lhs) => matches!(other, Value::LayoutCache(rhs) if lhs == rhs),
+            Value::ArrayOfU16(lhs) => matches!(other, Value::ArrayOfU16(rhs) if lhs == rhs),
             Value::ComponentFactory(lhs) => {
                 matches!(other, Value::ComponentFactory(rhs) if lhs == rhs)
+            }
+            Value::StyledText(lhs) => {
+                matches!(other, Value::StyledText(rhs) if lhs == rhs)
             }
         }
     }
@@ -197,6 +207,10 @@ impl std::fmt::Debug for Value {
             Value::EnumerationValue(n, v) => write!(f, "Value::EnumerationValue({n:?}, {v:?})"),
             Value::LayoutCache(v) => write!(f, "Value::LayoutCache({v:?})"),
             Value::ComponentFactory(factory) => write!(f, "Value::ComponentFactory({factory:?})"),
+            Value::StyledText(text) => write!(f, "Value::StyledText({text:?})"),
+            Value::ArrayOfU16(data) => {
+                write!(f, "Value::ArrayOfU16({data:?})")
+            }
         }
     }
 }
@@ -208,7 +222,7 @@ impl std::fmt::Debug for Value {
 /// means that `Value::Number` can be converted to / from each of the said rust types
 ///
 /// For `Value::Object` mapping to a rust `struct`, one can use [`declare_value_struct_conversion!`]
-/// And for `Value::EnumerationValue` which maps to a rust `enum`, one can use [`declare_value_struct_conversion!`]
+/// And for `Value::EnumerationValue` which maps to a rust `enum`, one can use [`declare_value_enum_conversion!`]
 macro_rules! declare_value_conversion {
     ( $value:ident => [$($ty:ty),*] ) => {
         $(
@@ -239,6 +253,8 @@ declare_value_conversion!(PathData => [PathData]);
 declare_value_conversion!(EasingCurve => [i_slint_core::animations::EasingCurve]);
 declare_value_conversion!(LayoutCache => [SharedVector<f32>] );
 declare_value_conversion!(ComponentFactory => [ComponentFactory] );
+declare_value_conversion!(StyledText => [i_slint_core::api::StyledText] );
+declare_value_conversion!(ArrayOfU16 => [SharedVector<u16>] );
 
 /// Implement From / TryFrom for Value that convert a `struct` to/from `Value::Struct`
 macro_rules! declare_value_struct_conversion {
@@ -271,7 +287,7 @@ macro_rules! declare_value_struct_conversion {
     ($(
         $(#[$struct_attr:meta])*
         struct $Name:ident {
-            @name = $inner_name:literal
+            @name = $inner_name:expr,
             export {
                 $( $(#[$pub_attr:meta])* $pub_field:ident : $pub_type:ty, )*
             }
@@ -565,7 +581,7 @@ impl Default for ComponentCompiler {
             i_slint_compiler::generator::OutputFormat::Interpreter,
         );
         config.components_to_generate = i_slint_compiler::ComponentSelection::LastExported;
-        Self { config, diagnostics: vec![] }
+        Self { config, diagnostics: Vec::new() }
     }
 }
 
@@ -630,8 +646,11 @@ impl ComponentCompiler {
     /// was not in place (i.e: load from the file system following the include paths)
     pub fn set_file_loader(
         &mut self,
-        file_loader_fallback: impl Fn(&Path) -> core::pin::Pin<Box<dyn Future<Output = Option<std::io::Result<String>>>>>
-            + 'static,
+        file_loader_fallback: impl Fn(
+            &Path,
+        ) -> core::pin::Pin<
+            Box<dyn Future<Output = Option<std::io::Result<String>>>>,
+        > + 'static,
     ) {
         self.config.open_import_fallback =
             Some(Rc::new(move |path| file_loader_fallback(Path::new(path.as_str()))));
@@ -782,6 +801,18 @@ impl Compiler {
         self.config.translation_domain = Some(domain);
     }
 
+    /// Unless explicitly specified with the `@tr("context" => ...)`, the default translation context is the component name.
+    /// Use this option with [`DefaultTranslationContext::None`] to disable the default translation context.
+    ///
+    /// The translation file must also not have context
+    /// (`--no-default-translation-context` argument of `slint-tr-extractor`)
+    pub fn set_default_translation_context(
+        &mut self,
+        default_translation_context: DefaultTranslationContext,
+    ) {
+        self.config.default_translation_context = default_translation_context;
+    }
+
     /// Sets the callback that will be invoked when loading imported .slint files. The specified
     /// `file_loader_callback` parameter will be called with a canonical file path as argument
     /// and is expected to return a future that, when resolved, provides the source code of the
@@ -791,8 +822,11 @@ impl Compiler {
     /// was not in place (i.e: load from the file system following the include paths)
     pub fn set_file_loader(
         &mut self,
-        file_loader_fallback: impl Fn(&Path) -> core::pin::Pin<Box<dyn Future<Output = Option<std::io::Result<String>>>>>
-            + 'static,
+        file_loader_fallback: impl Fn(
+            &Path,
+        ) -> core::pin::Pin<
+            Box<dyn Future<Output = Option<std::io::Result<String>>>>,
+        > + 'static,
     ) {
         self.config.open_import_fallback =
             Some(Rc::new(move |path| file_loader_fallback(Path::new(path.as_str()))));
@@ -1090,14 +1124,14 @@ impl ComponentDefinition {
         global_name: &str,
     ) -> Option<
         impl Iterator<
-                Item = (
-                    String,
-                    (
-                        i_slint_compiler::langtype::Type,
-                        i_slint_compiler::object_tree::PropertyVisibility,
-                    ),
+            Item = (
+                String,
+                (
+                    i_slint_compiler::langtype::Type,
+                    i_slint_compiler::object_tree::PropertyVisibility,
                 ),
-            > + '_,
+            ),
+        > + '_,
     > {
         // We create here a 'static guard, because unfortunately the returned type would be restricted to the guard lifetime
         // which is not required, but this is safe because there is only one instance of the unerased type
@@ -1386,7 +1420,7 @@ impl ComponentInstance {
         generativity::make_guard!(guard);
         let comp = self.inner.unerase(guard);
         comp.description()
-            .get_global(comp.borrow(), &&normalize_identifier(global))
+            .get_global(comp.borrow(), &normalize_identifier(global))
             .map_err(|()| GetPropertyError::NoSuchProperty)? // FIXME: should there be a NoSuchGlobal error?
             .as_ref()
             .get_property(&normalize_identifier(property))
@@ -1403,10 +1437,10 @@ impl ComponentInstance {
         generativity::make_guard!(guard);
         let comp = self.inner.unerase(guard);
         comp.description()
-            .get_global(comp.borrow(), &&normalize_identifier(global))
+            .get_global(comp.borrow(), &normalize_identifier(global))
             .map_err(|()| SetPropertyError::NoSuchProperty)? // FIXME: should there be a NoSuchGlobal error?
             .as_ref()
-            .set_property(&&normalize_identifier(property), value)
+            .set_property(&normalize_identifier(property), value)
     }
 
     /// Set a handler for the callback in the exported global singleton. A callback with that
@@ -2083,7 +2117,7 @@ fn lang_type_to_value_type() {
     assert_eq!(ValueType::from(LangType::PhysicalLength), ValueType::Number);
     assert_eq!(ValueType::from(LangType::LogicalLength), ValueType::Number);
     assert_eq!(ValueType::from(LangType::Percent), ValueType::Number);
-    assert_eq!(ValueType::from(LangType::UnitProduct(vec![])), ValueType::Number);
+    assert_eq!(ValueType::from(LangType::UnitProduct(Vec::new())), ValueType::Number);
     assert_eq!(ValueType::from(LangType::String), ValueType::String);
     assert_eq!(ValueType::from(LangType::Color), ValueType::Brush);
     assert_eq!(ValueType::from(LangType::Brush), ValueType::Brush);
@@ -2092,9 +2126,7 @@ fn lang_type_to_value_type() {
     assert_eq!(
         ValueType::from(LangType::Struct(Rc::new(LangStruct {
             fields: BTreeMap::default(),
-            name: None,
-            node: None,
-            rust_attributes: None
+            name: i_slint_compiler::langtype::StructName::None,
         }))),
         ValueType::Struct
     );

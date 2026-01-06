@@ -12,8 +12,8 @@ use crate::langtype::Type;
 use crate::layout::*;
 use crate::object_tree::*;
 use crate::typeloader::TypeLoader;
-use crate::typeregister::{layout_info_type, TypeRegister};
-use smol_str::{format_smolstr, SmolStr};
+use crate::typeregister::{TypeRegister, layout_info_type};
+use smol_str::{SmolStr, format_smolstr};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -49,15 +49,15 @@ pub fn lower_layouts(
         &Option::default(),
         &mut |elem, parent_layout_type| {
             let component = elem.borrow().enclosing_component.upgrade().unwrap();
-            let layout_type = lower_element_layout(
+
+            lower_element_layout(
                 &component,
                 elem,
                 &type_loader.global_type_registry.borrow(),
                 style_metrics,
+                parent_layout_type,
                 diag,
-            );
-            check_no_layout_properties(elem, &layout_type, &parent_layout_type, diag);
-            layout_type
+            )
         },
     );
 }
@@ -93,26 +93,29 @@ fn lower_element_layout(
     elem: &ElementRc,
     type_register: &TypeRegister,
     style_metrics: &Rc<Component>,
+    parent_layout_type: &Option<SmolStr>,
     diag: &mut BuildDiagnostics,
 ) -> Option<SmolStr> {
-    let base_type = if let ElementType::Builtin(base_type) = &elem.borrow().base_type {
-        base_type.clone()
+    let layout_type = if let ElementType::Builtin(base_type) = &elem.borrow().base_type {
+        Some(base_type.name.clone())
     } else {
-        return None;
+        None
     };
-    match base_type.name.as_str() {
+
+    check_no_layout_properties(elem, &layout_type, parent_layout_type, diag);
+
+    layout_type.as_ref()?;
+
+    match layout_type.as_ref().unwrap().as_str() {
         "Row" => {
-            // We shouldn't lower layout if we have a Row in there. Unless the Row is the root of a repeated item,
-            // in which case another error has been reported
-            assert!(
-                diag.has_errors()
-                    && Rc::ptr_eq(&component.root_element, elem)
-                    && component
-                        .parent_element
-                        .upgrade()
-                        .is_some_and(|e| e.borrow().repeated.is_some()),
-                "Error should have been caught at element lookup time"
+            if Rc::ptr_eq(&component.root_element, elem)
+                && component.parent_element.upgrade().is_some_and(|e| e.borrow().repeated.is_some())
+            {
+                diag.push_error(
+                "'if' or 'for' expressions are not currently supported for Row elements in grid layouts".to_string(),
+                &*elem.borrow(),
             );
+            }
             return None;
         }
         "GridLayout" => lower_grid_layout(component, elem, diag, type_register),
@@ -121,7 +124,7 @@ fn lower_element_layout(
         "Dialog" => {
             lower_dialog_layout(elem, style_metrics, diag);
             // return now, the Dialog stays in the tree as a Dialog
-            return Some(base_type.name.clone());
+            return layout_type;
         }
         _ => return None,
     };
@@ -140,7 +143,27 @@ fn lower_element_layout(
         }
     }
 
-    Some(base_type.name.clone())
+    layout_type
+}
+
+// to detect mixing auto and non-literal expressions in row/col values
+#[derive(Debug, PartialEq, Eq)]
+enum RowColExpressionType {
+    Auto, // not specified
+    Literal,
+    RuntimeExpression,
+}
+impl RowColExpressionType {
+    fn from_option_expr(
+        expr: &Option<Expression>,
+        is_number_literal: bool,
+    ) -> RowColExpressionType {
+        match expr {
+            None => RowColExpressionType::Auto,
+            Some(_) if is_number_literal => RowColExpressionType::Literal,
+            Some(_) => RowColExpressionType::RuntimeExpression,
+        }
+    }
 }
 
 fn lower_grid_layout(
@@ -153,8 +176,14 @@ fn lower_grid_layout(
         elems: Default::default(),
         geometry: LayoutGeometry::new(grid_layout_element),
         dialog_button_roles: None,
+        uses_auto: false,
     };
 
+    let layout_organized_data_prop = create_new_prop(
+        grid_layout_element,
+        SmolStr::new_static("layout-organized-data"),
+        Type::ArrayOfU16,
+    );
     let layout_cache_prop_h = create_new_prop(
         grid_layout_element,
         SmolStr::new_static("layout-cache-h"),
@@ -176,11 +205,10 @@ fn lower_grid_layout(
         layout_info_type().into(),
     );
 
-    let mut row = 0;
-    let mut col = 0;
-
     let layout_children = std::mem::take(&mut grid_layout_element.borrow_mut().children);
     let mut collected_children = Vec::new();
+    let mut new_row = false; // true until the first child of a Row, or the first item after an empty Row
+    let mut numbering_type: Option<RowColExpressionType> = None;
     for layout_child in layout_children {
         let is_row = if let ElementType::Builtin(be) = &layout_child.borrow().base_type {
             be.name == "Row"
@@ -188,26 +216,28 @@ fn lower_grid_layout(
             false
         };
         if is_row {
-            if col > 0 {
-                row += 1;
-                col = 0;
-            }
+            new_row = true;
             let row_children = std::mem::take(&mut layout_child.borrow_mut().children);
             for x in row_children {
+                if let Some(binding) = x.borrow_mut().bindings.get("row") {
+                    diag.push_error(
+                        "The 'row' property cannot be used for elements inside a Row".to_string(),
+                        &*binding.borrow(),
+                    );
+                }
                 grid.add_element(
                     &x,
-                    (&mut row, &mut col),
+                    new_row,
                     &layout_cache_prop_h,
                     &layout_cache_prop_v,
+                    &layout_organized_data_prop,
+                    &mut numbering_type,
                     diag,
                 );
-                col += 1;
                 collected_children.push(x);
+                new_row = false;
             }
-            if col > 0 {
-                row += 1;
-                col = 0;
-            }
+            new_row = true; // the end of a Row means the next item is the first of a new row
             if layout_child.borrow().has_popup_child {
                 // We need to keep that element otherwise the popup will malfunction
                 layout_child.borrow_mut().base_type = type_register.empty_type();
@@ -218,21 +248,37 @@ fn lower_grid_layout(
         } else {
             grid.add_element(
                 &layout_child,
-                (&mut row, &mut col),
+                new_row,
                 &layout_cache_prop_h,
                 &layout_cache_prop_v,
+                &layout_organized_data_prop,
+                &mut numbering_type,
                 diag,
             );
-            col += 1;
             collected_children.push(layout_child);
+            new_row = false;
         }
     }
     grid_layout_element.borrow_mut().children = collected_children;
+    grid.uses_auto = numbering_type == Some(RowColExpressionType::Auto);
     let span = grid_layout_element.borrow().to_source_location();
+
+    layout_organized_data_prop.element().borrow_mut().bindings.insert(
+        layout_organized_data_prop.name().clone(),
+        BindingExpression::new_with_span(
+            Expression::OrganizeGridLayout(grid.clone()),
+            span.clone(),
+        )
+        .into(),
+    );
     layout_cache_prop_h.element().borrow_mut().bindings.insert(
         layout_cache_prop_h.name().clone(),
         BindingExpression::new_with_span(
-            Expression::SolveLayout(Layout::GridLayout(grid.clone()), Orientation::Horizontal),
+            Expression::SolveGridLayout {
+                layout_organized_data_prop: layout_organized_data_prop.clone(),
+                layout: grid.clone(),
+                orientation: Orientation::Horizontal,
+            },
             span.clone(),
         )
         .into(),
@@ -240,7 +286,11 @@ fn lower_grid_layout(
     layout_cache_prop_v.element().borrow_mut().bindings.insert(
         layout_cache_prop_v.name().clone(),
         BindingExpression::new_with_span(
-            Expression::SolveLayout(Layout::GridLayout(grid.clone()), Orientation::Vertical),
+            Expression::SolveGridLayout {
+                layout_organized_data_prop: layout_organized_data_prop.clone(),
+                layout: grid.clone(),
+                orientation: Orientation::Vertical,
+            },
             span.clone(),
         )
         .into(),
@@ -248,10 +298,11 @@ fn lower_grid_layout(
     layout_info_prop_h.element().borrow_mut().bindings.insert(
         layout_info_prop_h.name().clone(),
         BindingExpression::new_with_span(
-            Expression::ComputeLayoutInfo(
-                Layout::GridLayout(grid.clone()),
-                Orientation::Horizontal,
-            ),
+            Expression::ComputeGridLayoutInfo {
+                layout_organized_data_prop: layout_organized_data_prop.clone(),
+                layout: grid.clone(),
+                orientation: Orientation::Horizontal,
+            },
             span.clone(),
         )
         .into(),
@@ -259,7 +310,11 @@ fn lower_grid_layout(
     layout_info_prop_v.element().borrow_mut().bindings.insert(
         layout_info_prop_v.name().clone(),
         BindingExpression::new_with_span(
-            Expression::ComputeLayoutInfo(Layout::GridLayout(grid.clone()), Orientation::Vertical),
+            Expression::ComputeGridLayoutInfo {
+                layout_organized_data_prop: layout_organized_data_prop.clone(),
+                layout: grid.clone(),
+                orientation: Orientation::Vertical,
+            },
             span,
         )
         .into(),
@@ -275,41 +330,94 @@ impl GridLayout {
     fn add_element(
         &mut self,
         item_element: &ElementRc,
-        (row, col): (&mut u16, &mut u16),
+        new_row: bool,
         layout_cache_prop_h: &NamedReference,
         layout_cache_prop_v: &NamedReference,
+        organized_data_prop: &NamedReference,
+        numbering_type: &mut Option<RowColExpressionType>,
         diag: &mut BuildDiagnostics,
     ) {
-        let mut get_const_value = |name: &str| {
-            item_element
-                .borrow_mut()
-                .bindings
-                .get(name)
-                .and_then(|e| eval_const_expr(&e.borrow().expression, name, &*e.borrow(), diag))
-        };
-        let colspan = get_const_value("colspan").unwrap_or(1);
-        let rowspan = get_const_value("rowspan").unwrap_or(1);
-        if let Some(r) = get_const_value("row") {
-            *row = r;
-            *col = 0;
-        }
-        if let Some(c) = get_const_value("col") {
-            *col = c;
+        // Some compile-time checks
+        {
+            let mut check_expr = |name: &str| {
+                let mut is_number_literal = false;
+                let expr = item_element.borrow_mut().bindings.get(name).map(|e| {
+                    let expr = &e.borrow().expression;
+                    is_number_literal =
+                        check_number_literal_is_positive_integer(expr, name, &*e.borrow(), diag);
+                    expr.clone()
+                });
+                (expr, is_number_literal)
+            };
+
+            let (row_expr, row_is_number_literal) = check_expr("row");
+            let (col_expr, col_is_number_literal) = check_expr("col");
+            check_expr("rowspan");
+            check_expr("colspan");
+
+            let mut check_numbering_consistency =
+                |expr_type: RowColExpressionType, prop_name: &str| {
+                    if !matches!(expr_type, RowColExpressionType::Literal) {
+                        if let Some(current_numbering_type) = numbering_type {
+                            if *current_numbering_type != expr_type {
+                                let element_ref = item_element.borrow();
+                                let span: &dyn Spanned =
+                                    if let Some(binding) = element_ref.bindings.get(prop_name) {
+                                        &*binding.borrow()
+                                    } else {
+                                        &*element_ref
+                                    };
+                                diag.push_error(
+                                    format!("Cannot mix auto-numbering and runtime expressions for the '{prop_name}' property"),
+                                    span,
+                                );
+                            }
+                        } else {
+                            // Store the first auto or runtime expression case we see
+                            *numbering_type = Some(expr_type);
+                        }
+                    }
+                };
+
+            let row_expr_type =
+                RowColExpressionType::from_option_expr(&row_expr, row_is_number_literal);
+            check_numbering_consistency(row_expr_type, "row");
+
+            let col_expr_type =
+                RowColExpressionType::from_option_expr(&col_expr, col_is_number_literal);
+            check_numbering_consistency(col_expr_type, "col");
         }
 
-        let result = self.add_element_with_coord(
+        let propref = |name: &'static str| -> Option<RowColExpr> {
+            let nr = crate::layout::binding_reference(item_element, name).map(|nr| {
+                // similar to adjust_references in repeater_component.rs (which happened before these references existed)
+                let e = nr.element();
+                let mut nr = nr.clone();
+                if e.borrow().repeated.is_some()
+                    && let crate::langtype::ElementType::Component(c) = e.borrow().base_type.clone()
+                {
+                    nr = NamedReference::new(&c.root_element, nr.name().clone())
+                };
+                nr
+            });
+            nr.map(RowColExpr::Named)
+        };
+
+        let row_expr = propref("row");
+        let col_expr = propref("col");
+        let rowspan_expr = propref("rowspan");
+        let colspan_expr = propref("colspan");
+
+        self.add_element_with_coord_as_expr(
             item_element,
-            (*row, *col),
-            (rowspan, colspan),
+            new_row,
+            (&row_expr, &col_expr),
+            (&rowspan_expr, &colspan_expr),
             layout_cache_prop_h,
             layout_cache_prop_v,
+            organized_data_prop,
             diag,
         );
-        if let Some(layout_item) = result {
-            let e = &layout_item.elem;
-            insert_fake_property(e, "row", Expression::NumberLiteral(*row as f64, Unit::None));
-            insert_fake_property(e, "col", Expression::NumberLiteral(*col as f64, Unit::None));
-        }
     }
 
     fn add_element_with_coord(
@@ -319,39 +427,93 @@ impl GridLayout {
         (rowspan, colspan): (u16, u16),
         layout_cache_prop_h: &NamedReference,
         layout_cache_prop_v: &NamedReference,
+        organized_data_prop: &NamedReference,
         diag: &mut BuildDiagnostics,
-    ) -> Option<CreateLayoutItemResult> {
+    ) {
+        self.add_element_with_coord_as_expr(
+            item_element,
+            false, // new_row
+            (&Some(RowColExpr::Literal(row)), &Some(RowColExpr::Literal(col))),
+            (&Some(RowColExpr::Literal(rowspan)), &Some(RowColExpr::Literal(colspan))),
+            layout_cache_prop_h,
+            layout_cache_prop_v,
+            organized_data_prop,
+            diag,
+        )
+    }
+
+    fn add_element_with_coord_as_expr(
+        &mut self,
+        item_element: &ElementRc,
+        new_row: bool,
+        (row_expr, col_expr): (&Option<RowColExpr>, &Option<RowColExpr>),
+        (rowspan_expr, colspan_expr): (&Option<RowColExpr>, &Option<RowColExpr>),
+        layout_cache_prop_h: &NamedReference,
+        layout_cache_prop_v: &NamedReference,
+        organized_data_prop: &NamedReference,
+        diag: &mut BuildDiagnostics,
+    ) {
         let index = self.elems.len();
         let result = create_layout_item(item_element, diag);
         if let Some(ref layout_item) = result {
-            if layout_item.repeater_index.is_some() {
-                diag.push_error(
-                    "'if' or 'for' expressions are not currently supported in grid layouts"
-                        .to_string(),
-                    &*item_element.borrow(),
-                );
-                return None;
-            }
-
+            let rep_idx = &layout_item.repeater_index;
             let e = &layout_item.elem;
-            set_prop_from_cache(e, "x", layout_cache_prop_h, index * 2, &None, diag);
+            set_prop_from_cache(e, "x", layout_cache_prop_h, index * 2, rep_idx, 2, diag);
             if !layout_item.item.constraints.fixed_width {
-                set_prop_from_cache(e, "width", layout_cache_prop_h, index * 2 + 1, &None, diag);
+                set_prop_from_cache(
+                    e,
+                    "width",
+                    layout_cache_prop_h,
+                    index * 2 + 1,
+                    rep_idx,
+                    2,
+                    diag,
+                );
             }
-            set_prop_from_cache(e, "y", layout_cache_prop_v, index * 2, &None, diag);
+            set_prop_from_cache(e, "y", layout_cache_prop_v, index * 2, rep_idx, 2, diag);
             if !layout_item.item.constraints.fixed_height {
-                set_prop_from_cache(e, "height", layout_cache_prop_v, index * 2 + 1, &None, diag);
+                set_prop_from_cache(
+                    e,
+                    "height",
+                    layout_cache_prop_v,
+                    index * 2 + 1,
+                    rep_idx,
+                    2,
+                    diag,
+                );
             }
 
-            self.elems.push(GridLayoutElement {
-                col,
-                row,
-                colspan,
-                rowspan,
+            let org_index = index * 4;
+            if col_expr.is_none() {
+                set_prop_from_cache(e, "col", organized_data_prop, org_index, rep_idx, 4, diag);
+            }
+            if row_expr.is_none() {
+                set_prop_from_cache(e, "row", organized_data_prop, org_index + 2, rep_idx, 4, diag);
+            }
+
+            let expr_or_default = |expr: &Option<RowColExpr>, default: RowColExpr| -> RowColExpr {
+                match expr {
+                    Some(RowColExpr::Literal(v)) => RowColExpr::Literal(*v),
+                    Some(RowColExpr::Named(nr)) => RowColExpr::Named(nr.clone()),
+                    Some(RowColExpr::Auto) => RowColExpr::Auto,
+                    None => default,
+                }
+            };
+
+            let grid_layout_cell = Rc::new(RefCell::new(GridLayoutCell {
+                new_row,
+                col_expr: expr_or_default(col_expr, RowColExpr::Auto),
+                row_expr: expr_or_default(row_expr, RowColExpr::Auto),
+                colspan_expr: expr_or_default(colspan_expr, RowColExpr::Literal(1)),
+                rowspan_expr: expr_or_default(rowspan_expr, RowColExpr::Literal(1)),
+            }));
+            let grid_layout_element = GridLayoutElement {
+                cell: grid_layout_cell.clone(),
                 item: layout_item.item.clone(),
-            });
+            };
+            layout_item.elem.borrow_mut().grid_layout_cell = Some(grid_layout_cell);
+            self.elems.push(grid_layout_element);
         }
-        result
     }
 }
 
@@ -422,7 +584,7 @@ fn lower_box_layout(
                 }
             };
             let actual_elem = &item.elem;
-            set_prop_from_cache(actual_elem, pos, &layout_cache_prop, index, rep_idx, diag);
+            set_prop_from_cache(actual_elem, pos, &layout_cache_prop, index, rep_idx, 2, diag);
             if !fixed_size {
                 set_prop_from_cache(
                     actual_elem,
@@ -430,6 +592,7 @@ fn lower_box_layout(
                     &layout_cache_prop,
                     index + 1,
                     rep_idx,
+                    2,
                     diag,
                 );
             }
@@ -489,6 +652,7 @@ fn lower_dialog_layout(
         elems: Default::default(),
         geometry: LayoutGeometry::new(dialog_element),
         dialog_button_roles: None,
+        uses_auto: true,
     };
     let metrics = &style_metrics.root_element;
     grid.geometry
@@ -516,6 +680,11 @@ fn lower_dialog_layout(
         .vertical
         .get_or_insert(NamedReference::new(metrics, SmolStr::new_static("layout-spacing")));
 
+    let layout_organized_data_prop = create_new_prop(
+        dialog_element,
+        SmolStr::new_static("layout-organized-data"),
+        Type::ArrayOfU16,
+    );
     let layout_cache_prop_h =
         create_new_prop(dialog_element, SmolStr::new_static("layout-cache-h"), Type::LayoutCache);
     let layout_cache_prop_v =
@@ -532,7 +701,7 @@ fn lower_dialog_layout(
     );
 
     let mut main_widget = None;
-    let mut button_roles = vec![];
+    let mut button_roles = Vec::new();
     let mut seen_buttons = HashSet::new();
     let layout_children = std::mem::take(&mut dialog_element.borrow_mut().children);
     for layout_child in &layout_children {
@@ -646,6 +815,7 @@ fn lower_dialog_layout(
                 (1, 1),
                 &layout_cache_prop_h,
                 &layout_cache_prop_v,
+                &layout_organized_data_prop,
                 diag,
             );
         } else if main_widget.is_some() {
@@ -666,6 +836,7 @@ fn lower_dialog_layout(
             (1, button_roles.len() as u16 + 1),
             &layout_cache_prop_h,
             &layout_cache_prop_v,
+            &layout_organized_data_prop,
             diag,
         );
     } else {
@@ -677,10 +848,22 @@ fn lower_dialog_layout(
     grid.dialog_button_roles = Some(button_roles);
 
     let span = dialog_element.borrow().to_source_location();
+    layout_organized_data_prop.element().borrow_mut().bindings.insert(
+        layout_organized_data_prop.name().clone(),
+        BindingExpression::new_with_span(
+            Expression::OrganizeGridLayout(grid.clone()),
+            span.clone(),
+        )
+        .into(),
+    );
     layout_cache_prop_h.element().borrow_mut().bindings.insert(
         layout_cache_prop_h.name().clone(),
         BindingExpression::new_with_span(
-            Expression::SolveLayout(Layout::GridLayout(grid.clone()), Orientation::Horizontal),
+            Expression::SolveGridLayout {
+                layout_organized_data_prop: layout_organized_data_prop.clone(),
+                layout: grid.clone(),
+                orientation: Orientation::Horizontal,
+            },
             span.clone(),
         )
         .into(),
@@ -688,7 +871,11 @@ fn lower_dialog_layout(
     layout_cache_prop_v.element().borrow_mut().bindings.insert(
         layout_cache_prop_v.name().clone(),
         BindingExpression::new_with_span(
-            Expression::SolveLayout(Layout::GridLayout(grid.clone()), Orientation::Vertical),
+            Expression::SolveGridLayout {
+                layout_organized_data_prop: layout_organized_data_prop.clone(),
+                layout: grid.clone(),
+                orientation: Orientation::Vertical,
+            },
             span.clone(),
         )
         .into(),
@@ -696,10 +883,11 @@ fn lower_dialog_layout(
     layout_info_prop_h.element().borrow_mut().bindings.insert(
         layout_info_prop_h.name().clone(),
         BindingExpression::new_with_span(
-            Expression::ComputeLayoutInfo(
-                Layout::GridLayout(grid.clone()),
-                Orientation::Horizontal,
-            ),
+            Expression::ComputeGridLayoutInfo {
+                layout_organized_data_prop: layout_organized_data_prop.clone(),
+                layout: grid.clone(),
+                orientation: Orientation::Horizontal,
+            },
             span.clone(),
         )
         .into(),
@@ -707,7 +895,11 @@ fn lower_dialog_layout(
     layout_info_prop_v.element().borrow_mut().bindings.insert(
         layout_info_prop_v.name().clone(),
         BindingExpression::new_with_span(
-            Expression::ComputeLayoutInfo(Layout::GridLayout(grid.clone()), Orientation::Vertical),
+            Expression::ComputeGridLayoutInfo {
+                layout_organized_data_prop: layout_organized_data_prop.clone(),
+                layout: grid.clone(),
+                orientation: Orientation::Vertical,
+            },
             span,
         )
         .into(),
@@ -785,21 +977,13 @@ fn create_layout_item(
     })
 }
 
-fn insert_fake_property(elem: &ElementRc, prop: &str, expr: Expression) {
-    let mut elem_mut = elem.borrow_mut();
-    let span = elem_mut.to_source_location();
-    if let std::collections::btree_map::Entry::Vacant(e) = elem_mut.bindings.entry(prop.into()) {
-        let binding = BindingExpression::new_with_span(expr, span);
-        e.insert(binding.into());
-    }
-}
-
 fn set_prop_from_cache(
     elem: &ElementRc,
     prop: &str,
     layout_cache_prop: &NamedReference,
     index: usize,
     repeater_index: &Option<Expression>,
+    entries_per_item: usize,
     diag: &mut BuildDiagnostics,
 ) {
     let old = elem.borrow_mut().bindings.insert(
@@ -809,6 +993,7 @@ fn set_prop_from_cache(
                 layout_cache_prop: layout_cache_prop.clone(),
                 index,
                 repeater_index: repeater_index.as_ref().map(|x| Box::new(x.clone())),
+                entries_per_item,
             },
             layout_cache_prop.element().borrow().to_source_location(),
         )
@@ -822,30 +1007,40 @@ fn set_prop_from_cache(
     }
 }
 
-fn eval_const_expr(
+// If it's a number literal, it must be a positive integer
+// But also allow any other kind of expression
+// Returns true for literals, false for other kinds of expressions
+fn check_number_literal_is_positive_integer(
     expression: &Expression,
     name: &str,
     span: &dyn crate::diagnostics::Spanned,
     diag: &mut BuildDiagnostics,
-) -> Option<u16> {
+) -> bool {
     match super::ignore_debug_hooks(expression) {
         Expression::NumberLiteral(v, Unit::None) => {
-            if *v < 0. || *v > u16::MAX as f64 || !v.trunc().approx_eq(v) {
+            if *v > u16::MAX as f64 || !v.trunc().approx_eq(v) {
                 diag.push_error(format!("'{name}' must be a positive integer"), span);
-                None
-            } else {
-                Some(*v as u16)
             }
+            true
         }
-        Expression::Cast { from, .. } => eval_const_expr(from, name, span, diag),
-        _ => {
-            diag.push_error(format!("'{name}' must be an integer literal"), span);
-            None
+        Expression::UnaryOp { op: '-', sub } => {
+            if let Expression::NumberLiteral(_, Unit::None) = super::ignore_debug_hooks(sub) {
+                diag.push_error(format!("'{name}' must be a positive integer"), span);
+            }
+            true
         }
+        Expression::Cast { from, .. } => {
+            check_number_literal_is_positive_integer(from, name, span, diag)
+        }
+        _ => false,
     }
 }
 
-/// Checks that there is grid-layout specific properties left
+fn recognized_layout_types() -> &'static [&'static str] {
+    &["Row", "GridLayout", "HorizontalLayout", "VerticalLayout", "Dialog"]
+}
+
+/// Checks that there are no grid-layout specific properties used wrongly
 fn check_no_layout_properties(
     item: &ElementRc,
     layout_type: &Option<SmolStr>,
@@ -867,16 +1062,28 @@ fn check_no_layout_properties(
                 &*expr.borrow(),
             );
         }
-        if layout_type.is_none()
+        if (layout_type.is_none()
+            || !recognized_layout_types().contains(&layout_type.as_ref().unwrap().as_str()))
             && matches!(
                 prop.as_ref(),
                 "padding" | "padding-left" | "padding-right" | "padding-top" | "padding-bottom"
             )
+            && !check_inherits_layout(item)
         {
             diag.push_warning(
                 format!("{prop} only has effect on layout elements"),
                 &*expr.borrow(),
             );
+        }
+    }
+
+    /// Check if the element inherits from a layout that was lowered
+    fn check_inherits_layout(item: &ElementRc) -> bool {
+        if let ElementType::Component(c) = &item.borrow().base_type {
+            c.root_element.borrow().debug.iter().any(|d| d.layout.is_some())
+                || check_inherits_layout(&c.root_element)
+        } else {
+            false
         }
     }
 }

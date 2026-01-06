@@ -1,4 +1,3 @@
-<!-- Copyright © SixtyFPS GmbH <info@slint.dev> ; SPDX-License-Identifier: MIT -->
 <!-- cSpell: ignore ccmake dslint femtovg -->
 
 # Set Up Development Environment
@@ -138,10 +137,6 @@ compile time. You can enable or disable back-ends using the
 `SLINT_FEATURE_BACKEND_` features. For example, to exclude the winit back-end,
 you would disable the `SLINT_FEATURE_BACKEND_WINIT` option in your CMake
 project configuration.
-
-The winit back-end needs a renderer. `SLINT_FEATURE_RENDERER_FEMTOVG` and
-`SLINT_FEATURE_RENDERER_SKIA` are the only stable renderers, the other ones are
-experimental.
 
 ### Cross-compiling
 

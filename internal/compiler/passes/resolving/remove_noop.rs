@@ -61,9 +61,9 @@ fn without_side_effects(expression: &Expression) -> bool {
         Expression::RepeaterModelReference { .. } => true,
         Expression::StoreLocalVariable { .. } => false,
         Expression::ReadLocalVariable { .. } => true,
-        Expression::StructFieldAccess { base, name: _ } => without_side_effects(&*base),
+        Expression::StructFieldAccess { base, name: _ } => without_side_effects(base),
         Expression::ArrayIndex { array, index } => {
-            without_side_effects(&*array) && without_side_effects(&*index)
+            without_side_effects(array) && without_side_effects(index)
         }
         // Note: This assumes that the cast itself does not have any side effects, which may not be
         // the case if custom casting rules are implemented.
@@ -74,16 +74,16 @@ fn without_side_effects(expression: &Expression) -> bool {
         Expression::FunctionCall { .. } => false,
         Expression::SelfAssignment { .. } => false,
         Expression::BinaryExpression { lhs, rhs, .. } => {
-            without_side_effects(&*lhs) && without_side_effects(&*rhs)
+            without_side_effects(lhs) && without_side_effects(rhs)
         }
-        Expression::UnaryOp { sub, op: _ } => without_side_effects(&*sub),
+        Expression::UnaryOp { sub, op: _ } => without_side_effects(sub),
         Expression::ImageReference { .. } => true,
         Expression::Array { element_ty: _, values } => values.iter().all(without_side_effects),
         Expression::Struct { ty: _, values } => values.values().all(without_side_effects),
         Expression::PathData(_) => true,
         Expression::EasingCurve(_) => true,
         Expression::LinearGradient { angle, stops } => {
-            without_side_effects(&angle)
+            without_side_effects(angle)
                 && stops
                     .iter()
                     .all(|(start, end)| without_side_effects(start) && without_side_effects(end))
@@ -91,16 +91,22 @@ fn without_side_effects(expression: &Expression) -> bool {
         Expression::RadialGradient { stops } => stops
             .iter()
             .all(|(start, end)| without_side_effects(start) && without_side_effects(end)),
-        Expression::ConicGradient { stops } => stops
-            .iter()
-            .all(|(start, end)| without_side_effects(start) && without_side_effects(end)),
+        Expression::ConicGradient { from_angle, stops } => {
+            without_side_effects(from_angle)
+                && stops
+                    .iter()
+                    .all(|(start, end)| without_side_effects(start) && without_side_effects(end))
+        }
         Expression::EnumerationValue(_) => true,
         // A return statement is never without side effects, as an important "side effect" is that
         // the current function stops at this point.
         Expression::ReturnStatement(_) => false,
         Expression::LayoutCacheAccess { .. } => false,
         Expression::ComputeLayoutInfo(_, _) => false,
+        Expression::ComputeGridLayoutInfo { .. } => false,
+        Expression::OrganizeGridLayout(_) => false,
         Expression::SolveLayout(_, _) => false,
+        Expression::SolveGridLayout { .. } => false,
         Expression::MinMax { ty: _, op: _, lhs, rhs } => {
             without_side_effects(lhs) && without_side_effects(rhs)
         }

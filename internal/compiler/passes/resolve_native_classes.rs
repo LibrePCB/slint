@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::langtype::{ElementType, NativeClass};
-use crate::object_tree::{recurse_elem_including_sub_components, Component};
+use crate::object_tree::{Component, recurse_elem_including_sub_components};
 
 pub fn resolve_native_classes(component: &Component) {
     recurse_elem_including_sub_components(component, &(), &mut |elem, _| {
@@ -26,7 +26,9 @@ pub fn resolve_native_classes(component: &Component) {
                     // already native
                     return;
                 }
-                ElementType::Global | ElementType::Error => panic!("This should not happen"),
+                ElementType::Interface | ElementType::Global | ElementType::Error => {
+                    panic!("This should not happen")
+                }
             };
 
             let analysis = elem.property_analysis.borrow();

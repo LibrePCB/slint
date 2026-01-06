@@ -3,7 +3,7 @@
 
 use std::fs;
 use zed::{DownloadedFileType, LanguageServerId};
-use zed_extension_api::{self as zed, settings::LspSettings, Architecture, Os, Result};
+use zed_extension_api::{self as zed, Architecture, Os, Result, settings::LspSettings};
 
 struct SlintBinary {
     path: String,
@@ -27,6 +27,10 @@ impl SlintExtension {
             binary_settings.as_ref().and_then(|binary_settings| binary_settings.arguments.clone());
 
         if let Some(path) = binary_settings.and_then(|binary_settings| binary_settings.path) {
+            return Ok(SlintBinary { path, args: binary_args });
+        }
+
+        if let Some(path) = worktree.which("slint-lsp") {
             return Ok(SlintBinary { path, args: binary_args });
         }
 
@@ -90,8 +94,10 @@ impl SlintExtension {
                 String::new()
             }
         );
-        // The directory in the tarball is usually named "slint-lsp", but it is different for the slint-lsp-*-linux-*
-        let subdir = if target_name == "slint-lsp-aarch64-unknown-linux-gnu" {
+        let subdir = if asset_file_type == DownloadedFileType::Zip {
+            ""
+        } else if target_name == "slint-lsp-aarch64-unknown-linux-gnu" {
+            // The directory in the tarball is usually named "slint-lsp", but it is different for the slint-lsp-*-linux-*
             target_name
         } else {
             "slint-lsp"

@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use super::rust::{ident, rust_primitive_type};
-use crate::langtype::{Struct, Type};
+use crate::CompilerConfiguration;
+use crate::langtype::{Struct, StructName, Type};
 use crate::llr;
 use crate::object_tree::Document;
-use crate::CompilerConfiguration;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -92,7 +92,7 @@ fn generate_public_component(
         quote!(#main_file)
     };
 
-    let mut property_and_callback_accessors: Vec<TokenStream> = vec![];
+    let mut property_and_callback_accessors: Vec<TokenStream> = Vec::new();
     for p in &llr.public_properties {
         let prop_name = p.name.as_str();
         let prop_ident = ident(&p.name);
@@ -116,7 +116,7 @@ fn generate_public_component(
                 #[allow(dead_code)]
                 pub fn #on_ident(&self, f: impl FnMut(#(#callback_args),*) -> #return_type + 'static) {
                     let f = ::core::cell::RefCell::new(f);
-                    self.0.borrow_mut().set_callback(#prop_name, sp::Rc::new(move |values| {
+                    self.0.borrow().set_callback(#prop_name, sp::Rc::new(move |values| {
                         let [#(#args_name,)*] = values else { panic!("invalid number of argument for callback {}::{}", #component_name, #prop_name) };
                         (*f.borrow_mut())(#(#args_name.clone().try_into().unwrap_or_else(|_| panic!("invalid argument for callback {}::{}", #component_name, #prop_name)),)*).into()
                     }))
@@ -155,7 +155,7 @@ fn generate_public_component(
                 property_and_callback_accessors.push(quote!(
                     #[allow(dead_code)]
                     pub fn #setter_ident(&self, value: #rust_property_type) {
-                        self.0.borrow_mut().set_property(#prop_name, #convert_to_value(value))
+                        self.0.borrow().set_property(#prop_name, #convert_to_value(value))
                     }
                 ));
             } else {
@@ -172,6 +172,8 @@ fn generate_public_component(
         quote!((#n.to_string(), #p.into()))
     });
     let translation_domain = compiler_config.translation_domain.iter();
+    let no_default_translation_context = (compiler_config.default_translation_context == crate::DefaultTranslationContext::None)
+        .then(|| quote!(compiler.set_default_translation_context(sp::live_preview::DefaultTranslationContext::None);));
     let style = compiler_config.style.iter();
 
     quote!(
@@ -184,6 +186,7 @@ fn generate_public_component(
                 compiler.set_library_paths([#(#library_paths.into()),*].into_iter().collect());
                 #(compiler.set_style(#style.to_string());)*
                 #(compiler.set_translation_domain(#translation_domain.to_string());)*
+                #no_default_translation_context
                 let instance = sp::live_preview::LiveReloadingComponent::new(compiler, #main_file.into(), #component_name.into())?;
                 let window_adapter = sp::WindowInner::from_pub(slint::ComponentHandle::window(instance.borrow().instance())).window_adapter();
                 sp::Ok(Self(instance, window_adapter))
@@ -247,7 +250,7 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::CompilationUnit) -
         return quote!();
     }
     let global_name = global.name.as_str();
-    let mut property_and_callback_accessors: Vec<TokenStream> = vec![];
+    let mut property_and_callback_accessors: Vec<TokenStream> = Vec::new();
     for p in &global.public_properties {
         let prop_name = p.name.as_str();
         let prop_ident = ident(&p.name);
@@ -271,7 +274,7 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::CompilationUnit) -
                 #[allow(dead_code)]
                 pub fn #on_ident(&self, f: impl FnMut(#(#callback_args),*) -> #return_type + 'static) {
                     let f = ::core::cell::RefCell::new(f);
-                    self.0.borrow_mut().set_global_callback(#global_name, #prop_name, sp::Rc::new(move |values| {
+                    self.0.borrow().set_global_callback(#global_name, #prop_name, sp::Rc::new(move |values| {
                         let [#(#args_name,)*] = values else { panic!("invalid number of argument for callback {}::{}", #global_name, #prop_name) };
                         (*f.borrow_mut())(#(#args_name.clone().try_into().unwrap_or_else(|_| panic!("invalid argument for callback {}::{}", #global_name, #prop_name)),)*).into()
                     }))
@@ -310,7 +313,7 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::CompilationUnit) -
                 property_and_callback_accessors.push(quote!(
                     #[allow(dead_code)]
                     pub fn #setter_ident(&self, value: #rust_property_type) {
-                        self.0.borrow_mut().set_global_property(#global_name, #prop_name, #convert_to_value(value))
+                        self.0.borrow().set_global_property(#global_name, #prop_name, #convert_to_value(value))
                     }
                 ));
             } else {
@@ -396,7 +399,7 @@ fn generate_value_conversions(used_types: &[Type]) -> TokenStream {
         .iter()
         .filter_map(|ty| match ty {
             Type::Struct(s) => match s.as_ref() {
-                Struct { fields, name: Some(name), node: Some(_), .. } => {
+                Struct { fields, name: StructName::User { name, .. }, .. } => {
                     let ty = ident(name);
                     let convert_to_value = fields.values().map(convert_to_value_fn);
                     let convert_from_value = fields.values().map(convert_from_value_fn);

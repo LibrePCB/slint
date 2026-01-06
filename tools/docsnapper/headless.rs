@@ -102,10 +102,6 @@ pub struct HeadlessWindow {
 }
 
 impl WindowAdapterInternal for HeadlessWindow {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn input_method_request(&self, request: i_slint_core::window::InputMethodRequest) {
         self.ime_requests.borrow_mut().push(request)
     }
@@ -121,11 +117,7 @@ impl WindowAdapter for HeadlessWindow {
     }
 
     fn size(&self) -> PhysicalSize {
-        if self.size.get().width == 0 {
-            PhysicalSize::new(800, 600)
-        } else {
-            self.size.get()
-        }
+        if self.size.get().width == 0 { PhysicalSize::new(800, 600) } else { self.size.get() }
     }
 
     fn set_size(&self, size: i_slint_core::api::WindowSize) {

@@ -64,6 +64,10 @@ pub enum Type {
 
     /// This is a `SharedArray<f32>`
     LayoutCache,
+    /// This is used by GridLayoutOrganizedData
+    ArrayOfU16,
+
+    StyledText,
 }
 
 impl core::cmp::PartialEq for Type {
@@ -104,6 +108,8 @@ impl core::cmp::PartialEq for Type {
             Type::UnitProduct(a) => matches!(other, Type::UnitProduct(b) if a == b),
             Type::ElementReference => matches!(other, Type::ElementReference),
             Type::LayoutCache => matches!(other, Type::LayoutCache),
+            Type::ArrayOfU16 => matches!(other, Type::ArrayOfU16),
+            Type::StyledText => matches!(other, Type::StyledText),
         }
     }
 }
@@ -178,6 +184,8 @@ impl Display for Type {
             }
             Type::ElementReference => write!(f, "element ref"),
             Type::LayoutCache => write!(f, "layout cache"),
+            Type::ArrayOfU16 => write!(f, "[u16]"),
+            Type::StyledText => write!(f, "styled-text"),
         }
     }
 }
@@ -213,6 +221,7 @@ impl Type {
                 | Self::Array(_)
                 | Self::Brush
                 | Self::InferredProperty
+                | Self::StyledText
         )
     }
 
@@ -314,6 +323,8 @@ impl Type {
             Type::UnitProduct(_) => None,
             Type::ElementReference => None,
             Type::LayoutCache => None,
+            Type::ArrayOfU16 => None,
+            Type::StyledText => None,
         }
     }
 
@@ -386,7 +397,7 @@ impl From<BuiltinFunction> for BuiltinPropertyInfo {
 }
 
 /// The base of an element
-#[derive(Clone, Debug, derive_more::From)]
+#[derive(Clone, Debug, derive_more::From, Default)]
 pub enum ElementType {
     /// The element is based of a component
     Component(Rc<Component>),
@@ -395,9 +406,12 @@ pub enum ElementType {
     /// The native type was resolved by the resolve_native_class pass.
     Native(Rc<NativeClass>),
     /// The base element couldn't be looked up
+    #[default]
     Error,
     /// This should be the base type of the root element of a global component
     Global,
+    /// This should be the base type of the root element of an interface
+    Interface,
 }
 
 impl PartialEq for ElementType {
@@ -406,7 +420,9 @@ impl PartialEq for ElementType {
             (Self::Component(a), Self::Component(b)) => Rc::ptr_eq(a, b),
             (Self::Builtin(a), Self::Builtin(b)) => Rc::ptr_eq(a, b),
             (Self::Native(a), Self::Native(b)) => Rc::ptr_eq(a, b),
-            (Self::Error, Self::Error) | (Self::Global, Self::Global) => true,
+            (Self::Error, Self::Error)
+            | (Self::Global, Self::Global)
+            | (Self::Interface, Self::Interface) => true,
             _ => false,
         }
     }
@@ -608,6 +624,7 @@ impl ElementType {
             ElementType::Native(_) => None, // Too late, caller should call this function before the native class lowering
             ElementType::Error => None,
             ElementType::Global => None,
+            ElementType::Interface => None,
         }
     }
 }
@@ -620,13 +637,92 @@ impl Display for ElementType {
             Self::Native(b) => b.class_name.fmt(f),
             Self::Error => write!(f, "<error>"),
             Self::Global => Ok(()),
+            Self::Interface => Ok(()),
         }
     }
 }
 
-impl Default for ElementType {
-    fn default() -> Self {
-        Self::Error
+#[derive(Debug, Clone, PartialEq, strum::EnumString, strum::IntoStaticStr)]
+pub enum BuiltinPrivateStruct {
+    PathMoveTo,
+    PathLineTo,
+    PathArcTo,
+    PathCubicTo,
+    PathQuadraticTo,
+    PathClose,
+    Size,
+    StateInfo,
+    Point,
+    PropertyAnimation,
+    GridLayoutData,
+    GridLayoutInputData,
+    BoxLayoutData,
+    LayoutItemInfo,
+    Padding,
+    LayoutInfo,
+    FontMetrics,
+    PathElement,
+    KeyboardModifiers,
+    PointerEvent,
+    PointerScrollEvent,
+    KeyEvent,
+    DropEvent,
+    TableColumn,
+    MenuEntry,
+}
+
+impl BuiltinPrivateStruct {
+    pub fn is_layout_data(&self) -> bool {
+        matches!(self, Self::GridLayoutInputData | Self::GridLayoutData | Self::BoxLayoutData)
+    }
+    pub fn slint_name(&self) -> Option<SmolStr> {
+        match self {
+            // These are public types in the Slint language
+            Self::Point
+            | Self::FontMetrics
+            | Self::TableColumn
+            | Self::MenuEntry
+            | Self::KeyEvent
+            | Self::KeyboardModifiers
+            | Self::PointerEvent
+            | Self::PointerScrollEvent => {
+                let name: &'static str = self.into();
+                Some(SmolStr::new_static(name))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, strum::IntoStaticStr)]
+pub enum BuiltinPublicStruct {
+    Color,
+    LogicalPosition,
+    StandardListViewItem,
+}
+
+impl BuiltinPublicStruct {
+    pub fn slint_name(&self) -> Option<SmolStr> {
+        match self {
+            Self::Color => Some(SmolStr::new_static("color")),
+            Self::LogicalPosition => Some(SmolStr::new_static("Point")),
+            Self::StandardListViewItem => Some(SmolStr::new_static("StandardListViewItem")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, derive_more::From)]
+pub enum BuiltinStruct {
+    Private(BuiltinPrivateStruct),
+    Public(BuiltinPublicStruct),
+}
+
+impl BuiltinStruct {
+    pub fn slint_name(&self) -> Option<SmolStr> {
+        match self {
+            Self::Private(native_private_type) => native_private_type.slint_name(),
+            Self::Public(native_public_type) => native_public_type.slint_name(),
+        }
     }
 }
 
@@ -637,8 +733,9 @@ pub struct NativeClass {
     pub cpp_vtable_getter: String,
     pub properties: HashMap<SmolStr, BuiltinPropertyInfo>,
     pub deprecated_aliases: HashMap<SmolStr, SmolStr>,
-    pub cpp_type: Option<SmolStr>,
-    pub rust_type_constructor: Option<SmolStr>,
+    /// Type override if class_name is not equal to the name to be used in the
+    /// target language API.
+    pub builtin_struct: Option<BuiltinPrivateStruct>,
 }
 
 impl NativeClass {
@@ -778,26 +875,89 @@ pub struct Function {
 }
 
 #[derive(Debug, Clone)]
+pub enum StructName {
+    None,
+    /// When declared in .slint as  `struct Foo { }`, then the name is "Foo"
+    User {
+        name: SmolStr,
+        /// When declared in .slint, this is the node of the declaration.
+        node: syntax_nodes::ObjectType,
+    },
+    BuiltinPublic(BuiltinPublicStruct),
+    BuiltinPrivate(BuiltinPrivateStruct),
+}
+
+impl PartialEq for StructName {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::User { name: l_user_name, node: _ },
+                Self::User { name: r_user_name, node: _ },
+            ) => l_user_name == r_user_name,
+            (Self::BuiltinPublic(l0), Self::BuiltinPublic(r0)) => l0 == r0,
+            (Self::BuiltinPrivate(l0), Self::BuiltinPrivate(r0)) => l0 == r0,
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
+
+impl StructName {
+    pub fn slint_name(&self) -> Option<SmolStr> {
+        match self {
+            StructName::None => None,
+            StructName::User { name, .. } => Some(name.clone()),
+            StructName::BuiltinPublic(builtin_public) => builtin_public.slint_name(),
+            StructName::BuiltinPrivate(builtin_private) => builtin_private.slint_name(),
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub fn is_some(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub fn or(self, other: Self) -> Self {
+        match self {
+            Self::None => other,
+            this => this,
+        }
+    }
+}
+
+impl From<BuiltinPrivateStruct> for StructName {
+    fn from(value: BuiltinPrivateStruct) -> Self {
+        Self::BuiltinPrivate(value)
+    }
+}
+
+impl From<BuiltinPublicStruct> for StructName {
+    fn from(value: BuiltinPublicStruct) -> Self {
+        Self::BuiltinPublic(value)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Struct {
     pub fields: BTreeMap<SmolStr, Type>,
-    /// When declared in .slint as  `struct Foo := { }`, then the name is "Foo"
-    /// When there is no node, but there is a name, then it is a builtin type
-    pub name: Option<SmolStr>,
-    /// When declared in .slint, this is the node of the declaration.
-    pub node: Option<syntax_nodes::ObjectType>,
-    /// derived
-    pub rust_attributes: Option<Vec<SmolStr>>,
+    pub name: StructName,
+}
+
+impl Struct {
+    pub fn node(&self) -> Option<&syntax_nodes::ObjectType> {
+        match &self.name {
+            StructName::User { node, .. } => Some(node),
+            _ => None,
+        }
+    }
 }
 
 impl Display for Struct {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(name) = &self.name {
-            if let Some(separator_pos) = name.rfind("::") {
-                // write the slint type and not the native type
-                write!(f, "{}", &name[separator_pos + 2..])
-            } else {
-                write!(f, "{name}")
-            }
+        if let Some(name) = &self.name.slint_name() {
+            write!(f, "{name}")
         } else {
             write!(f, "{{ ")?;
             for (k, v) in &self.fields {

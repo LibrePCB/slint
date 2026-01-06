@@ -7,7 +7,7 @@ use clap::Parser;
 use i_slint_compiler::ComponentSelection;
 use itertools::Itertools;
 use slint_interpreter::{
-    json::JsonExt, ComponentDefinition, ComponentHandle, ComponentInstance, Value,
+    ComponentDefinition, ComponentHandle, ComponentInstance, Value, json::JsonExt,
 };
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter};
@@ -97,6 +97,11 @@ struct Cli {
     /// Translation directory where the translation files are searched for
     #[arg(long = "translation-dir", action)]
     translation_dir: Option<std::path::PathBuf>,
+
+    #[cfg(feature = "gettext")]
+    /// Disable the default to use the component name as translation context when none is specified in `@tr`
+    #[arg(long = "no-default-translation-context")]
+    no_default_translation_context: bool,
 }
 
 thread_local! {static CURRENT_INSTANCE: std::cell::RefCell<Option<ComponentInstance>> = Default::default();}
@@ -112,7 +117,7 @@ fn main() -> Result<()> {
     }
 
     if let Some(backend) = &args.backend {
-        std::env::set_var("SLINT_BACKEND", backend);
+        slint_interpreter::BackendSelector::new().backend_name(backend.clone()).select()?;
     }
 
     #[cfg(feature = "gettext")]
@@ -186,6 +191,11 @@ fn init_compiler(
     #[cfg(feature = "gettext")]
     if let Some(domain) = args.translation_domain.clone() {
         compiler.set_translation_domain(domain);
+    }
+    #[cfg(feature = "gettext")]
+    if args.no_default_translation_context {
+        compiler
+            .set_default_translation_context(slint_interpreter::DefaultTranslationContext::None);
     }
     compiler.set_include_paths(args.include_paths.clone());
     compiler.set_library_paths(

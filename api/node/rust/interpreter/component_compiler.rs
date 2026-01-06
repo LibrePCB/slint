@@ -1,8 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-use crate::to_js_unknown;
 use crate::RefCountedReference;
+use crate::to_js_unknown;
 
 use super::JsComponentDefinition;
 use super::JsDiagnostic;
@@ -37,7 +37,7 @@ impl JsComponentCompiler {
             Some(paths) => {
                 std::env::split_paths(&paths).filter(|path| !path.as_os_str().is_empty()).collect()
             }
-            None => vec![],
+            None => Vec::new(),
         };
         let library_paths = match std::env::var_os("SLINT_LIBRARY_PATH") {
             Some(paths) => std::env::split_paths(&paths)
@@ -55,7 +55,7 @@ impl JsComponentCompiler {
 
         compiler.set_include_paths(include_paths);
         compiler.set_library_paths(library_paths);
-        Self { internal: compiler, diagnostics: vec![], structs_and_enums: vec![] }
+        Self { internal: compiler, diagnostics: Vec::new(), structs_and_enums: vec![] }
     }
 
     #[napi(setter)]
@@ -114,8 +114,8 @@ impl JsComponentCompiler {
     pub fn structs(&self, env: Env) -> HashMap<String, JsUnknown> {
         fn convert_type(env: &Env, ty: &Type) -> Option<(String, JsUnknown)> {
             match ty {
-                Type::Struct(s) if s.name.is_some() && s.node.is_some() => {
-                    let name = s.name.as_ref().unwrap();
+                Type::Struct(s) if s.node().is_some() => {
+                    let name = s.name.slint_name().unwrap();
                     let struct_instance = to_js_unknown(
                         env,
                         &Value::Struct(slint_interpreter::Struct::from_iter(s.fields.iter().map(

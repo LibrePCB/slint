@@ -3,7 +3,7 @@
 
 use crate::common::{
     self,
-    token_info::{token_info, TokenInfo},
+    token_info::{TokenInfo, token_info},
 };
 use crate::util;
 use i_slint_compiler::langtype::{ElementType, Type};
@@ -23,7 +23,7 @@ pub fn get_tooltip(
         TokenInfo::Type(ty) => match ty {
             Type::Enumeration(e) => from_slint_code(&format!("enum {}", e.name), documentation),
             Type::Struct(s) if s.name.is_some() => {
-                from_slint_code(&format!("struct {}", s.name.as_ref().unwrap()), documentation)
+                from_slint_code(&format!("struct {}", s.name.slint_name().unwrap()), documentation)
             }
             _ => from_plain_text(ty.to_string()),
         },
@@ -68,7 +68,7 @@ pub fn get_tooltip(
         },
         // Todo: this can happen when there is some syntax error
         TokenInfo::LocalProperty(_) | TokenInfo::LocalCallback(_) | TokenInfo::LocalFunction(_) => {
-            return None
+            return None;
         }
         TokenInfo::IncompleteNamedReference(el, name) => {
             from_property_in_type(&el, &name, documentation)?
@@ -77,7 +77,7 @@ pub fn get_tooltip(
 
     Some(Hover {
         contents: HoverContents::Markup(contents),
-        range: Some(util::token_to_lsp_range(&token)),
+        range: Some(util::token_to_lsp_range(&token, document_cache.format)),
     })
 }
 
@@ -348,8 +348,7 @@ export component Test { // not docs
         );
         assert_tooltip(
             get_tooltip(&mut dc, find_tk("row-pointer-event", 0.into())),
-            // Fixme: this uses LogicalPoint instead of Point because of implementation details
-            "```slint\ncallback row-pointer-event(row: int, event: PointerEvent, position: LogicalPosition)\n```",
+            "```slint\ncallback row-pointer-event(row: int, event: PointerEvent, position: Point)\n```",
         );
         assert_tooltip(
             get_tooltip(&mut dc, find_tk("pointer-event", 5.into())),

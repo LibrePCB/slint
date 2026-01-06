@@ -1,5 +1,4 @@
 ---
-<!-- Copyright © SixtyFPS GmbH <info@slint.dev> ; SPDX-License-Identifier: MIT -->
 // cSpell: ignore msgfmt msgctx msginit poedit Lokalize Transifex libintl bindtextdomain
 title: Translations
 description: Translations
@@ -91,6 +90,20 @@ export component MenuItem {
     property <string> tooltip : @tr("ToolTip" => "ToolTip for {}", name); // Specified: The context will be `ToolTip`.
 }
 ```
+
+Pass the `--no-default-translation-context` flag to `slint-tr-extractor` if you don't want the component name to be the default context. The same option needs to be passed to the Slint compiler:
+
+<Tabs syncKey="dev-language">
+<TabItem label="C++" icon="cpp">
+Set the <LangRefLink lang="cpp" relpath="cmake_reference.html#bundle-translations">`SLINT_NO_DEFAULT_TRANSLATION_CONTEXT`</LangRefLink> target property on your CMake target.
+</TabItem>
+<TabItem label="Rust" icon="rust">
+With <LangRefLink lang="rust-slint-build" relpath="struct.compilerconfiguration#method.set_default_translation_context">`slint_build::CompilerConfiguration::set_default_translation_context(slint_build::DefaultTranslationContext::None)`</LangRefLink>
+when using a build script.
+With <LangRefLink lang="rust-slint-interpreter" relpath="struct.compiler#method.set_default_translation_context">`slint_interpreter::Compiler::set_default_translation_context(slint_interpreter::DefaultTranslationContext::None)`</LangRefLink>
+when using the `slint-interpreter` crate.
+</TabItem>
+</Tabs>
 
 ## Extracting Translatable Strings
 

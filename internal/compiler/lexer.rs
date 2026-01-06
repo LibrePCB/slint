@@ -25,11 +25,7 @@ pub trait LexingRule {
 impl LexingRule for &str {
     #[inline]
     fn lex(&self, text: &str, _: &mut LexState) -> usize {
-        if text.starts_with(*self) {
-            self.len()
-        } else {
-            0
-        }
+        if text.starts_with(*self) { self.len() } else { 0 }
     }
 }
 
@@ -106,7 +102,7 @@ pub fn lex_string(text: &str, state: &mut LexState) -> usize {
     } else if !text.starts_with('"') {
         return 0;
     }
-    let text_len = text.as_bytes().len();
+    let text_len = text.len();
     let mut end = 1; // skip the '"'
     loop {
         let stop = match text[end..].find(&['"', '\\'][..]) {
@@ -195,7 +191,7 @@ pub fn lex_identifier(text: &str, _: &mut LexState) -> usize {
 
 #[allow(clippy::needless_update)] // Token may have extra fields depending on selected features
 pub fn lex(mut source: &str) -> Vec<crate::parser::Token> {
-    let mut result = vec![];
+    let mut result = Vec::new();
     let mut offset = 0;
     let mut state = LexState::default();
     if source.starts_with("\u{FEFF}") {
@@ -204,6 +200,7 @@ pub fn lex(mut source: &str) -> Vec<crate::parser::Token> {
             kind: SyntaxKind::Whitespace,
             text: source[..3].into(),
             offset: 0,
+            length: 3,
             ..Default::default()
         });
         source = &source[3..];
@@ -215,6 +212,7 @@ pub fn lex(mut source: &str) -> Vec<crate::parser::Token> {
                 kind,
                 text: source[..len].into(),
                 offset,
+                length: len,
                 ..Default::default()
             });
             offset += len;
@@ -336,12 +334,12 @@ pub fn locate_slint_macro(rust_source: &str) -> impl Iterator<Item = core::ops::
         let (open, close) = loop {
             if let Some(m) = rust_source[begin..].find("slint") {
                 // heuristics to find if we are not in a comment or a string literal. Not perfect, but should work in most cases
-                if let Some(x) = rust_source[begin..(begin + m)].rfind(['\\', '\n', '/', '\"']) {
-                    if rust_source.as_bytes()[begin + x] != b'\n' {
-                        begin += m + 5;
-                        begin += rust_source[begin..].find(['\n']).unwrap_or(0);
-                        continue;
-                    }
+                if let Some(x) = rust_source[begin..(begin + m)].rfind(['\\', '\n', '/', '\"'])
+                    && rust_source.as_bytes()[begin + x] != b'\n'
+                {
+                    begin += m + 5;
+                    begin += rust_source[begin..].find(['\n']).unwrap_or(0);
+                    continue;
                 }
                 begin += m + 5;
                 while rust_source[begin..].starts_with(' ') {

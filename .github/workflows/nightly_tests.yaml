@@ -22,7 +22,7 @@ jobs:
                   . ${IDF_PATH}/export.sh
                   cd $IDF_PYTHON_ENV_PATH
                   bin/pip install pydantic==2.11.10
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: dtolnay/rust-toolchain@stable
             - uses: esp-rs/xtensa-toolchain@v1.6
               with:
@@ -60,7 +60,7 @@ jobs:
                       target: armv7-unknown-linux-gnueabihf
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - name: Downgrade cc and ring crate to work around https://github.com/slint-ui/slint/issues/6875
               run: |
                   cargo update -p ring --precise 0.17.9
@@ -96,12 +96,12 @@ jobs:
                       extra-cmake-args: ''
                     - board: mimxrt1170_evk@B/mimxrt1176/cm7
                       toolchain: stable
-                      target: thumbv7em-none-eabi
+                      target: thumbv7em-none-eabihf
                       extra-cmake-args: -DSHIELD=rk055hdmipi4ma0
             fail-fast: false
         runs-on: ubuntu-22.04
         steps:
-          - uses: actions/checkout@v5
+          - uses: actions/checkout@v6
             with:
                 path: slint
           - name: Install linux dependencies, including Zephyr dependencies
@@ -115,10 +115,10 @@ jobs:
                 components: rust-src
                 target: ${{matrix.target}}
           - name: Setup Zephyr project
-            uses: zephyrproject-rtos/action-zephyr-setup@v1.0.9
+            uses: zephyrproject-rtos/action-zephyr-setup@v1.0.11
             with:
                 app-path: slint
-                manifest-file-name: demos/printerdemo/zephyr/west.yaml
+                manifest-file-name: demos/zephyr-common/west.yaml
                 sdk-version: 0.16.8
           - name: Export the Zephyr CMake package
             run: west zephyr-export
@@ -131,7 +131,7 @@ jobs:
             CARGO_PROFILE_DEV_DEBUG: 0
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   toolchain: stable
@@ -149,42 +149,60 @@ jobs:
                 - demo: demos/home-automation/rust
                   scheme: "Home Automation"
                   bundle_id: dev.slint.demos.HomeAutomation
-                  device: iPad mini (A17 Pro)
+                  device: iPad Pro 13-inch (M5)
                 - demo: demos/energy-monitor
                   scheme: "Energy Monitor"
                   bundle_id: dev.slint.demos.EnergyMonitor
-                  device: iPhone 16e
+                  device: iPhone 17
         runs-on: macos-26
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: aarch64-apple-ios-sim
             - run: brew install xcodegen
             - run: xcodegen -s ios-project.yml
               working-directory: ${{ matrix.demo }}
-            - name: "Boot Simulator (to ensure also that xcodebuild -destination works)"
+            - name: "Find Simulator UDID from iOS 26.0 runtime"
+              run: |
+                echo "=== Finding device from iOS 26.0 runtime (default Xcode) ==="
+                # Find the device UDID from iOS 26.0 runtime to avoid ambiguity
+                # Multiple runtimes have devices with the same name, so we need the specific one
+                # Output format: "    Device Name (UDID) (Shutdown)"
+                DEVICE_LINE=$(xcrun simctl list devices available | grep -A 50 "iOS 26.0" | grep "${{ matrix.device }}" | head -n 1)
+
+                if [ -z "$DEVICE_LINE" ]; then
+                  echo "ERROR: Could not find ${{ matrix.device }} in iOS 26.0 runtime"
+                  echo "Available iOS 26.0 devices:"
+                  xcrun simctl list devices available | grep -A 30 "iOS 26.0"
+                  exit 1
+                fi
+
+                # Extract UDID from the line (format: "    Device Name (UDID) (Shutdown)")
+                DEVICE_UDID=$(echo "$DEVICE_LINE" | sed -n 's/.*(\([A-F0-9-]\{36\}\)).*/\1/p')
+
+                if [ -z "$DEVICE_UDID" ]; then
+                  echo "ERROR: Could not extract UDID from line: $DEVICE_LINE"
+                  exit 1
+                fi
+
+                echo "Device: ${{ matrix.device }}"
+                echo "UDID: $DEVICE_UDID"
+
+                # Export UDID for use in xcodebuild and boot steps
+                echo "SIMULATOR_UDID=$DEVICE_UDID" >> $GITHUB_ENV
+            - run: xcodebuild -scheme "${{ matrix.scheme }}" -destination "platform=iOS Simulator,id=${{ env.SIMULATOR_UDID }}" build
+              working-directory: ${{ matrix.demo }}
+            - name: "Boot Simulator"
               timeout-minutes: 5
               run: |
-                xcrun simctl list > /dev/null # workaround https://github.com/actions/runner-images/issues/12862
-                echo "=== Available simulators ==="
-                xcrun simctl list devices available | grep -i "ipad\|iphone"
-                echo ""
-
-                echo "=== System state before boot ==="
-                echo "Running simulators:"
-                xcrun simctl list devices | grep "(Booted)" || echo "None"
-                echo "Simulator.app processes:"
-                pgrep -fl Simulator || echo "None"
-                echo ""
-
-                echo "=== Booting simulator ==="
+                echo "=== Booting simulator by UDID ==="
                 echo "Device: ${{ matrix.device }}"
-                echo "Command: xcrun simctl boot \"${{ matrix.device }}\""
+                echo "UDID: ${{ env.SIMULATOR_UDID }}"
                 echo "Start time: $(date '+%Y-%m-%d %H:%M:%S')"
 
                 set -x  # Enable command echoing
-                xcrun simctl boot "${{ matrix.device }}"
+                xcrun simctl boot "${{ env.SIMULATOR_UDID }}"
                 BOOT_RESULT=$?
                 set +x  # Disable command echoing
 
@@ -192,16 +210,16 @@ jobs:
                 echo ""
 
                 echo "=== Simulator state after boot command ==="
-                xcrun simctl list devices | grep "${{ matrix.device }}"
-                echo ""
+                SIMULATOR_STATUS=$(xcrun simctl list devices | grep "${{ env.SIMULATOR_UDID }}")
+                echo "$SIMULATOR_STATUS"
 
-                echo "=== Waiting for full boot (bootstatus) ==="
-                echo "Start time: $(date '+%Y-%m-%d %H:%M:%S')"
-                xcrun simctl bootstatus booted -b
-                echo "End time: $(date '+%Y-%m-%d %H:%M:%S')"
-                echo "Simulator fully booted and ready"
-            - run: xcodebuild -scheme "${{ matrix.scheme }}" -destination 'platform=iOS Simulator,name=${{ matrix.device }}' build
-              working-directory: ${{ matrix.demo }}
+                if echo "$SIMULATOR_STATUS" | grep -q "(Booted)"; then
+                  echo "Simulator is booted successfully at: $(date '+%Y-%m-%d %H:%M:%S')"
+                else
+                  echo "ERROR: Simulator failed to boot properly"
+                  echo "Current status: $SIMULATOR_STATUS"
+                  exit 1
+                fi
             - name: "Install"
               run: |
                 APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "${{ matrix.scheme }}.app" | head -n 1)
@@ -242,10 +260,15 @@ jobs:
             - name: "Screenshot"
               run: xcrun simctl io booted screenshot "${{ matrix.scheme }}.png"
             - name: Upload Screenshot Artifact
-              uses: actions/upload-artifact@v5
+              uses: actions/upload-artifact@v6
               with:
                 name: ${{matrix.scheme}}-screenshot
                 path: ${{ matrix.scheme }}.png
+            - name: "Cleanup - Shutdown Simulator"
+              if: always()
+              run: |
+                echo "Shutting down simulator to avoid orphan processes..."
+                xcrun simctl shutdown "${{ env.SIMULATOR_UDID }}" || echo "Simulator already shutdown"
 
 
     bevy_example:
@@ -254,7 +277,7 @@ jobs:
                 os: [ubuntu-22.04, macos-14, windows-2022]
         runs-on: ${{ matrix.os }}
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
             - uses: ./.github/actions/install-linux-dependencies
             - uses: ./.github/actions/install-skia-dependencies
@@ -266,7 +289,7 @@ jobs:
     android_wgpu:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - name: Install Android API level 30
               run: ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-30"
             - uses: dtolnay/rust-toolchain@stable
@@ -279,3 +302,21 @@ jobs:
             - uses: ./.github/actions/install-skia-dependencies
             - name: Build wgpu_texture demo
               run: cargo apk build -p wgpu_texture --target aarch64-linux-android --lib
+
+    python:
+        strategy:
+            matrix:
+                os: [ubuntu-22.04, macos-14, windows-2022]
+        uses: ./.github/workflows/python_test_reusable.yaml
+        with:
+            name: "Python ${{ matrix.os }}"
+            os: ${{ matrix.os }}
+
+    node:
+        strategy:
+            matrix:
+                os: [ubuntu-22.04, macos-14, windows-2022]
+        uses: ./.github/workflows/node_test_reusable.yaml
+        with:
+            name: "Node.js ${{ matrix.os }}"
+            os: ${{ matrix.os }}

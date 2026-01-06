@@ -1,12 +1,12 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-use i_slint_compiler::diagnostics::{DiagnosticLevel, SourceFile, Spanned};
+use i_slint_compiler::diagnostics::{ByteFormat, Diagnostic, DiagnosticLevel, SourceFile, Spanned};
 use i_slint_compiler::expression_tree::Expression;
 use i_slint_compiler::langtype::{ElementType, Type};
 use i_slint_compiler::lookup::LookupCtx;
 use i_slint_compiler::object_tree::{self, type_from_node};
-use i_slint_compiler::parser::{syntax_nodes, SyntaxKind, SyntaxNode, SyntaxToken};
+use i_slint_compiler::parser::{SyntaxKind, SyntaxNode, SyntaxToken, syntax_nodes};
 use i_slint_compiler::parser::{TextRange, TextSize};
 use i_slint_compiler::typeregister::TypeRegister;
 use smol_str::SmolStr;
@@ -29,51 +29,71 @@ pub fn node_range_without_trailing_ws(node: &SyntaxNode) -> TextRange {
 /// Map a `node` to its `Url` and a `Range` of characters covered by the `node`
 ///
 /// This will exclude trailing whitespaces.
-pub fn node_to_url_and_lsp_range(node: &SyntaxNode) -> Option<(lsp_types::Url, lsp_types::Range)> {
+pub fn node_to_url_and_lsp_range(
+    node: &SyntaxNode,
+    format: ByteFormat,
+) -> Option<(lsp_types::Url, lsp_types::Range)> {
     let path = node.source_file.path();
-    Some((lsp_types::Url::from_file_path(path).ok()?, node_to_lsp_range(node)))
+    Some((lsp_types::Url::from_file_path(path).ok()?, node_to_lsp_range(node, format)))
 }
 
 /// Map a `node` to the `Range` of characters covered by the `node`
-pub fn node_to_lsp_range(node: &SyntaxNode) -> lsp_types::Range {
+pub fn node_to_lsp_range(node: &SyntaxNode, format: ByteFormat) -> lsp_types::Range {
     let range = node.text_range();
-    text_range_to_lsp_range(&node.source_file, range)
+    text_range_to_lsp_range(&node.source_file, range, format)
 }
 
 /// Map a `token` to the `Range` of characters covered by the `token`
-pub fn token_to_lsp_range(token: &SyntaxToken) -> lsp_types::Range {
+pub fn token_to_lsp_range(token: &SyntaxToken, format: ByteFormat) -> lsp_types::Range {
     let range = token.text_range();
-    text_range_to_lsp_range(&token.parent().source_file, range)
+    text_range_to_lsp_range(&token.parent().source_file, range, format)
 }
 
 /// Convert a `TextSize` to a `Position` for use in the LSP
-pub fn text_size_to_lsp_position(sf: &SourceFile, pos: TextSize) -> lsp_types::Position {
-    let (line, column) = sf.line_column(pos.into());
+pub fn text_size_to_lsp_position(
+    sf: &SourceFile,
+    pos: TextSize,
+    format: ByteFormat,
+) -> lsp_types::Position {
+    let (line, column) = sf.line_column(pos.into(), format);
     lsp_types::Position::new((line as u32).saturating_sub(1), (column as u32).saturating_sub(1))
 }
 
 /// Convert a `TextRange` to a `Range` for use in the LSP
-pub fn text_range_to_lsp_range(sf: &SourceFile, range: TextRange) -> lsp_types::Range {
+pub fn text_range_to_lsp_range(
+    sf: &SourceFile,
+    range: TextRange,
+    format: ByteFormat,
+) -> lsp_types::Range {
     lsp_types::Range::new(
-        text_size_to_lsp_position(sf, range.start()),
-        text_size_to_lsp_position(sf, range.end()),
+        text_size_to_lsp_position(sf, range.start(), format),
+        text_size_to_lsp_position(sf, range.end(), format),
     )
 }
 
 /// Convert a `Position` from the LSP into a `TextSize`
-pub fn lsp_position_to_text_size(sf: &SourceFile, position: lsp_types::Position) -> TextSize {
+pub fn lsp_position_to_text_size(
+    sf: &SourceFile,
+    position: lsp_types::Position,
+    format: ByteFormat,
+) -> TextSize {
     (sf.offset(
         usize::try_from(position.line).unwrap() + 1,
         usize::try_from(position.character).unwrap() + 1,
+        format,
     ) as u32)
         .into()
 }
 
 /// Convert a `Range` from the LSP into a `TextRange`
-pub fn lsp_range_to_text_range(sf: &SourceFile, range: lsp_types::Range) -> TextRange {
+pub fn lsp_range_to_text_range(
+    sf: &SourceFile,
+    range: lsp_types::Range,
+    format: ByteFormat,
+) -> TextRange {
     TextRange::new(
-        lsp_position_to_text_size(sf, range.start),
-        lsp_position_to_text_size(sf, range.end),
+        lsp_position_to_text_size(sf, range.start, format),
+        lsp_position_to_text_size(sf, range.end, format),
     )
 }
 
@@ -369,9 +389,12 @@ fn lookup_expression_context(mut n: SyntaxNode) -> Option<ExpressionContextInfo>
     Some(ExpressionContextInfo::new(element, prop_name, is_animate))
 }
 
-pub fn to_lsp_diag(d: &i_slint_compiler::diagnostics::Diagnostic) -> lsp_types::Diagnostic {
+pub fn to_lsp_diag(d: &Diagnostic, format: ByteFormat) -> lsp_types::Diagnostic {
+    use i_slint_compiler::diagnostics;
+    let start_line_column = diagnostics::diagnostic_line_column_with_format(d, format);
+    let end_line_column = diagnostics::diagnostic_end_line_column_with_format(d, format);
     lsp_types::Diagnostic::new(
-        to_range(d.line_column()),
+        to_range(start_line_column, end_line_column),
         Some(to_lsp_diag_level(d.level())),
         None,
         None,
@@ -381,12 +404,20 @@ pub fn to_lsp_diag(d: &i_slint_compiler::diagnostics::Diagnostic) -> lsp_types::
     )
 }
 
-fn to_range(span: (usize, usize)) -> lsp_types::Range {
-    let pos = lsp_types::Position::new(
-        (span.0 as u32).saturating_sub(1),
-        (span.1 as u32).saturating_sub(1),
+/// Convert line-column pairs to an LSP range.
+///
+/// The start and end are tuples of 1-indexed line-column values.
+/// The end must be exclusive.
+fn to_range(start: (usize, usize), end: (usize, usize)) -> lsp_types::Range {
+    let start = lsp_types::Position::new(
+        (start.0 as u32).saturating_sub(1),
+        (start.1 as u32).saturating_sub(1),
     );
-    lsp_types::Range::new(pos, pos)
+    let end = lsp_types::Position::new(
+        (end.0 as u32).saturating_sub(1),
+        (end.1 as u32).saturating_sub(1),
+    );
+    lsp_types::Range::new(start, end)
 }
 
 fn to_lsp_diag_level(level: DiagnosticLevel) -> lsp_types::DiagnosticSeverity {
@@ -438,26 +469,42 @@ component MainWindow inherits Window {
         let source = doc.node.as_ref().unwrap().source_file.clone();
         let mut offset = TextSize::new(0);
         let mut line = 0_usize;
-        let mut pos = 0_usize;
+        let mut pos_8 = 0_usize;
+        let mut pos_16 = 0_usize;
         for c in text.chars() {
             let original_offset = offset;
-            let mapped = text_size_to_lsp_position(&source, u32::from(original_offset).into());
-            eprintln!(
-                "c: {c} <offset: {offset:?}> => {line}:{pos} => mapped {}:{}",
-                mapped.line, mapped.character
+            let mapped_8 = text_size_to_lsp_position(
+                &source,
+                u32::from(original_offset).into(),
+                ByteFormat::Utf8,
             );
-            assert_eq!(mapped.line, (line as u32));
-            assert_eq!(mapped.character, (pos as u32));
-            let unmapped = lsp_position_to_text_size(&source, mapped);
+            let mapped_16 = text_size_to_lsp_position(
+                &source,
+                u32::from(original_offset).into(),
+                ByteFormat::Utf16,
+            );
+            eprintln!(
+                "c: {c} <offset: {offset:?}> => {line}:{pos_8} => mapped {}:{}",
+                mapped_8.line, mapped_8.character
+            );
+            assert_eq!(mapped_8.line, (line as u32));
+            assert_eq!(mapped_8.character, (pos_8 as u32));
+            assert_eq!(mapped_16.line, (line as u32));
+            assert_eq!(mapped_16.character, (pos_16 as u32));
+            let unmapped = lsp_position_to_text_size(&source, mapped_8, ByteFormat::Utf8);
+            assert_eq!(unmapped, original_offset);
+            let unmapped = lsp_position_to_text_size(&source, mapped_16, ByteFormat::Utf16);
             assert_eq!(unmapped, original_offset);
             offset = offset.checked_add((c.len_utf8() as u32).into()).unwrap();
             match c {
                 '\n' => {
                     line += 1;
-                    pos = 0
+                    pos_8 = 0;
+                    pos_16 = 0;
                 }
                 c => {
-                    pos += c.len_utf8();
+                    pos_8 += c.len_utf8();
+                    pos_16 += c.len_utf16();
                 }
             }
         }

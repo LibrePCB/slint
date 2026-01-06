@@ -11,9 +11,9 @@ use std::rc::{Rc, Weak};
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::Callable;
 use crate::object_tree::{self, Document, ExportedName, Exports};
-use crate::parser::{syntax_nodes, NodeOrToken, SyntaxKind, SyntaxToken};
+use crate::parser::{NodeOrToken, SyntaxKind, SyntaxToken, syntax_nodes};
 use crate::typeregister::TypeRegister;
-use crate::{expression_tree, CompilerConfiguration};
+use crate::{CompilerConfiguration, expression_tree};
 use crate::{fileaccess, langtype, layout, parser};
 use core::future::Future;
 use itertools::Itertools;
@@ -151,7 +151,7 @@ pub(crate) fn snapshot_with_extra_doc(
     if let Some(doc_node) = &new_doc.node {
         let path = doc_node.source_file.path().to_path_buf();
         if let Some(r) = &mut result {
-            r.all_documents.docs.insert(path, (LoadedDocument::Document(new_doc), vec![]));
+            r.all_documents.docs.insert(path, (LoadedDocument::Document(new_doc), Vec::new()));
         }
     }
 
@@ -836,7 +836,8 @@ impl Snapshotter {
                     .map(|(e1, e2)| (self.snapshot_expression(e1), self.snapshot_expression(e2)))
                     .collect(),
             },
-            Expression::ConicGradient { stops } => Expression::ConicGradient {
+            Expression::ConicGradient { from_angle, stops } => Expression::ConicGradient {
+                from_angle: Box::new(self.snapshot_expression(from_angle)),
                 stops: stops
                     .iter()
                     .map(|(e1, e2)| (self.snapshot_expression(e1), self.snapshot_expression(e2)))
@@ -845,15 +846,19 @@ impl Snapshotter {
             Expression::ReturnStatement(expr) => Expression::ReturnStatement(
                 expr.as_ref().map(|e| Box::new(self.snapshot_expression(e))),
             ),
-            Expression::LayoutCacheAccess { layout_cache_prop, index, repeater_index } => {
-                Expression::LayoutCacheAccess {
-                    layout_cache_prop: layout_cache_prop.snapshot(self),
-                    index: *index,
-                    repeater_index: repeater_index
-                        .as_ref()
-                        .map(|e| Box::new(self.snapshot_expression(e))),
-                }
-            }
+            Expression::LayoutCacheAccess {
+                layout_cache_prop,
+                index,
+                repeater_index,
+                entries_per_item,
+            } => Expression::LayoutCacheAccess {
+                layout_cache_prop: layout_cache_prop.snapshot(self),
+                index: *index,
+                repeater_index: repeater_index
+                    .as_ref()
+                    .map(|e| Box::new(self.snapshot_expression(e))),
+                entries_per_item: *entries_per_item,
+            },
             Expression::MinMax { ty, op, lhs, rhs } => Expression::MinMax {
                 ty: ty.clone(),
                 lhs: Box::new(self.snapshot_expression(lhs)),
@@ -998,8 +1003,8 @@ impl TypeLoader {
         registry_to_populate: &'b Rc<RefCell<TypeRegister>>,
         import_stack: &'b HashSet<PathBuf>,
     ) -> (Vec<ImportedTypes>, Exports) {
-        let mut imports = vec![];
-        let mut dependencies_futures = vec![];
+        let mut imports = Vec::new();
+        let mut dependencies_futures = Vec::new();
         for mut import in Self::collect_dependencies(state, doc) {
             if matches!(import.import_kind, ImportKind::FileImport) {
                 if let Some((path, _)) = state.borrow().tl.resolve_import_path(
@@ -1076,7 +1081,7 @@ impl TypeLoader {
                 let core::task::Poll::Ready((mut import, doc_path)) = fut.as_mut().poll(cx) else { return true; };
                 let Some(doc_path) = doc_path else { return false };
                 let mut state = state.borrow_mut();
-                let state: &mut BorrowedTypeLoader<'a> = &mut *state;
+                let state: &mut BorrowedTypeLoader<'a> = &mut state;
                 let Some(doc) = state.tl.get_document(&doc_path) else {
                     panic!("Just loaded document not available")
                 };
@@ -1220,13 +1225,12 @@ impl TypeLoader {
                         && file_name.eq_ignore_ascii_case(
                             file_to_import.get(len - file_name.len()..).unwrap_or(""),
                         )
+                        && import_token.as_ref().and_then(|x| x.source_file()).is_some()
                     {
-                        if import_token.as_ref().and_then(|x| x.source_file()).is_some() {
-                            borrowed_state.diag.push_warning(
+                        borrowed_state.diag.push_warning(
                                 format!("Loading \"{file_to_import}\" resolved to a file named \"{file_name}\" with different casing. This behavior is not cross platform. Rename the file, or edit the import to use the same casing"),
                                 &import_token,
                             );
-                        }
                     }
                 }
                 x
@@ -1588,7 +1592,7 @@ impl TypeLoader {
             };
             crate::fileaccess::load_file(path.as_path())
                 .map(|virtual_file| (virtual_file.canon_path, virtual_file.builtin_contents))
-                .or_else(|| Some((path, None)))
+                .or(Some((path, None)))
         })
     }
 

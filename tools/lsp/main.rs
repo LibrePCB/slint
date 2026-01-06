@@ -5,7 +5,9 @@
 #![allow(clippy::await_holding_refcell_ref)]
 
 #[cfg(all(feature = "preview-engine", not(feature = "preview-builtin")))]
-compile_error!("Feature preview-engine and preview-builtin need to be enabled together when building native LSP");
+compile_error!(
+    "Feature preview-engine and preview-builtin need to be enabled together when building native LSP"
+);
 
 mod common;
 mod fmt;
@@ -35,7 +37,7 @@ use std::future::Future;
 use std::io::Write as _;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::{atomic, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic};
 use std::task::{Poll, Waker};
 
 use crate::common::document_cache::CompilerConfiguration;
@@ -213,7 +215,10 @@ impl RequestHandler {
 fn main() {
     let args: Cli = Cli::parse();
     if !args.backend.is_empty() {
-        std::env::set_var("SLINT_BACKEND", &args.backend);
+        // Safety: there are no other threads at this point
+        unsafe {
+            std::env::set_var("SLINT_BACKEND", &args.backend);
+        }
     }
 
     if let Ok(panic_log_dir) = std::env::var("SLINT_LSP_PANIC_LOG_DIR") {
@@ -353,7 +358,18 @@ fn main_loop(connection: Connection, init_param: InitializeParams, cli_args: Cli
                 Some(contents.map(|c| (None, c)))
             })
         })),
-        ..Default::default()
+        format: if init_param
+            .capabilities
+            .general
+            .as_ref()
+            .and_then(|x| x.position_encodings.as_ref())
+            .is_some_and(|x| x.iter().any(|x| x == &lsp_types::PositionEncodingKind::UTF8))
+        {
+            common::ByteFormat::Utf8
+        } else {
+            common::ByteFormat::Utf16
+        },
+        resource_url_mapper: None,
     };
 
     let ctx = Rc::new(Context {

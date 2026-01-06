@@ -26,9 +26,9 @@ mod r#type;
 mod prelude {
     #[cfg(test)]
     pub use super::DefaultParser;
-    #[cfg(test)]
-    pub use super::{syntax_nodes, SyntaxNode, SyntaxNodeVerify};
     pub use super::{Parser, SyntaxKind};
+    #[cfg(test)]
+    pub use super::{SyntaxNode, SyntaxNodeVerify, syntax_nodes};
     #[cfg(test)]
     pub use i_slint_parser_test_macro::parser_test;
 }
@@ -332,7 +332,7 @@ declare_syntax! {
     {
         Document -> [ *Component, *ExportsList, *ImportSpecifier, *StructDeclaration, *EnumDeclaration ],
         /// `DeclaredIdentifier := Element { ... }`
-        Component -> [ DeclaredIdentifier, Element ],
+        Component -> [ DeclaredIdentifier, ?UsesSpecifier, Element ],
         /// `id := Element { ... }`
         SubElement -> [ Element ],
         Element -> [ ?QualifiedName, *PropertyDeclaration, *Binding, *CallbackConnection,
@@ -383,6 +383,7 @@ declare_syntax! {
         AtGradient -> [*Expression],
         /// `@tr("foo", ...)`  // the string is a StringLiteral
         AtTr -> [?TrContext, ?TrPlural, *Expression],
+        AtMarkdown -> [*Expression],
         /// `"foo" =>`  in a `AtTr` node
         TrContext -> [],
         /// `| "foo" % n`  in a `AtTr` node
@@ -449,6 +450,10 @@ declare_syntax! {
         EnumValue -> [],
         /// `@rust-attr(...)`
         AtRustAttr -> [],
+        /// `uses { Foo from Bar, Baz from Qux }`
+        UsesSpecifier -> [ *UsesIdentifier ],
+        /// `Interface.Foo from bar`
+        UsesIdentifier -> [QualifiedName, DeclaredIdentifier],
     }
 }
 
@@ -463,6 +468,7 @@ pub struct Token {
     pub kind: SyntaxKind,
     pub text: SmolStr,
     pub offset: usize,
+    pub length: usize,
     #[cfg(feature = "proc_macro_span")]
     pub span: Option<proc_macro::Span>,
 }
@@ -473,6 +479,7 @@ impl Default for Token {
             kind: SyntaxKind::Eof,
             text: Default::default(),
             offset: 0,
+            length: 0,
             #[cfg(feature = "proc_macro_span")]
             span: None,
         }
@@ -692,7 +699,7 @@ impl Parser for DefaultParser<'_> {
     fn error(&mut self, e: impl Into<String>) {
         let current_token = self.current_token();
         #[allow(unused_mut)]
-        let mut span = crate::diagnostics::Span::new(current_token.offset);
+        let mut span = crate::diagnostics::Span::new(current_token.offset, current_token.length);
         #[cfg(feature = "proc_macro_span")]
         {
             span.span = current_token.span;
@@ -711,7 +718,7 @@ impl Parser for DefaultParser<'_> {
     fn warning(&mut self, e: impl Into<String>) {
         let current_token = self.current_token();
         #[allow(unused_mut)]
-        let mut span = crate::diagnostics::Span::new(current_token.offset);
+        let mut span = crate::diagnostics::Span::new(current_token.offset, current_token.length);
         #[cfg(feature = "proc_macro_span")]
         {
             span.span = current_token.span;
@@ -946,7 +953,8 @@ impl NodeOrToken {
 
 impl Spanned for SyntaxNode {
     fn span(&self) -> crate::diagnostics::Span {
-        crate::diagnostics::Span::new(self.node.text_range().start().into())
+        let range = self.node.text_range();
+        crate::diagnostics::Span::new(range.start().into(), range.len().into())
     }
 
     fn source_file(&self) -> Option<&SourceFile> {
@@ -966,7 +974,8 @@ impl Spanned for Option<SyntaxNode> {
 
 impl Spanned for SyntaxToken {
     fn span(&self) -> crate::diagnostics::Span {
-        crate::diagnostics::Span::new(self.token.text_range().start().into())
+        let range = self.token.text_range();
+        crate::diagnostics::Span::new(range.start().into(), range.len().into())
     }
 
     fn source_file(&self) -> Option<&SourceFile> {

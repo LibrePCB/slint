@@ -18,14 +18,14 @@ async fn parse_source(
     source_code: String,
     style: String,
     file_loader_fallback: impl Fn(
-            &Path,
-        ) -> core::pin::Pin<
-            Box<
-                dyn core::future::Future<
+        &Path,
+    ) -> core::pin::Pin<
+        Box<
+            dyn core::future::Future<
                     Output = Option<std::io::Result<(common::SourceFileVersion, String)>>,
                 >,
-            >,
-        > + 'static,
+        >,
+    > + 'static,
 ) -> (BuildDiagnostics, common::DocumentCache) {
     let config = {
         let mut tmp = common::document_cache::CompilerConfiguration::default();
@@ -87,7 +87,7 @@ pub fn recompile_test_with_sources(
     let url = lsp_types::Url::from_file_path(main_test_file_name()).unwrap();
     let source_code = code.get(&url).unwrap().clone();
     let (diagnostics, type_loader) = spin_on::spin_on(parse_source(
-        vec![],
+        Vec::new(),
         std::collections::HashMap::new(),
         url,
         source_code.to_string(),

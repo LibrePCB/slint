@@ -41,13 +41,23 @@ pub static COLLECTION: std::sync::LazyLock<Collection> = std::sync::LazyLock::ne
 
     let mut add_font_from_path = |path: std::path::PathBuf| {
         if let Ok(bytes) = std::fs::read(&path) {
+            let fonts = collection.register_fonts(bytes.into(), None);
+            for generic_family in [
+                fontique::GenericFamily::SansSerif,
+                fontique::GenericFamily::SystemUi,
+                fontique::GenericFamily::UiSansSerif,
+            ] {
+                collection.set_generic_families(
+                    generic_family,
+                    fonts.iter().map(|(family_id, _)| *family_id),
+                );
+            }
+
             // just use the first font of the first family in the file.
-            if let Some(font) =
-                collection.register_fonts(bytes.into(), None).first().and_then(|(id, infos)| {
-                    let info = infos.first()?;
-                    get_font_for_info(&mut collection, &mut source_cache, *id, &info)
-                })
-            {
+            if let Some(font) = fonts.first().and_then(|(id, infos)| {
+                let info = infos.first()?;
+                get_font_for_info(&mut collection, &mut source_cache, *id, &info)
+            }) {
                 default_fonts.insert(path, font);
             }
         }
@@ -131,6 +141,83 @@ impl std::ops::DerefMut for Collection {
     }
 }
 
+/// Handle to a registered font that can be used for future operations.
+///
+/// Returned by [`register_font_from_memory()`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct FontHandle {}
+
+/// Error type for font registration failures.
+///
+/// Returned by [`register_font_from_memory()`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum RegisterFontError {
+    /// The provided font data was empty
+    EmptyData,
+    /// No valid fonts could be extracted from the data
+    NoFontsFound,
+    /// The font data could not be parsed
+    InvalidFontData,
+}
+
+impl std::fmt::Display for RegisterFontError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegisterFontError::EmptyData => write!(f, "Font data is empty"),
+            RegisterFontError::NoFontsFound => {
+                write!(f, "No valid fonts found in the provided data")
+            }
+            RegisterFontError::InvalidFontData => write!(f, "Invalid font data"),
+        }
+    }
+}
+
+impl std::error::Error for RegisterFontError {}
+
+/// Register a font from byte data dynamically.
+///
+/// The argument is the owner of a slice of byte that contains the data of the font.
+/// It can for example be a `&'static [u8]` obtained from [`include_bytes!()`] or a `Vec<u8>`
+/// obtained from [`std::fs::read()`].
+///
+/// The data must be in the [TrueType (TTF) format](https://en.wikipedia.org/wiki/TrueType).
+///
+/// # Example
+///
+/// ```
+/// # use i_slint_common::sharedfontique as slint;
+/// let font_bytes = include_bytes!("sharedfontique/DejaVuSans.ttf");
+/// slint::register_font_from_memory(font_bytes).expect("Failed to register font");
+/// ```
+pub fn register_font_from_memory(
+    font_data: impl AsRef<[u8]> + Send + Sync + 'static,
+) -> Result<FontHandle, RegisterFontError> {
+    let data = font_data.as_ref();
+
+    if data.is_empty() {
+        return Err(RegisterFontError::EmptyData);
+    }
+
+    let blob = fontique::Blob::new(Arc::new(font_data));
+
+    let mut collection = get_collection();
+    let fonts = collection.register_fonts(blob, None);
+
+    if fonts.is_empty() {
+        return Err(RegisterFontError::NoFontsFound);
+    }
+
+    // Set up fallbacks for all scripts
+    for script in fontique::Script::all_samples().iter().map(|(script, _)| *script) {
+        collection
+            .append_fallbacks(fontique::FallbackKey::new(script, None), fonts.iter().map(|x| x.0));
+    }
+
+    Ok(FontHandle {})
+}
+
 /// Font metrics in design space. Scale with desired pixel size and divided by units_per_em
 /// to obtain pixel metrics.
 #[derive(Clone)]
@@ -164,3 +251,34 @@ pub const FALLBACK_FAMILIES: [fontique::GenericFamily; 2] = [
     fontique::GenericFamily::SansSerif,
     fontique::GenericFamily::SystemUi,
 ];
+
+/// Wraper around fontique::Blob to permit use of the blob as a key in the cache in the different renderers,
+/// to map the blob to the native type face representation (skia_safe::Typeface, femtovg::FontId, QRawFont, etc.).
+/// The use as key also ensures the blob remains strongly referenced, so that it doesn't vanish from the
+/// shared SourceCache (parley prunes it).
+pub struct HashedBlob(fontique::Blob<u8>);
+impl core::hash::Hash for HashedBlob {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.0.id().hash(state);
+    }
+}
+
+impl PartialEq for HashedBlob {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id() == other.0.id()
+    }
+}
+
+impl Eq for HashedBlob {}
+
+impl From<fontique::Blob<u8>> for HashedBlob {
+    fn from(value: fontique::Blob<u8>) -> Self {
+        Self(value)
+    }
+}
+
+impl AsRef<fontique::Blob<u8>> for HashedBlob {
+    fn as_ref(&self) -> &fontique::Blob<u8> {
+        &self.0
+    }
+}

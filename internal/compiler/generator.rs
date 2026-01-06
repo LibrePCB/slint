@@ -13,11 +13,11 @@ use smol_str::SmolStr;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
 
+use crate::CompilerConfiguration;
 use crate::expression_tree::{BindingExpression, Expression};
-use crate::langtype::ElementType;
+use crate::langtype::{BuiltinPrivateStruct, ElementType, StructName};
 use crate::namedreference::NamedReference;
 use crate::object_tree::{Component, Document, ElementRc};
-use crate::CompilerConfiguration;
 
 #[cfg(feature = "cpp")]
 pub mod cpp;
@@ -28,6 +28,9 @@ pub mod rust;
 #[cfg(feature = "rust")]
 pub mod rust_live_preview;
 
+#[cfg(feature = "python")]
+pub mod python;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum OutputFormat {
     #[cfg(feature = "cpp")]
@@ -36,6 +39,8 @@ pub enum OutputFormat {
     Rust,
     Interpreter,
     Llr,
+    #[cfg(feature = "python")]
+    Python,
 }
 
 impl OutputFormat {
@@ -47,6 +52,8 @@ impl OutputFormat {
             }
             #[cfg(feature = "rust")]
             Some("rs") => Some(Self::Rust),
+            #[cfg(feature = "python")]
+            Some("py") => Some(Self::Python),
             _ => None,
         }
     }
@@ -61,6 +68,8 @@ impl std::str::FromStr for OutputFormat {
             #[cfg(feature = "rust")]
             "rust" => Ok(Self::Rust),
             "llr" => Ok(Self::Llr),
+            #[cfg(feature = "python")]
+            "python" => Ok(Self::Python),
             _ => Err(format!("Unknown output format {s}")),
         }
     }
@@ -69,6 +78,7 @@ impl std::str::FromStr for OutputFormat {
 pub fn generate(
     format: OutputFormat,
     destination: &mut impl std::io::Write,
+    destination_path: Option<&std::path::Path>,
     doc: &Document,
     compiler_config: &CompilerConfiguration,
 ) -> std::io::Result<()> {
@@ -87,8 +97,7 @@ pub fn generate(
             write!(destination, "{output}")?;
         }
         OutputFormat::Interpreter => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 "Unsupported output format: The interpreter is not a valid output format yet.",
             )); // Perhaps byte code in the future?
         }
@@ -96,6 +105,11 @@ pub fn generate(
             let root = crate::llr::lower_to_item_tree::lower_to_item_tree(doc, compiler_config);
             let mut output = String::new();
             crate::llr::pretty_print::pretty_print(&root, &mut output).unwrap();
+            write!(destination, "{output}")?;
+        }
+        #[cfg(feature = "python")]
+        OutputFormat::Python => {
+            let output = python::generate(doc, compiler_config, destination_path)?;
             write!(destination, "{output}")?;
         }
     }
@@ -220,28 +234,24 @@ pub fn build_item_tree<T: ItemTreeBuilder>(
         // StandardButton is a sub-component and we'll call visit_children() on it. Now we are here. However as `StandardButton` has no children,
         // and therefore we would never recurse into `Button`'s children and thus miss the repeater. That is what this condition attempts to
         // detect and chain the children visitation.
-        if children.is_empty() {
-            if let Some(nested_subcomponent) = parent_item.borrow().sub_component() {
-                let sub_component_state = builder.enter_component(
-                    parent_item,
-                    nested_subcomponent,
-                    children_offset,
-                    state,
-                );
-                visit_children(
-                    &sub_component_state,
-                    &nested_subcomponent.root_element.borrow().children,
-                    nested_subcomponent,
-                    &nested_subcomponent.root_element,
-                    parent_index,
-                    relative_parent_index,
-                    children_offset,
-                    relative_children_offset,
-                    repeater_count,
-                    builder,
-                );
-                return;
-            }
+        if children.is_empty()
+            && let Some(nested_subcomponent) = parent_item.borrow().sub_component()
+        {
+            let sub_component_state =
+                builder.enter_component(parent_item, nested_subcomponent, children_offset, state);
+            visit_children(
+                &sub_component_state,
+                &nested_subcomponent.root_element.borrow().children,
+                nested_subcomponent,
+                &nested_subcomponent.root_element,
+                parent_index,
+                relative_parent_index,
+                children_offset,
+                relative_children_offset,
+                repeater_count,
+                builder,
+            );
+            return;
         }
 
         let mut offset = children_offset + children.len() as u32;
@@ -326,13 +336,12 @@ pub fn build_item_tree<T: ItemTreeBuilder>(
             let mut item = item.clone();
             let mut component_state = component_state.clone();
             while let Some((base, state)) = {
-                let base = item.borrow().sub_component().map(|c| {
+                item.borrow().sub_component().map(|c| {
                     (
                         c.root_element.clone(),
                         builder.enter_component(&item, c, children_offset, &component_state),
                     )
-                });
-                base
+                })
             } {
                 item = base;
                 component_state = state;
@@ -371,17 +380,17 @@ pub fn handle_property_bindings_init(
             binding_expression.expression.visit_recursive(&mut |e| {
                 if let Expression::PropertyReference(nr) = e {
                     let elem = nr.element();
-                    if Weak::ptr_eq(&elem.borrow().enclosing_component, component) {
-                        if let Some(be) = elem.borrow().bindings.get(nr.name()) {
-                            handle_property_inner(
-                                component,
-                                &elem,
-                                nr.name(),
-                                &be.borrow(),
-                                handle_property,
-                                processed,
-                            );
-                        }
+                    if Weak::ptr_eq(&elem.borrow().enclosing_component, component)
+                        && let Some(be) = elem.borrow().bindings.get(nr.name())
+                    {
+                        handle_property_inner(
+                            component,
+                            &elem,
+                            nr.name(),
+                            &be.borrow(),
+                            handle_property,
+                            processed,
+                        );
                     }
                 }
             })
@@ -423,7 +432,7 @@ pub fn for_each_const_properties(
                     .iter()
                     .filter(|(_, x)| {
                         x.property_type.is_property_type() &&
-                            !matches!( &x.property_type, crate::langtype::Type::Struct(s) if s.name.as_ref().is_some_and(|name| name.ends_with("::StateInfo")))
+                            !matches!( &x.property_type, crate::langtype::Type::Struct(s) if matches!(s.name, StructName::BuiltinPrivate(BuiltinPrivateStruct::StateInfo)))
                     })
                     .map(|(k, _)| k.clone()),
             );
@@ -454,7 +463,7 @@ pub fn for_each_const_properties(
                 ElementType::Builtin(_) => {
                     unreachable!("builtin element should have been resolved")
                 }
-                ElementType::Global | ElementType::Error => break,
+                ElementType::Global | ElementType::Interface | ElementType::Error => break,
             }
         }
         for c in all_prop {

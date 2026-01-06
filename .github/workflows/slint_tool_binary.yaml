@@ -68,7 +68,7 @@ jobs:
 
         runs-on: ${{ matrix.runner}}
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: ${{ matrix.arch }}
@@ -95,7 +95,7 @@ jobs:
                   cd pkg
                   Compress-Archive -Path slint-${{ github.event.inputs.program || inputs.program }}\* -Destination ..\slint-${{ github.event.inputs.program || inputs.program }}-windows-${{ matrix.package_suffix }}.zip
             - name: Upload artifact
-              uses: actions/upload-artifact@v5
+              uses: actions/upload-artifact@v6
               with:
                   name: slint-${{ github.event.inputs.program || inputs.program }}-windows-${{ matrix.package_suffix }}
                   path: |
@@ -104,7 +104,7 @@ jobs:
     build_linux:
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
               with:
                   old-ubuntu: true
@@ -126,7 +126,7 @@ jobs:
             - name: Tar artifacts to preserve permissions
               run: tar czvf slint-${{ github.event.inputs.program || inputs.program }}-linux.tar.gz slint-${{ github.event.inputs.program || inputs.program }}
             - name: Upload artifact
-              uses: actions/upload-artifact@v5
+              uses: actions/upload-artifact@v6
               with:
                   name: slint-${{ github.event.inputs.program || inputs.program }}-linux
                   path: slint-${{ github.event.inputs.program || inputs.program }}-linux.tar.gz
@@ -139,7 +139,7 @@ jobs:
                 - armv7-unknown-linux-gnueabihf
                 - aarch64-unknown-linux-gnu
       steps:
-          - uses: actions/checkout@v5
+          - uses: actions/checkout@v6
           - uses: ./.github/actions/setup-rust
             with:
                 target: x86_64-unknown-linux-gnu
@@ -161,7 +161,7 @@ jobs:
           - name: Tar artifacts to preserve permissions
             run: tar czvf slint-${{ github.event.inputs.program || inputs.program }}-${{ matrix.target }}.tar.gz slint-${{ github.event.inputs.program || inputs.program }}-${{ matrix.target }}
           - name: Upload artifact
-            uses: actions/upload-artifact@v5
+            uses: actions/upload-artifact@v6
             with:
                 name: slint-${{ github.event.inputs.program || inputs.program }}-${{ matrix.target }}
                 path: slint-${{ github.event.inputs.program || inputs.program }}-${{ matrix.target }}.tar.gz
@@ -169,7 +169,10 @@ jobs:
     build_macos:
         runs-on: macos-26
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
+            - uses: ./.github/actions/setup-rust
+              with:
+                  target: x86_64-apple-darwin
             - uses: ./.github/actions/setup-rust
               with:
                   target: aarch64-apple-darwin
@@ -177,13 +180,15 @@ jobs:
               with:
                   crate: cargo-about
                   version: "=0.6.6"
+            - name: Build x86-64
+              run: cargo build --verbose --target x86_64-apple-darwin --no-default-features --features ${{ github.event.inputs.features || inputs.features }} --release -p slint-${{ github.event.inputs.program || inputs.program }}
             - name: Build aarch64
               run: cargo build --verbose --target aarch64-apple-darwin --no-default-features --features ${{ github.event.inputs.features || inputs.features }} --release -p slint-${{ github.event.inputs.program || inputs.program }}
             - name: Create artifact directory
               run: |
                   mkdir -p slint-${{ github.event.inputs.program || inputs.program }}
                   cd slint-${{ github.event.inputs.program || inputs.program }}
-                  lipo -create -output ./slint-${{ github.event.inputs.program || inputs.program }} ../target/aarch64-apple-darwin/release/slint-${{ github.event.inputs.program || inputs.program }}
+                  lipo -create -output ./slint-${{ github.event.inputs.program || inputs.program }} ../target/aarch64-apple-darwin/release/slint-${{ github.event.inputs.program || inputs.program }} ../target/x86_64-apple-darwin/release/slint-${{ github.event.inputs.program || inputs.program }}
                   install_name_tool -add_rpath @executable_path/. ./slint-${{ github.event.inputs.program || inputs.program }}
                   cd ..
                   cd tools/${{ github.event.inputs.program || inputs.program }}
@@ -199,7 +204,7 @@ jobs:
             - name: Tar artifacts to preserve permissions
               run: tar czvf slint-${{ github.event.inputs.program || inputs.program }}-macos.tar.gz slint-${{ github.event.inputs.program || inputs.program }}
             - name: Upload artifact
-              uses: actions/upload-artifact@v5
+              uses: actions/upload-artifact@v6
               with:
                   name: slint-${{ github.event.inputs.program || inputs.program }}-macos
                   path: slint-${{ github.event.inputs.program || inputs.program }}-macos.tar.gz

@@ -7,8 +7,8 @@ use core::ffi::c_void;
 use i_slint_core::api::{
     LogicalSize, PhysicalPosition, PhysicalSize, Window, WindowPosition, WindowSize,
 };
-use i_slint_core::graphics::euclid;
 use i_slint_core::graphics::IntSize;
+use i_slint_core::graphics::euclid;
 use i_slint_core::platform::{Clipboard, Platform, PlatformError};
 use i_slint_core::renderer::Renderer;
 use i_slint_core::window::ffi::WindowAdapterRcOpaque;
@@ -181,7 +181,9 @@ pub unsafe extern "C" fn slint_window_adapter_new(
         set_position,
     });
 
-    core::ptr::write(target as *mut Rc<dyn WindowAdapter>, window);
+    unsafe {
+        core::ptr::write(target as *mut Rc<dyn WindowAdapter>, window);
+    }
 }
 
 type PlatformUserData = *mut c_void;
@@ -317,7 +319,7 @@ pub unsafe extern "C" fn slint_platform_register(
 pub unsafe extern "C" fn slint_windowrc_has_active_animations(
     handle: *const WindowAdapterRcOpaque,
 ) -> bool {
-    let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
+    let window_adapter = unsafe { &*(handle as *const Rc<dyn WindowAdapter>) };
     window_adapter.window().has_active_animations()
 }
 
@@ -338,27 +340,31 @@ pub struct PlatformTaskOpaque(*const c_void, *const c_void);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_platform_task_drop(event: PlatformTaskOpaque) {
-    drop(Box::from_raw(core::mem::transmute::<PlatformTaskOpaque, *mut dyn FnOnce()>(event)));
+    unsafe {
+        drop(Box::from_raw(core::mem::transmute::<PlatformTaskOpaque, *mut dyn FnOnce()>(event)));
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_platform_task_run(event: PlatformTaskOpaque) {
-    let f = Box::from_raw(core::mem::transmute::<PlatformTaskOpaque, *mut dyn FnOnce()>(event));
-    f();
+    unsafe {
+        let f = Box::from_raw(core::mem::transmute::<PlatformTaskOpaque, *mut dyn FnOnce()>(event));
+        f();
+    }
 }
 
 #[cfg(feature = "renderer-software")]
 mod software_renderer {
     use super::*;
     type SoftwareRendererOpaque = *const c_void;
+    use i_slint_core::SharedVector;
     use i_slint_core::graphics::{IntRect, Rgb8Pixel};
-    use i_slint_core::software_renderer::{
+    use i_slint_renderer_software::{
         PhysicalRegion, RepaintBufferType, Rgb565Pixel, SoftwareRenderer,
     };
-    use i_slint_core::SharedVector;
 
     #[cfg(feature = "experimental")]
-    use i_slint_core::software_renderer::{TargetPixelBuffer, TexturePixelFormat};
+    use i_slint_renderer_software::{TargetPixelBuffer, TexturePixelFormat};
 
     #[cfg(feature = "experimental")]
     type CppTargetPixelBufferUserData = *mut c_void;
@@ -392,8 +398,8 @@ mod software_renderer {
         pub tiling_gap_y: u32,
     }
     #[cfg(feature = "experimental")]
-    impl From<&i_slint_core::software_renderer::DrawTextureArgs> for DrawTextureArgs {
-        fn from(from: &i_slint_core::software_renderer::DrawTextureArgs) -> Self {
+    impl From<&i_slint_renderer_software::DrawTextureArgs> for DrawTextureArgs {
+        fn from(from: &i_slint_renderer_software::DrawTextureArgs) -> Self {
             let source = from.source();
             Self {
                 image_data: source.data.as_ptr(),
@@ -442,8 +448,8 @@ mod software_renderer {
         pub rotation: i32,
     }
     #[cfg(feature = "experimental")]
-    impl From<&i_slint_core::software_renderer::DrawRectangleArgs> for DrawRectangleArgs {
-        fn from(from: &i_slint_core::software_renderer::DrawRectangleArgs) -> Self {
+    impl From<&i_slint_renderer_software::DrawRectangleArgs> for DrawRectangleArgs {
+        fn from(from: &i_slint_renderer_software::DrawRectangleArgs) -> Self {
             Self {
                 x: from.x,
                 y: from.y,
@@ -488,7 +494,7 @@ mod software_renderer {
     }
 
     #[cfg(feature = "experimental")]
-    impl<TargetPixel: i_slint_core::software_renderer::TargetPixel> TargetPixelBuffer
+    impl<TargetPixel: i_slint_renderer_software::TargetPixel> TargetPixelBuffer
         for CppTargetPixelBuffer<TargetPixel>
     {
         type TargetPixel = TargetPixel;
@@ -518,7 +524,7 @@ mod software_renderer {
         /// Draw a rectangle specified by the DrawRectangleArgs. That rectangle must be clipped to the given region
         fn draw_rectangle(
             &mut self,
-            args: &i_slint_core::software_renderer::DrawRectangleArgs,
+            args: &i_slint_renderer_software::DrawRectangleArgs,
             clip: &PhysicalRegion,
         ) -> bool {
             let args = args.into();
@@ -527,7 +533,7 @@ mod software_renderer {
 
         fn draw_texture(
             &mut self,
-            texture: &i_slint_core::software_renderer::DrawTextureArgs,
+            texture: &i_slint_renderer_software::DrawTextureArgs,
             clip: &PhysicalRegion,
         ) -> bool {
             let texture = texture.into();
@@ -549,7 +555,9 @@ mod software_renderer {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_software_renderer_drop(r: SoftwareRendererOpaque) {
-        drop(Box::from_raw(r as *mut SoftwareRenderer));
+        unsafe {
+            drop(Box::from_raw(r as *mut SoftwareRenderer));
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -559,9 +567,11 @@ mod software_renderer {
         buffer_len: usize,
         pixel_stride: usize,
     ) -> PhysicalRegion {
-        let buffer = core::slice::from_raw_parts_mut(buffer, buffer_len);
-        let renderer = &*(r as *const SoftwareRenderer);
-        renderer.render(buffer, pixel_stride)
+        unsafe {
+            let buffer = core::slice::from_raw_parts_mut(buffer, buffer_len);
+            let renderer = &*(r as *const SoftwareRenderer);
+            renderer.render(buffer, pixel_stride)
+        }
     }
 
     #[cfg(feature = "experimental")]
@@ -591,9 +601,11 @@ mod software_renderer {
         buffer_len: usize,
         pixel_stride: usize,
     ) -> PhysicalRegion {
-        let buffer = core::slice::from_raw_parts_mut(buffer as *mut Rgb565Pixel, buffer_len);
-        let renderer = &*(r as *const SoftwareRenderer);
-        renderer.render(buffer, pixel_stride)
+        unsafe {
+            let buffer = core::slice::from_raw_parts_mut(buffer as *mut Rgb565Pixel, buffer_len);
+            let renderer = &*(r as *const SoftwareRenderer);
+            renderer.render(buffer, pixel_stride)
+        }
     }
 
     struct LineByLineProcessor<TargetPixel> {
@@ -608,8 +620,8 @@ mod software_renderer {
         user_data: *mut core::ffi::c_void,
     }
 
-    impl<TargetPixel: i_slint_core::software_renderer::TargetPixel>
-        i_slint_core::software_renderer::LineBufferProvider for LineByLineProcessor<TargetPixel>
+    impl<TargetPixel: i_slint_renderer_software::TargetPixel>
+        i_slint_renderer_software::LineBufferProvider for LineByLineProcessor<TargetPixel>
     {
         type TargetPixel = TargetPixel;
         fn process_line(
@@ -670,7 +682,7 @@ mod software_renderer {
         ),
         user_data: *mut core::ffi::c_void,
     ) -> PhysicalRegion {
-        let renderer = &*(r as *const SoftwareRenderer);
+        let renderer = unsafe { &*(r as *const SoftwareRenderer) };
         let processor = LineByLineProcessor { process_line_fn, user_data };
         renderer.render_by_line(processor)
     }
@@ -688,7 +700,7 @@ mod software_renderer {
         ),
         user_data: *mut core::ffi::c_void,
     ) -> PhysicalRegion {
-        let renderer = &*(r as *const SoftwareRenderer);
+        let renderer = unsafe { &*(r as *const SoftwareRenderer) };
         let processor = LineByLineProcessor { process_line_fn, user_data };
         renderer.render_by_line(processor)
     }
@@ -698,8 +710,8 @@ mod software_renderer {
         r: SoftwareRendererOpaque,
         rotation: i32,
     ) {
-        use i_slint_core::software_renderer::RenderingRotation;
-        let renderer = &*(r as *const SoftwareRenderer);
+        use i_slint_renderer_software::RenderingRotation;
+        let renderer = unsafe { &*(r as *const SoftwareRenderer) };
         renderer.set_rendering_rotation(match rotation {
             90 => RenderingRotation::Rotate90,
             180 => RenderingRotation::Rotate180,
@@ -712,8 +724,10 @@ mod software_renderer {
     pub unsafe extern "C" fn slint_software_renderer_handle(
         r: SoftwareRendererOpaque,
     ) -> RendererPtr {
-        let r = (r as *const SoftwareRenderer) as *const dyn Renderer;
-        core::mem::transmute(r)
+        unsafe {
+            let r = (r as *const SoftwareRenderer) as *const dyn Renderer;
+            core::mem::transmute(r)
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -741,7 +755,7 @@ pub mod skia {
             &self,
         ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
             // Safety: It is assumed that the C++ side keeps the window/display handles alive.
-            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(self.0 .1) })
+            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(self.0.1) })
         }
     }
 
@@ -750,7 +764,7 @@ pub mod skia {
             &self,
         ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
             // Safety: It is assumed that the C++ side keeps the window/display handles alive.
-            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0 .0) })
+            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0.0) })
         }
     }
 
@@ -801,7 +815,7 @@ pub mod skia {
                 hnd
             }),
             RawDisplayHandle::Xcb(XcbDisplayHandle::new(
-                Some(core::ptr::NonNull::new_unchecked(connection)),
+                core::ptr::NonNull::new(connection),
                 screen,
             )),
         ));
@@ -823,7 +837,7 @@ pub mod skia {
                 hnd
             }),
             RawDisplayHandle::Xlib(XlibDisplayHandle::new(
-                Some(core::ptr::NonNull::new_unchecked(display)),
+                core::ptr::NonNull::new(display),
                 screen,
             )),
         ));
@@ -837,11 +851,11 @@ pub mod skia {
     ) -> CppRawHandleOpaque {
         use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
         let handle = CppRawHandle::from((
-            RawWindowHandle::Wayland(WaylandWindowHandle::new(core::ptr::NonNull::new_unchecked(
-                surface,
-            ))),
+            RawWindowHandle::Wayland(WaylandWindowHandle::new(
+                core::ptr::NonNull::new(surface).unwrap(),
+            )),
             RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-                core::ptr::NonNull::new_unchecked(display),
+                core::ptr::NonNull::new(display).unwrap(),
             )),
         ));
         Box::into_raw(Box::new(handle)) as CppRawHandleOpaque
@@ -854,9 +868,9 @@ pub mod skia {
     ) -> CppRawHandleOpaque {
         use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle};
         let handle = CppRawHandle::from((
-            RawWindowHandle::AppKit(AppKitWindowHandle::new(core::ptr::NonNull::new_unchecked(
-                ns_view,
-            ))),
+            RawWindowHandle::AppKit(AppKitWindowHandle::new(
+                core::ptr::NonNull::new(ns_view).unwrap(),
+            )),
             RawDisplayHandle::AppKit(AppKitDisplayHandle::new()),
         ));
         Box::into_raw(Box::new(handle)) as CppRawHandleOpaque
@@ -864,7 +878,7 @@ pub mod skia {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_raw_window_handle_drop(handle: CppRawHandleOpaque) {
-        drop(Box::from_raw(handle as *mut CppRawHandle))
+        unsafe { drop(Box::from_raw(handle as *mut CppRawHandle)) }
     }
 
     type SkiaRendererOpaque = *const c_void;
@@ -875,7 +889,7 @@ pub mod skia {
         handle_opaque: CppRawHandleOpaque,
         size: IntSize,
     ) -> SkiaRendererOpaque {
-        let handle = &*(handle_opaque as *const CppRawHandle);
+        let handle = unsafe { &*(handle_opaque as *const CppRawHandle) };
 
         let boxed_renderer: Box<SkiaRenderer> = Box::new(
             SkiaRenderer::new(
@@ -891,18 +905,20 @@ pub mod skia {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_skia_renderer_drop(r: SkiaRendererOpaque) {
-        drop(Box::from_raw(r as *mut SkiaRenderer))
+        unsafe { drop(Box::from_raw(r as *mut SkiaRenderer)) }
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_skia_renderer_render(r: SkiaRendererOpaque) {
-        let r = &*(r as *const SkiaRenderer);
+        let r = unsafe { &*(r as *const SkiaRenderer) };
         r.render().unwrap();
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_skia_renderer_handle(r: SkiaRendererOpaque) -> RendererPtr {
-        let r = (r as *const SkiaRenderer) as *const dyn Renderer;
-        core::mem::transmute(r)
+        unsafe {
+            let r = (r as *const SkiaRenderer) as *const dyn Renderer;
+            core::mem::transmute(r)
+        }
     }
 }

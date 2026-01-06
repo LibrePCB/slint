@@ -5,7 +5,7 @@
 
 use crate::expression_tree::{BuiltinFunction, Expression};
 use crate::namedreference::NamedReference;
-use crate::object_tree::{visit_all_expressions, Component};
+use crate::object_tree::{Component, visit_all_expressions};
 use std::rc::Rc;
 
 pub fn lower_text_input_interface(component: &Rc<Component>) {
@@ -14,7 +14,7 @@ pub fn lower_text_input_interface(component: &Rc<Component>) {
             Expression::PropertyReference(nr) if is_input_text_focused_prop(nr) => {
                 *e = Expression::FunctionCall {
                     function: BuiltinFunction::TextInputFocused.into(),
-                    arguments: vec![],
+                    arguments: Vec::new(),
                     source_location: None,
                 };
             }
@@ -35,7 +35,7 @@ pub fn lower_text_input_interface(component: &Rc<Component>) {
 }
 
 fn is_input_text_focused_prop(nr: &NamedReference) -> bool {
-    if !nr.element().borrow().builtin_type().is_some_and(|bt| bt.name == "TextInputInterface") {
+    if nr.element().borrow().builtin_type().is_none_or(|bt| bt.name != "TextInputInterface") {
         return false;
     }
     assert_eq!(nr.name(), "text-input-focused");

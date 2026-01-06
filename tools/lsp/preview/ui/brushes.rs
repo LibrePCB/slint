@@ -69,7 +69,7 @@ fn color_to_short_string(color: slint::Color) -> String {
 }
 
 pub fn string_to_color(text: &str) -> Option<slint::Color> {
-    i_slint_compiler::literals::parse_color_literal(text).map(slint::Color::from_argb_encoded)
+    i_slint_common::color_parsing::parse_color_literal(text).map(slint::Color::from_argb_encoded)
 }
 
 fn as_json_brush(
@@ -107,8 +107,16 @@ fn as_slint_brush(
         }
         ui::BrushKind::Conic => {
             let stops = sorted_gradient_stops(stops);
+            let angle = angle.rem_euclid(360.0);
+            let prefix = if angle.abs() > f32::EPSILON {
+                slint::format!("from {}deg, ", angle)
+            } else {
+                slint::SharedString::new()
+            };
+
             slint::format!(
-                "@conic-gradient({})",
+                "@conic-gradient({}{})",
+                prefix,
                 stops
                     .iter()
                     .map(|s| format!("{} {}deg", color_to_string(s.color), s.position * 360.0))
@@ -147,7 +155,7 @@ pub fn create_brush(
             i_slint_core::graphics::RadialGradientBrush::new_circle(stops.drain(..)),
         ),
         ui::BrushKind::Conic => slint::Brush::ConicGradient(
-            i_slint_core::graphics::ConicGradientBrush::new(stops.drain(..)),
+            i_slint_core::graphics::ConicGradientBrush::new(angle, stops.drain(..)),
         ),
     }
 }

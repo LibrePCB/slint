@@ -3,6 +3,8 @@
 
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
+#![cfg_attr(slint_nightly_test, feature(non_exhaustive_omitted_patterns_lint))]
+#![cfg_attr(slint_nightly_test, warn(non_exhaustive_omitted_patterns))]
 
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroU32;
@@ -10,21 +12,19 @@ use std::pin::Pin;
 use std::rc::{Rc, Weak};
 
 use i_slint_common::sharedfontique;
+use i_slint_core::Brush;
 use i_slint_core::api::{RenderingNotifier, RenderingState, SetRenderingNotifierError};
-use i_slint_core::graphics::{euclid, rendering_metrics_collector::RenderingMetricsCollector};
+use i_slint_core::graphics::SharedPixelBuffer;
 use i_slint_core::graphics::{BorderRadius, Rgba8Pixel};
-use i_slint_core::graphics::{FontRequest, SharedPixelBuffer};
+use i_slint_core::graphics::{euclid, rendering_metrics_collector::RenderingMetricsCollector};
 use i_slint_core::item_rendering::ItemRenderer;
 use i_slint_core::item_tree::ItemTreeWeak;
-use i_slint_core::items::TextWrap;
-use i_slint_core::lengths::{
-    LogicalLength, LogicalPoint, LogicalRect, LogicalSize, PhysicalPx, ScaleFactor,
-};
+use i_slint_core::items::{ItemRc, TextWrap};
+use i_slint_core::lengths::{LogicalLength, LogicalPoint, LogicalRect, LogicalSize, PhysicalPx};
 use i_slint_core::platform::PlatformError;
 use i_slint_core::renderer::RendererSealed;
 use i_slint_core::textlayout::sharedparley;
 use i_slint_core::window::{WindowAdapter, WindowInner};
-use i_slint_core::Brush;
 use images::TextureImporter;
 
 type PhysicalLength = euclid::Length<f32, PhysicalPx>;
@@ -206,21 +206,18 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                 if let Some(window_item_rc) = window_inner.window_item_rc() {
                     let window_item =
                         window_item_rc.downcast::<i_slint_core::items::WindowItem>().unwrap();
-                    match window_item.as_pin_ref().background() {
-                        Brush::SolidColor(..) => {
-                            // clear_rect is called earlier
-                        }
-                        _ => {
-                            // Draws the window background as gradient
-                            item_renderer.draw_rectangle(
-                                window_item.as_pin_ref(),
-                                &window_item_rc,
-                                i_slint_core::lengths::logical_size_from_api(
-                                    window.size().to_logical(window_inner.scale_factor()),
-                                ),
-                                &window_item.as_pin_ref().cached_rendering_data,
-                            );
-                        }
+                    if let Brush::SolidColor(..) = window_item.as_pin_ref().background() {
+                        // clear_rect is called earlier
+                    } else {
+                        // Draws the window background as gradient
+                        item_renderer.draw_rectangle(
+                            window_item.as_pin_ref(),
+                            &window_item_rc,
+                            i_slint_core::lengths::logical_size_from_api(
+                                window.size().to_logical(window_inner.scale_factor()),
+                            ),
+                            &window_item.as_pin_ref().cached_rendering_data,
+                        );
                     }
                 }
 
@@ -286,19 +283,26 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
 impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
     fn text_size(
         &self,
-        font_request: i_slint_core::graphics::FontRequest,
-        text: &str,
+        text_item: Pin<&dyn i_slint_core::item_rendering::RenderString>,
+        item_rc: &ItemRc,
         max_width: Option<LogicalLength>,
-        scale_factor: ScaleFactor,
         text_wrap: TextWrap,
     ) -> LogicalSize {
-        sharedparley::text_size(font_request, text, max_width, scale_factor, text_wrap)
+        sharedparley::text_size(self, text_item, item_rc, max_width, text_wrap)
+    }
+
+    fn char_size(
+        &self,
+        text_item: Pin<&dyn i_slint_core::item_rendering::HasFont>,
+        item_rc: &i_slint_core::item_tree::ItemRc,
+        ch: char,
+    ) -> LogicalSize {
+        sharedparley::char_size(text_item, item_rc, ch).unwrap_or_default()
     }
 
     fn font_metrics(
         &self,
         font_request: i_slint_core::graphics::FontRequest,
-        _scale_factor: ScaleFactor,
     ) -> i_slint_core::items::FontMetrics {
         sharedparley::font_metrics(font_request)
     }
@@ -306,31 +310,19 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
     fn text_input_byte_offset_for_position(
         &self,
         text_input: Pin<&i_slint_core::items::TextInput>,
+        item_rc: &i_slint_core::item_tree::ItemRc,
         pos: LogicalPoint,
-        font_request: FontRequest,
-        scale_factor: ScaleFactor,
     ) -> usize {
-        sharedparley::text_input_byte_offset_for_position(
-            text_input,
-            pos,
-            font_request,
-            scale_factor,
-        )
+        sharedparley::text_input_byte_offset_for_position(self, text_input, item_rc, pos)
     }
 
     fn text_input_cursor_rect_for_byte_offset(
         &self,
         text_input: Pin<&i_slint_core::items::TextInput>,
+        item_rc: &i_slint_core::item_tree::ItemRc,
         byte_offset: usize,
-        font_request: FontRequest,
-        scale_factor: ScaleFactor,
     ) -> LogicalRect {
-        sharedparley::text_input_cursor_rect_for_byte_offset(
-            text_input,
-            byte_offset,
-            font_request,
-            scale_factor,
-        )
+        sharedparley::text_input_cursor_rect_for_byte_offset(self, text_input, item_rc, byte_offset)
     }
 
     fn register_font_from_memory(
@@ -388,6 +380,13 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
                 self.texture_cache.borrow_mut().clear();
             })
             .ok();
+    }
+
+    fn window_adapter(&self) -> Option<Rc<dyn WindowAdapter>> {
+        self.maybe_window_adapter
+            .borrow()
+            .as_ref()
+            .and_then(|window_adapter| window_adapter.upgrade())
     }
 
     fn resize(&self, size: i_slint_core::api::PhysicalSize) -> Result<(), PlatformError> {
@@ -491,7 +490,9 @@ impl<B: GraphicsBackend> FemtoVGRendererExt for FemtoVGRenderer<B> {
 
         if let Some(canvas) = self.canvas.borrow_mut().take() {
             if Rc::strong_count(&canvas) != 1 {
-                i_slint_core::debug_log!("internal warning: there are canvas references left when destroying the window. OpenGL resources will be leaked.")
+                i_slint_core::debug_log!(
+                    "internal warning: there are canvas references left when destroying the window. OpenGL resources will be leaked."
+                )
             }
         }
 

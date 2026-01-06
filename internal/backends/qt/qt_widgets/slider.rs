@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use i_slint_core::{
-    input::{key_codes, FocusEventResult, FocusReason, KeyEventType},
+    input::{FocusEventResult, FocusReason, KeyEventType, key_codes},
     items::PointerEventButton,
 };
 
@@ -47,6 +47,7 @@ void initQSliderOptions(QStyleOptionSlider &option, bool pressed, bool enabled, 
     option.activeSubControls = { active_controls };
     if (vertical) {
         option.orientation = Qt::Vertical;
+        option.upsideDown = vertical;
     } else {
         option.orientation = Qt::Horizontal;
         option.state |= QStyle::State_Horizontal;
@@ -200,6 +201,7 @@ impl Item for NativeSlider {
             option.rect = { QPoint{}, size };
             return style->hitTestComplexControl(QStyle::CC_Slider, &option, pos, widget);
         });
+        #[cfg_attr(slint_nightly_test, allow(non_exhaustive_omitted_patterns))]
         let result = match event {
             _ if !enabled => {
                 data.pressed = 0;
@@ -226,13 +228,30 @@ impl Item for NativeSlider {
                 InputEventResult::EventAccepted
             }
             MouseEvent::Moved { position: pos, .. } => {
-                let (coord, size) =
-                    if vertical { (pos.y, size.height) } else { (pos.x, size.width) };
                 if data.pressed != 0 {
-                    // FIXME: use QStyle::subControlRect to find out the actual size of the groove
-                    let new_val = data.pressed_val
-                        + ((coord as f32) - data.pressed_x) * (self.maximum() - self.minimum())
-                            / size as f32;
+                    let s = cpp!(unsafe [
+                        size as "QSize",
+                        enabled as "bool",
+                        value as "int",
+                        min as "int",
+                        max as "int",
+                        active_controls as "int",
+                        pressed as "bool",
+                        vertical as "bool",
+                        widget as "QWidget*"
+                    ] -> qttypes::QSize as "QSize" {
+                        QStyleOptionSlider option;
+                        initQSliderOptions(option, pressed, enabled, active_controls, min, max, value, vertical);
+                        option.rect = { QPoint{}, size };
+                        auto gr = qApp->style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderGroove, widget);
+                        auto sr = qApp->style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, widget);
+                        return gr.size() - sr.size();
+                    });
+                    let (coord, size) = if vertical { (pos.y, s.height) } else { (pos.x, s.width) };
+                    let delta = (coord as f32) - data.pressed_x;
+                    let delta = if vertical { -delta } else { delta };
+                    let new_val =
+                        data.pressed_val + delta * (self.maximum() - self.minimum()) / size as f32;
                     self.set_value(new_val);
                     InputEventResult::GrabMouse
                 } else {
@@ -278,7 +297,7 @@ impl Item for NativeSlider {
             let vertical = self.orientation() == Orientation::Vertical;
 
             if (!vertical && keycode == key_codes::RightArrow)
-                || (vertical && keycode == key_codes::DownArrow)
+                || (vertical && keycode == key_codes::UpArrow)
             {
                 if event.event_type == KeyEventType::KeyPressed {
                     self.set_value(self.value() + self.step());
@@ -288,7 +307,7 @@ impl Item for NativeSlider {
                 return KeyEventResult::EventAccepted;
             }
             if (!vertical && keycode == key_codes::LeftArrow)
-                || (vertical && keycode == key_codes::UpArrow)
+                || (vertical && keycode == key_codes::DownArrow)
             {
                 if event.event_type == KeyEventType::KeyPressed {
                     self.set_value(self.value() - self.step());

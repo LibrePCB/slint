@@ -1,7 +1,74 @@
-<!-- Copyright © SixtyFPS GmbH <info@slint.dev> ; SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0 -->
 
 # Changelog
 All notable changes to this project are documented in this file.
+
+## [1.15.0] - Unreleased
+
+### General
+
+ - Adjust Android implementation of the window safe area to match the iOS implementation. This is a breaking change!
+ - When resizing the window, try to keep the focus item visible if it's in a Flickable.
+ - When focusing an element that's not fully visible, try to scroll a parent Flickable so that it is.
+ - winit: Do not enable the x11/wayland feature through accessibility feature
+ - Skia: Fixed colorized tile rendering (#9860)
+ - partial renderer: Fixed `BorrowMutError` panic if items gets destroyed during rendering (#9882)
+ - software renderer: Support for Path (with `std`)
+ - linuxkms: Added support for FB Renderer Format DrmFourcc(BA24) in LinuxKMS (#9862)
+ - Fixed rendering of clipped layer (#10037)
+ - Change diagnostics to in use the `annotate-snippets` crate
+ - Diagnostics now report range instead of just a position
+ - Translations: allow to opt out of default context
+ - Fixed debug performance overlay not working (#10198)
+ - Qt backend: worked around leak in Plasma when setting a window icon.
+
+### Slint Language
+
+ - Added ability to have two way binding to struct fields
+ - Added four new properties to the Window element for exposing the safe area to Slint.
+ - Added the `accessible-id` property
+ - Added `AccessibleRole.radio-button`
+ - Added `stroke-line-join` for Path (#9912)
+ - Added `from <angle>` syntax to `@conic-gradient`
+ - `row`, `col`, `colspan`, and `rowspan` properties can now be changed at runtime
+ - Support for `if` and `for` in `GridLayout`
+ - New `StyledText` element for displaying rich text, as well as `styled-text` type
+ - Fixed missing dependency detection on `Image.source-clip`
+
+### Widgets
+
+ - ScrollView: In fluent style, fixed scroll bars to adjust to each other's visibility
+ - Slider: Implemented increment, decrement and set-value accessibility actions on Slider (#9975)
+ - Slider: Inverted vertical slider direction
+ - Fixed some widgets that could still be edited when disabled or read-only
+ - SpinBox: added `read-only` property
+ - TabWidget: added `orientation` property (#3688)
+ - TextEdit and LineEdit: Added `font-family` and `font-italic` properties
+
+### Rust
+
+ - Added `slint::register_font_from_memory`
+ - Added `slint::language::ColorScheme`
+ - In live preview mode, fixed panic when custom Model access the component's property (#10278)
+
+### C++
+
+ - Fixed crash when binding is accessing a deleted parent (#3464)
+ - Fixed mingw-llvm builds
+ - Fixed build generation failing when compiling multiple .slint files
+ - Fixed binary incompatibility with freestanding build (#10077)
+ - It's now possible to access platform native window handles, like a HWND.
+
+### Python
+
+ - Fixed support for underscores in async callback decorators (#10024)
+ - slint-compiler: added support for generating Python stubs (#4136)
+
+### Tools:
+
+ - LSP: Fixed column position of non-acii for UTF16-based editor (#5669)
+ - LSP: Fixed `vscode-remote://` url
+ - tr-extractor: Make the paths argument required (#10156)
+ - Added gdb pretty printer for `SharedVector` and `Slice`
 
 ## [1.14.1] - 2025-10-23
 

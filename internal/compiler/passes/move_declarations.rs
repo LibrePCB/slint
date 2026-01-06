@@ -7,7 +7,7 @@ use crate::expression_tree::{Expression, NamedReference};
 use crate::langtype::ElementType;
 use crate::object_tree::*;
 use core::cell::RefCell;
-use smol_str::{format_smolstr, SmolStr};
+use smol_str::{SmolStr, format_smolstr};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
@@ -28,7 +28,7 @@ pub fn move_declarations(component: &Rc<Component>) {
 fn do_move_declarations(component: &Rc<Component>) {
     let mut decl = Declarations::take_from_element(&mut component.root_element.borrow_mut());
     component.popup_windows.borrow().iter().for_each(|f| do_move_declarations(&f.component));
-    component.menu_item_tree.borrow().iter().for_each(|f| do_move_declarations(f));
+    component.menu_item_tree.borrow().iter().for_each(do_move_declarations);
 
     let mut new_root_bindings = HashMap::new();
     let mut new_root_change_callbacks = HashMap::new();
@@ -41,7 +41,9 @@ fn do_move_declarations(component: &Rc<Component>) {
             if let ElementType::Component(base) = &elem.borrow().base_type {
                 do_move_declarations(base);
             } else {
-                panic!("Repeated element should have a component as base because of the repeater_component.rs pass")
+                panic!(
+                    "Repeated element should have a component as base because of the repeater_component.rs pass"
+                )
             }
             debug_assert!(
                 elem.borrow().property_declarations.is_empty() && elem.borrow().children.is_empty(),
@@ -50,7 +52,7 @@ fn do_move_declarations(component: &Rc<Component>) {
             return;
         }
 
-        // take the bindings so we do nt keep the borrow_mut of the element
+        // take the bindings so we do not keep the borrow_mut of the element
         let bindings = core::mem::take(&mut elem.borrow_mut().bindings);
         let mut new_bindings = BindingsMap::default();
         for (k, e) in bindings {
@@ -89,7 +91,7 @@ fn do_move_declarations(component: &Rc<Component>) {
         elem.borrow_mut().change_callbacks = new_change_callbacks;
     };
 
-    component.optimized_elements.borrow().iter().for_each(|e| move_bindings_and_animations(e));
+    component.optimized_elements.borrow().iter().for_each(&mut *move_bindings_and_animations);
     recurse_elem(&component.root_element, &(), &mut |e, _| move_bindings_and_animations(e));
 
     component.root_constraints.borrow_mut().visit_named_references(&mut fixup_reference);
@@ -139,7 +141,7 @@ fn fixup_reference(nr: &mut NamedReference) {
     if !Rc::ptr_eq(&e, &component.root_element)
         && e.borrow().property_declarations.contains_key(nr.name())
     {
-        *nr = NamedReference::new(&component.root_element, map_name(&e, nr.name()).into());
+        *nr = NamedReference::new(&component.root_element, map_name(&e, nr.name()));
     }
 }
 
@@ -155,15 +157,15 @@ fn simplify_optimized_items_recursive(component: &Rc<Component>) {
         .iter()
         .for_each(|f| simplify_optimized_items_recursive(&f.component));
     recurse_elem(&component.root_element, &(), &mut |elem, _| {
-        if elem.borrow().repeated.is_some() {
-            if let ElementType::Component(base) = &elem.borrow().base_type {
-                simplify_optimized_items_recursive(base);
-            }
+        if elem.borrow().repeated.is_some()
+            && let ElementType::Component(base) = &elem.borrow().base_type
+        {
+            simplify_optimized_items_recursive(base);
         }
     });
 }
 
-/// Optimized item are not used for the fact that they are items, but their properties
+/// Optimized items are not used for the fact that they are items, but their properties
 /// might still be used.  So we must pretend all the properties are declared in the
 /// item itself so the move_declaration pass can move the declaration in the component root
 fn simplify_optimized_items(items: &[ElementRc]) {

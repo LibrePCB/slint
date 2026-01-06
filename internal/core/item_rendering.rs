@@ -163,6 +163,10 @@ pub fn render_item_children(
                || item.as_ref().clips_children()
                // HACK, the geometry of the box shadow does not include the shadow, because when the shadow is the root for repeated elements it would translate the children
                || ItemRef::downcast_pin::<BoxShadow>(item).is_some()
+               // Transform and Opacity should also be applied regardless if the item itself is clipped or not
+               || ItemRef::downcast_pin::<Transform>(item).is_some()
+               || ItemRef::downcast_pin::<Opacity>(item).is_some()
+               || ItemRef::downcast_pin::<Layer>(item).is_some()
             {
                 item.as_ref().render(
                     &mut (renderer as &mut dyn ItemRenderer),
@@ -286,33 +290,59 @@ pub trait RenderImage {
     fn tiling(self: Pin<&Self>) -> (ImageTiling, ImageTiling);
 }
 
+/// Trait for an item has font properties
+#[allow(missing_docs)]
+pub trait HasFont {
+    fn font_request(self: Pin<&Self>, self_rc: &crate::items::ItemRc) -> FontRequest;
+}
+
+#[allow(missing_docs)]
+pub enum PlainOrStyledText {
+    Plain(SharedString),
+    Styled(crate::api::StyledText),
+}
+
+/// Trait for an item that represents an string towards the renderer
+#[allow(missing_docs)]
+pub trait RenderString: HasFont {
+    fn text(self: Pin<&Self>) -> PlainOrStyledText;
+}
+
 /// Trait for an item that represents an Text towards the renderer
 #[allow(missing_docs)]
-pub trait RenderText {
+pub trait RenderText: RenderString {
     fn target_size(self: Pin<&Self>) -> LogicalSize;
-    fn text(self: Pin<&Self>) -> SharedString;
-    fn font_request(self: Pin<&Self>, self_rc: &ItemRc) -> FontRequest;
     fn color(self: Pin<&Self>) -> Brush;
     fn alignment(self: Pin<&Self>) -> (TextHorizontalAlignment, TextVerticalAlignment);
     fn wrap(self: Pin<&Self>) -> TextWrap;
     fn overflow(self: Pin<&Self>) -> TextOverflow;
-    fn letter_spacing(self: Pin<&Self>) -> LogicalLength;
     fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle);
     fn is_markdown(self: Pin<&Self>) -> bool;
     fn link_color(self: Pin<&Self>) -> Color;
 }
 
+impl HasFont for (SharedString, Brush) {
+    fn font_request(self: Pin<&Self>, self_rc: &crate::items::ItemRc) -> FontRequest {
+        crate::items::WindowItem::resolved_font_request(
+            self_rc,
+            SharedString::default(),
+            0,
+            LogicalLength::default(),
+            LogicalLength::default(),
+            false,
+        )
+    }
+}
+
+impl RenderString for (SharedString, Brush) {
+    fn text(self: Pin<&Self>) -> PlainOrStyledText {
+        PlainOrStyledText::Plain(self.0.clone())
+    }
+}
+
 impl RenderText for (SharedString, Brush) {
     fn target_size(self: Pin<&Self>) -> LogicalSize {
         LogicalSize::default()
-    }
-
-    fn text(self: Pin<&Self>) -> SharedString {
-        self.0.clone()
-    }
-
-    fn font_request(self: Pin<&Self>, _self_rc: &ItemRc) -> crate::graphics::FontRequest {
-        Default::default()
     }
 
     fn color(self: Pin<&Self>) -> Brush {
@@ -335,10 +365,6 @@ impl RenderText for (SharedString, Brush) {
 
     fn overflow(self: Pin<&Self>) -> crate::items::TextOverflow {
         Default::default()
-    }
-
-    fn letter_spacing(self: Pin<&Self>) -> LogicalLength {
-        LogicalLength::default()
     }
 
     fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) {

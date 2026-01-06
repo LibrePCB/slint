@@ -10,7 +10,7 @@ use crate::expression_tree::{
 };
 use crate::langtype::Type;
 use crate::parser::NodeOrToken;
-use smol_str::{format_smolstr, ToSmolStr};
+use smol_str::{ToSmolStr, format_smolstr};
 
 /// Used for uniquely name some variables
 static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
@@ -62,7 +62,7 @@ pub fn lower_macro(
                 Some((Expression::NumberLiteral(val, Unit::None), _)) => val as f32,
                 // handle negative numbers
                 Some((Expression::UnaryOp { sub, op: '-' }, n)) => match *sub {
-                    Expression::NumberLiteral(val, Unit::None) => (-1.0 * val) as f32,
+                    Expression::NumberLiteral(val, Unit::None) => -val as f32,
                     _ => {
                         has_error
                             .get_or_insert((n.to_source_location(), expected_argument_type_error));
@@ -312,7 +312,9 @@ fn debug_macro(
     }
     Expression::FunctionCall {
         function: BuiltinFunction::Debug.into(),
-        arguments: vec![string.unwrap_or_else(|| Expression::default_value_for_type(&Type::String))],
+        arguments: vec![
+            string.unwrap_or_else(|| Expression::default_value_for_type(&Type::String)),
+        ],
         source_location: Some(node.to_source_location()),
     }
 }
@@ -333,6 +335,7 @@ fn to_debug_string(
         | Type::Function { .. }
         | Type::ElementReference
         | Type::LayoutCache
+        | Type::ArrayOfU16
         | Type::Model
         | Type::PathData => {
             diag.push_error("Cannot debug this expression".into(), node);
@@ -341,7 +344,12 @@ fn to_debug_string(
         Type::Float32 | Type::Int32 => expr.maybe_convert_to(Type::String, node, diag),
         Type::String => expr,
         // TODO
-        Type::Color | Type::Brush | Type::Image | Type::Easing | Type::Array(_) => {
+        Type::Color
+        | Type::Brush
+        | Type::Image
+        | Type::Easing
+        | Type::StyledText
+        | Type::Array(_) => {
             Expression::StringLiteral("<debug-of-this-type-not-yet-implemented>".into())
         }
         Type::Duration

@@ -192,7 +192,7 @@ pub fn vtable(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let vtable_name = input.ident.clone();
 
-    let mut drop_impls = vec![];
+    let mut drop_impls = Vec::new();
 
     let mut generated_trait = ItemTrait {
         attrs: input
@@ -222,9 +222,9 @@ pub fn vtable(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let mut generated_trait_assoc_const = None;
 
-    let mut generated_to_fn_trait = vec![];
-    let mut generated_type_assoc_fn = vec![];
-    let mut vtable_ctor = vec![];
+    let mut generated_to_fn_trait = Vec::new();
+    let mut generated_type_assoc_fn = Vec::new();
+    let mut vtable_ctor = Vec::new();
 
     for field in &mut fields.named {
         // The vtable can only be accessed in unsafe code, so it is ok if all its fields are Public
@@ -469,7 +469,7 @@ pub fn vtable(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     #[allow(unsafe_code)]
                     unsafe #abi fn #ident(_: &#vtable_name, ptr: *mut u8, layout: vtable::Layout) {
                         use ::core::convert::TryInto;
-                        vtable::internal::dealloc(ptr, layout.try_into().unwrap())
+                        unsafe { vtable::internal::dealloc(ptr, layout.try_into().unwrap()) }
                     }
                     #ident
                 },));
@@ -570,7 +570,7 @@ pub fn vtable(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         "/** Trait containing the associated constant relative to the trait {trait_name}.\n{additional_doc} */",
                     )).unwrap(),
                     ident: quote::format_ident!("{}Consts", trait_name),
-                    items: vec![],
+                    items: Vec::new(),
                     ..generated_trait.clone()
                 });
 
@@ -593,7 +593,7 @@ pub fn vtable(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             "The type of an #[field_offset] member in the vtable must be 'usize'",
                         )
                         .to_compile_error()
-                        .into()
+                        .into();
                     }
                 }
 

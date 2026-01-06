@@ -12,22 +12,21 @@ Some convention used in the generated code:
    this is usually a local variable to the init code that shouldn't be relied upon by the binding code.
 */
 
+use crate::CompilerConfiguration;
 use crate::expression_tree::{BuiltinFunction, EasingCurve, MinMaxOp, OperatorClass};
-use crate::langtype::{Enumeration, EnumerationValue, Struct, Type};
+use crate::langtype::{Enumeration, EnumerationValue, Struct, StructName, Type};
 use crate::layout::Orientation;
 use crate::llr::{
-    self, EvaluationContext as llr_EvaluationContext, Expression, ParentCtx as llr_ParentCtx,
+    self, EvaluationContext as llr_EvaluationContext, EvaluationScope, Expression, ParentScope,
     TypeResolutionContext as _,
 };
 use crate::object_tree::Document;
 use crate::typeloader::LibraryInfo;
-use crate::CompilerConfiguration;
 use itertools::Either;
 use proc_macro2::{Ident, TokenStream, TokenTree};
 use quote::{format_ident, quote};
 use smol_str::SmolStr;
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroUsize;
 use std::str::FromStr;
 
 #[derive(Clone)]
@@ -37,7 +36,6 @@ struct RustGeneratorContext {
 }
 
 type EvaluationContext<'a> = llr_EvaluationContext<'a, RustGeneratorContext>;
-type ParentCtx<'a> = llr_ParentCtx<'a, RustGeneratorContext>;
 
 pub fn ident(ident: &str) -> proc_macro2::Ident {
     if ident.contains('-') {
@@ -93,15 +91,14 @@ pub fn rust_primitive_type(ty: &Type) -> Option<proc_macro2::TokenStream> {
         Type::Percent => Some(quote!(f32)),
         Type::Bool => Some(quote!(bool)),
         Type::Image => Some(quote!(sp::Image)),
+        Type::StyledText => Some(quote!(sp::StyledText)),
         Type::Struct(s) => {
-            if let Some(name) = &s.name {
-                Some(struct_name_to_tokens(name))
-            } else {
+            struct_name_to_tokens(&s.name).or_else(|| {
                 let elem =
                     s.fields.values().map(rust_primitive_type).collect::<Option<Vec<_>>>()?;
                 // This will produce a tuple
                 Some(quote!((#(#elem,)*)))
-            }
+            })
         }
         Type::Array(o) => {
             let inner = rust_primitive_type(o)?;
@@ -109,16 +106,17 @@ pub fn rust_primitive_type(ty: &Type) -> Option<proc_macro2::TokenStream> {
         }
         Type::Enumeration(e) => {
             let i = ident(&e.name);
-            if e.node.is_some() {
-                Some(quote!(#i))
-            } else {
-                Some(quote!(sp::#i))
-            }
+            if e.node.is_some() { Some(quote!(#i)) } else { Some(quote!(sp::#i)) }
         }
         Type::Brush => Some(quote!(slint::Brush)),
         Type::LayoutCache => Some(quote!(
             sp::SharedVector<
                 sp::Coord,
+            >
+        )),
+        Type::ArrayOfU16 => Some(quote!(
+            sp::SharedVector<
+                u16,
             >
         )),
         _ => None,
@@ -288,8 +286,8 @@ pub fn generate_types(used_types: &[Type]) -> (Vec<Ident>, TokenStream) {
         .iter()
         .filter_map(|ty| match ty {
             Type::Struct(s) => match s.as_ref() {
-                Struct { fields, name: Some(name), node: Some(_), rust_attributes } => {
-                    Some((ident(name), generate_struct(name, fields, rust_attributes)))
+                Struct { fields, name: struct_name @ StructName::User { name, .. } } => {
+                    Some((ident(name), generate_struct(struct_name, fields)))
                 }
                 _ => None,
             },
@@ -324,12 +322,10 @@ fn generate_public_component(
 
     let ctx = EvaluationContext {
         compilation_unit: unit,
-        current_sub_component: Some(llr.item_tree.root),
-        current_global: None,
+        current_scope: EvaluationScope::SubComponent(llr.item_tree.root, None),
         generator_state: RustGeneratorContext {
             global_access: quote!(_self.globals.get().unwrap()),
         },
-        parent: None,
         argument_types: &[],
     };
 
@@ -419,15 +415,11 @@ fn generate_shared_globals(
     let global_names = llr
         .globals
         .iter()
-        .filter(|g| g.is_builtin || g.must_generate())
+        .filter(|g| g.must_generate())
         .map(|g| format_ident!("global_{}", ident(&g.name)))
         .collect::<Vec<_>>();
-    let global_types = llr
-        .globals
-        .iter()
-        .filter(|g| g.is_builtin || g.must_generate())
-        .map(global_inner_name)
-        .collect::<Vec<_>>();
+    let global_types =
+        llr.globals.iter().filter(|g| g.must_generate()).map(global_inner_name).collect::<Vec<_>>();
 
     let from_library_global_names = llr
         .globals
@@ -522,25 +514,27 @@ fn generate_shared_globals(
     }
 }
 
-fn generate_struct(
-    name: &str,
-    fields: &BTreeMap<SmolStr, Type>,
-    rust_attributes: &Option<Vec<SmolStr>>,
-) -> TokenStream {
-    let component_id = struct_name_to_tokens(name);
+fn generate_struct(name: &StructName, fields: &BTreeMap<SmolStr, Type>) -> TokenStream {
+    let component_id = struct_name_to_tokens(&name).unwrap();
     let (declared_property_vars, declared_property_types): (Vec<_>, Vec<_>) =
         fields.iter().map(|(name, ty)| (ident(name), rust_primitive_type(ty).unwrap())).unzip();
 
-    let attributes = if let Some(feature) = rust_attributes {
-        let attr =
-            feature.iter().map(|f| match TokenStream::from_str(format!(r#"#[{f}]"#).as_str()) {
-                Ok(eval) => eval,
-                Err(_) => quote! {},
-            });
-        quote! { #(#attr)* }
-    } else {
-        quote! {}
-    };
+    let StructName::User { name, node } = name else { unreachable!("generating non-user struct") };
+
+    let attributes = node
+        .parent()
+        .and_then(crate::parser::syntax_nodes::StructDeclaration::new)
+        .and_then(|d| d.AtRustAttr())
+        .map(|n| match TokenStream::from_str(&n.text().to_string()) {
+            Ok(t) => quote!(#[#t]),
+            Err(_) => {
+                let source_location = crate::diagnostics::Spanned::to_source_location(&n);
+                let error = format!(
+                    "Error parsing @rust-attr for struct '{name}' declared at {source_location}"
+                );
+                quote!(compile_error!(#error);)
+            }
+        });
 
     quote! {
         #attributes
@@ -556,11 +550,7 @@ fn generate_enum(en: &std::rc::Rc<Enumeration>) -> TokenStream {
 
     let enum_values = (0..en.values.len()).map(|value| {
         let i = ident(&EnumerationValue { value, enumeration: en.clone() }.to_pascal_case());
-        if value == en.default_value {
-            quote!(#[default] #i)
-        } else {
-            quote!(#i)
-        }
+        if value == en.default_value { quote!(#[default] #i) } else { quote!(#i) }
     });
     let rust_attr = en.node.as_ref().and_then(|node| {
         node.AtRustAttr().map(|attr| {
@@ -581,7 +571,7 @@ fn generate_enum(en: &std::rc::Rc<Enumeration>) -> TokenStream {
 }
 
 fn handle_property_init(
-    prop: &llr::PropertyReference,
+    prop: &llr::MemberReference,
     binding_expression: &llr::BindingExpression,
     init: &mut Vec<TokenStream>,
     ctx: &EvaluationContext,
@@ -589,7 +579,7 @@ fn handle_property_init(
     let rust_property = access_member(prop, ctx).unwrap();
     let prop_type = ctx.property_ty(prop);
 
-    let init_self_pin_ref = if ctx.current_global.is_some() {
+    let init_self_pin_ref = if ctx.current_global().is_some() {
         quote!(let _self = self_rc.as_ref();)
     } else {
         quote!(let _self = self_rc.as_pin_ref();)
@@ -675,7 +665,7 @@ fn public_api(
     self_init: TokenStream,
     ctx: &EvaluationContext,
 ) -> TokenStream {
-    let mut property_and_callback_accessors: Vec<TokenStream> = vec![];
+    let mut property_and_callback_accessors: Vec<TokenStream> = Vec::new();
     for p in public_properties {
         let prop_ident = ident(&p.name);
         let prop = access_member(&p.prop, ctx).unwrap();
@@ -780,7 +770,7 @@ fn public_api(
 fn generate_sub_component(
     component_idx: llr::SubComponentIdx,
     root: &llr::CompilationUnit,
-    parent_ctx: Option<ParentCtx>,
+    parent_ctx: Option<&ParentScope>,
     index_property: Option<llr::PropertyIdx>,
     pinned_drop: bool,
 ) -> TokenStream {
@@ -800,36 +790,36 @@ fn generate_sub_component(
             generate_item_tree(
                 &popup.item_tree,
                 root,
-                Some(ParentCtx::new(&ctx, None)),
+                Some(&ParentScope::new(&ctx, None)),
                 None,
                 false,
             )
         })
         .chain(component.menu_item_trees.iter().map(|tree| {
-            generate_item_tree(tree, root, Some(ParentCtx::new(&ctx, None)), None, false)
+            generate_item_tree(tree, root, Some(&ParentScope::new(&ctx, None)), None, false)
         }))
         .collect::<Vec<_>>();
 
-    let mut declared_property_vars = vec![];
-    let mut declared_property_types = vec![];
-    let mut declared_callbacks = vec![];
-    let mut declared_callbacks_types = vec![];
-    let mut declared_callbacks_ret = vec![];
+    let mut declared_property_vars = Vec::new();
+    let mut declared_property_types = Vec::new();
+    let mut declared_callbacks = Vec::new();
+    let mut declared_callbacks_types = Vec::new();
+    let mut declared_callbacks_ret = Vec::new();
 
-    for property in component.properties.iter().filter(|p| p.use_count.get() > 0) {
+    for property in component.properties.iter() {
         let prop_ident = ident(&property.name);
-        if let Type::Callback(callback) = &property.ty {
-            let callback_args =
-                callback.args.iter().map(|a| rust_primitive_type(a).unwrap()).collect::<Vec<_>>();
-            let return_type = rust_primitive_type(&callback.return_type).unwrap();
-            declared_callbacks.push(prop_ident.clone());
-            declared_callbacks_types.push(callback_args);
-            declared_callbacks_ret.push(return_type);
-        } else {
-            let rust_property_type = rust_property_type(&property.ty).unwrap();
-            declared_property_vars.push(prop_ident.clone());
-            declared_property_types.push(rust_property_type.clone());
-        }
+        let rust_property_type = rust_property_type(&property.ty).unwrap();
+        declared_property_vars.push(prop_ident.clone());
+        declared_property_types.push(rust_property_type.clone());
+    }
+    for callback in component.callbacks.iter() {
+        let cb_ident = ident(&callback.name);
+        let callback_args =
+            callback.args.iter().map(|a| rust_primitive_type(a).unwrap()).collect::<Vec<_>>();
+        let return_type = rust_primitive_type(&callback.ret_ty).unwrap();
+        declared_callbacks.push(cb_ident.clone());
+        declared_callbacks_types.push(callback_args);
+        declared_callbacks_ret.push(return_type);
     }
 
     let change_tracker_names = component
@@ -840,9 +830,9 @@ fn generate_sub_component(
 
     let declared_functions = generate_functions(component.functions.as_ref(), &ctx);
 
-    let mut init = vec![];
-    let mut item_names = vec![];
-    let mut item_types = vec![];
+    let mut init = Vec::new();
+    let mut item_names = Vec::new();
+    let mut item_types = Vec::new();
 
     #[cfg(slint_debug_property)]
     init.push(quote!(
@@ -872,30 +862,25 @@ fn generate_sub_component(
         }
     }
 
-    let mut repeated_visit_branch: Vec<TokenStream> = vec![];
-    let mut repeated_element_components: Vec<TokenStream> = vec![];
-    let mut repeated_subtree_ranges: Vec<TokenStream> = vec![];
-    let mut repeated_subtree_components: Vec<TokenStream> = vec![];
+    let mut repeated_visit_branch: Vec<TokenStream> = Vec::new();
+    let mut repeated_element_components: Vec<TokenStream> = Vec::new();
+    let mut repeated_subtree_ranges: Vec<TokenStream> = Vec::new();
+    let mut repeated_subtree_components: Vec<TokenStream> = Vec::new();
 
     for (idx, repeated) in component.repeated.iter_enumerated() {
         extra_components.push(generate_repeated_component(
             repeated,
             root,
-            ParentCtx::new(&ctx, Some(idx)),
+            &ParentScope::new(&ctx, Some(idx)),
         ));
 
         let idx = usize::from(idx) as u32;
 
         if let Some(item_index) = repeated.container_item_index {
-            let embed_item = access_member(
-                &llr::PropertyReference::InNativeItem {
-                    sub_component_path: vec![],
-                    item_index,
-                    prop_name: String::new(),
-                },
+            let embed_item = access_local_member(
+                &llr::LocalMemberIndex::Native { item_index, prop_name: Default::default() }.into(),
                 &ctx,
-            )
-            .unwrap();
+            );
 
             let ensure_updated = {
                 quote! {
@@ -940,11 +925,11 @@ fn generate_sub_component(
                 });
             });
             let ensure_updated = if let Some(listview) = &repeated.listview {
-                let vp_y = access_member(&listview.viewport_y, &ctx).unwrap();
-                let vp_h = access_member(&listview.viewport_height, &ctx).unwrap();
-                let lv_h = access_member(&listview.listview_height, &ctx).unwrap();
-                let vp_w = access_member(&listview.viewport_width, &ctx).unwrap();
-                let lv_w = access_member(&listview.listview_width, &ctx).unwrap();
+                let vp_y = access_local_member(&listview.viewport_y, &ctx);
+                let vp_h = access_local_member(&listview.viewport_height, &ctx);
+                let lv_h = access_local_member(&listview.listview_height, &ctx);
+                let vp_w = access_local_member(&listview.viewport_width, &ctx);
+                let lv_w = access_local_member(&listview.listview_width, &ctx);
 
                 quote! {
                     #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated_listview(
@@ -987,9 +972,9 @@ fn generate_sub_component(
         }
     }
 
-    let mut accessible_role_branch = vec![];
-    let mut accessible_string_property_branch = vec![];
-    let mut accessibility_action_branch = vec![];
+    let mut accessible_role_branch = Vec::new();
+    let mut accessible_string_property_branch = Vec::new();
+    let mut accessibility_action_branch = Vec::new();
     let mut supported_accessibility_actions = BTreeMap::<u32, BTreeSet<_>>::new();
     for ((index, what), expr) in &component.accessible_prop {
         let e = compile_expression(&expr.borrow(), &ctx);
@@ -1035,8 +1020,8 @@ fn generate_sub_component(
 
     let mut user_init_code: Vec<TokenStream> = Vec::new();
 
-    let mut sub_component_names: Vec<Ident> = vec![];
-    let mut sub_component_types: Vec<Ident> = vec![];
+    let mut sub_component_names: Vec<Ident> = Vec::new();
+    let mut sub_component_types: Vec<Ident> = Vec::new();
 
     for sub in &component.sub_components {
         let field_name = ident(&sub.name);
@@ -1134,43 +1119,37 @@ fn generate_sub_component(
         component.popup_windows.iter().enumerate().map(|(i, _)| internal_popup_id(i));
 
     for (prop1, prop2, fields) in &component.two_way_bindings {
-        let p1 = access_member(prop1, &ctx);
+        let p1 = access_member(prop1, &ctx).unwrap();
         let p2 = access_member(prop2, &ctx);
-        let r = p1.then(|p1| {
-            p2.then(|p2| {
-                if fields.is_empty() {
-                    quote!(sp::Property::link_two_way(#p1, #p2))
-                } else {
-                    let mut access = quote!();
-                    let mut ty = ctx.property_ty(prop2);
-                    for f in fields {
-                        let Type::Struct (s) = &ty else { panic!("Field of two way binding on a non-struct type") };
-                        let a = struct_field_access(s, f);
-                        access.extend(quote!(.#a));
-                        ty = s.fields.get(f).unwrap();
-                    }
-                    quote!(sp::Property::link_two_way_with_map(#p2, #p1, |s| s #access .clone(), |s, v| s #access = v.clone()))
+        let r = p2.then(|p2| {
+            if fields.is_empty() {
+                quote!(sp::Property::link_two_way(#p1, #p2))
+            } else {
+                let mut access = quote!();
+                let mut ty = ctx.property_ty(prop2);
+                for f in fields {
+                    let Type::Struct (s) = &ty else { panic!("Field of two way binding on a non-struct type") };
+                    let a = struct_field_access(s, f);
+                    access.extend(quote!(.#a));
+                    ty = s.fields.get(f).unwrap();
                 }
-            })
+                quote!(sp::Property::link_two_way_with_map(#p2, #p1, |s| s #access .clone(), |s, v| s #access = v.clone()))
+            }
         });
         init.push(quote!(#r;))
     }
 
     for (prop, expression) in &component.property_init {
-        if expression.use_count.get() > 0 && component.prop_used(prop, root) {
-            handle_property_init(prop, expression, &mut init, &ctx)
-        }
+        handle_property_init(prop, expression, &mut init, &ctx)
     }
     for prop in &component.const_properties {
-        if component.prop_used(prop, root) {
-            let rust_property = access_member(prop, &ctx).unwrap();
-            init.push(quote!(#rust_property.set_constant();))
-        }
+        let rust_property = access_local_member(prop, &ctx);
+        init.push(quote!(#rust_property.set_constant();))
     }
 
     let parent_component_type = parent_ctx.iter().map(|parent| {
         let parent_component_id =
-            self::inner_component_id(parent.ctx.current_sub_component().unwrap());
+            self::inner_component_id(&ctx.compilation_unit.sub_components[parent.sub_component]);
         quote!(sp::VWeakMapped::<sp::ItemTreeVTable, #parent_component_id>)
     });
 
@@ -1181,7 +1160,7 @@ fn generate_sub_component(
 
     user_init_code.extend(component.change_callbacks.iter().enumerate().map(|(idx, (p, e))| {
         let code = compile_expression(&e.borrow(), &ctx);
-        let prop = compile_expression(&Expression::PropertyReference(p.clone()), &ctx);
+        let prop = compile_expression(&Expression::PropertyReference(p.clone().into()), &ctx);
         let change_tracker = format_ident!("change_tracker{idx}");
         quote! {
             let self_weak = sp::VRcMapped::downgrade(&self_rc);
@@ -1204,16 +1183,26 @@ fn generate_sub_component(
 
     let layout_info_h = compile_expression_no_parenthesis(&component.layout_info_h.borrow(), &ctx);
     let layout_info_v = compile_expression_no_parenthesis(&component.layout_info_v.borrow(), &ctx);
+    let grid_layout_input_for_repeated_fn =
+        component.grid_layout_input_for_repeated.as_ref().map(|expr| {
+            let expr = compile_expression_no_parenthesis(&expr.borrow(), &ctx);
+            quote! {
+                fn grid_layout_input_for_repeated(
+                    self: ::core::pin::Pin<&Self>,
+                    new_row: bool,
+                ) -> sp::GridLayoutInputData {
+                    #![allow(unused)]
+                    let _self = self;
+                    #expr
+                }
+            }
+        });
 
     // FIXME! this is only public because of the ComponentHandle::WeakInner. we should find another way
     let visibility = parent_ctx.is_none().then(|| quote!(pub));
 
     let subtree_index_function = if let Some(property_index) = index_property {
-        let prop = access_member(
-            &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
-            &ctx,
-        )
-        .unwrap();
+        let prop = access_local_member(&property_index.into(), &ctx);
         quote!(#prop.get() as usize)
     } else {
         quote!(usize::MAX)
@@ -1318,6 +1307,8 @@ fn generate_sub_component(
                     sp::Orientation::Vertical => #layout_info_v,
                 }
             }
+
+            #grid_layout_input_for_repeated_fn
 
             fn subtree_range(self: ::core::pin::Pin<&Self>, dyn_index: u32) -> sp::IndexRange {
                 #![allow(unused)]
@@ -1456,30 +1447,26 @@ fn generate_global(
     compiler_config: &CompilerConfiguration,
     global_exports: &mut Vec<TokenStream>,
 ) -> TokenStream {
-    let mut declared_property_vars = vec![];
-    let mut declared_property_types = vec![];
-    let mut declared_callbacks = vec![];
-    let mut declared_callbacks_types = vec![];
-    let mut declared_callbacks_ret = vec![];
+    let mut declared_property_vars = Vec::new();
+    let mut declared_property_types = Vec::new();
+    let mut declared_callbacks = Vec::new();
+    let mut declared_callbacks_types = Vec::new();
+    let mut declared_callbacks_ret = Vec::new();
 
-    for property in global.properties.iter().filter(|p| p.use_count.get() > 0) {
-        let prop_ident = ident(&property.name);
-        if let Type::Callback(callback) = &property.ty {
-            let callback_args =
-                callback.args.iter().map(|a| rust_primitive_type(a).unwrap()).collect::<Vec<_>>();
-            let return_type = rust_primitive_type(&callback.return_type);
-            declared_callbacks.push(prop_ident.clone());
-            declared_callbacks_types.push(callback_args);
-            declared_callbacks_ret.push(return_type);
-        } else {
-            let rust_property_type = rust_property_type(&property.ty).unwrap();
-            declared_property_vars.push(prop_ident.clone());
-            declared_property_types.push(rust_property_type.clone());
-        }
+    for property in global.properties.iter() {
+        declared_property_vars.push(ident(&property.name));
+        declared_property_types.push(rust_property_type(&property.ty).unwrap());
+    }
+    for callback in &global.callbacks {
+        let callback_args =
+            callback.args.iter().map(|a| rust_primitive_type(a).unwrap()).collect::<Vec<_>>();
+        declared_callbacks.push(ident(&callback.name));
+        declared_callbacks_types.push(callback_args);
+        declared_callbacks_ret.push(rust_primitive_type(&callback.ret_ty));
     }
 
-    let mut init = vec![];
-    let inner_component_id = format_ident!("Inner{}", ident(&global.name));
+    let mut init = Vec::new();
+    let inner_component_id = global_inner_name(global);
 
     #[cfg(slint_debug_property)]
     init.push(quote!(
@@ -1497,29 +1484,17 @@ fn generate_global(
 
     let declared_functions = generate_functions(global.functions.as_ref(), &ctx);
 
-    for (property_index, expression) in global.init_values.iter_enumerated() {
-        if global.properties[property_index].use_count.get() == 0 {
-            continue;
-        }
-        if let Some(expression) = expression.as_ref() {
-            handle_property_init(
-                &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
-                expression,
-                &mut init,
-                &ctx,
-            )
-        }
+    for (property_index, expression) in &global.init_values {
+        handle_property_init(
+            &llr::LocalMemberReference::from(property_index.clone()).into(),
+            expression,
+            &mut init,
+            &ctx,
+        )
     }
     for (property_index, cst) in global.const_properties.iter_enumerated() {
-        if global.properties[property_index].use_count.get() == 0 {
-            continue;
-        }
         if *cst {
-            let rust_property = access_member(
-                &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
-                &ctx,
-            )
-            .unwrap();
+            let rust_property = access_local_member(&property_index.into(), &ctx);
             init.push(quote!(#rust_property.set_constant();))
         }
     }
@@ -1533,11 +1508,7 @@ fn generate_global(
         .map(|idx| format_ident!("change_tracker{}", usize::from(*idx)));
     init.extend(global.change_callbacks.iter().map(|(p, e)| {
         let code = compile_expression(&e.borrow(), &ctx);
-        let prop = access_member(
-            &llr::PropertyReference::Local { sub_component_path: vec![], property_index: *p },
-            &ctx,
-        )
-        .unwrap();
+        let prop = access_local_member(&(*p).into(), &ctx);
         let change_tracker = format_ident!("change_tracker{}", usize::from(*p));
         quote! {
             #[allow(dead_code, unused)]
@@ -1557,7 +1528,7 @@ fn generate_global(
         }
     }));
 
-    let pub_token = if compiler_config.library_name.is_some() {
+    let pub_token = if compiler_config.library_name.is_some() && !global.is_builtin {
         global_exports.push(quote! (#inner_component_id));
         quote!(pub)
     } else {
@@ -1586,35 +1557,37 @@ fn generate_global(
         )
     });
 
-    quote!(
-        #[derive(sp::FieldOffsets, Default)]
-        #[const_field_offset(sp::const_field_offset)]
-        #[repr(C)]
-        #[pin]
-        #pub_token struct #inner_component_id {
-            #(#pub_token  #declared_property_vars: sp::Property<#declared_property_types>,)*
-            #(#pub_token  #declared_callbacks: sp::Callback<(#(#declared_callbacks_types,)*), #declared_callbacks_ret>,)*
-            #(#pub_token  #change_tracker_names : sp::ChangeTracker,)*
-            globals : sp::OnceCell<sp::Weak<SharedGlobals>>,
-        }
-
-        impl #inner_component_id {
-            fn new() -> ::core::pin::Pin<sp::Rc<Self>> {
-                sp::Rc::pin(Self::default())
-            }
-            fn init(self: ::core::pin::Pin<sp::Rc<Self>>, globals: &sp::Rc<SharedGlobals>) {
-                #![allow(unused)]
-                let _ = self.globals.set(sp::Rc::downgrade(globals));
-                let self_rc = self;
-                let _self = self_rc.as_ref();
-                #(#init)*
+    let private_interface = (!global.is_builtin).then(|| {
+        quote!(
+            #[derive(sp::FieldOffsets, Default)]
+            #[const_field_offset(sp::const_field_offset)]
+            #[repr(C)]
+            #[pin]
+            #pub_token struct #inner_component_id {
+                #(#pub_token  #declared_property_vars: sp::Property<#declared_property_types>,)*
+                #(#pub_token  #declared_callbacks: sp::Callback<(#(#declared_callbacks_types,)*), #declared_callbacks_ret>,)*
+                #(#pub_token  #change_tracker_names : sp::ChangeTracker,)*
+                globals : sp::OnceCell<sp::Weak<SharedGlobals>>,
             }
 
-            #(#declared_functions)*
-        }
+            impl #inner_component_id {
+                fn new() -> ::core::pin::Pin<sp::Rc<Self>> {
+                    sp::Rc::pin(Self::default())
+                }
+                fn init(self: ::core::pin::Pin<sp::Rc<Self>>, globals: &sp::Rc<SharedGlobals>) {
+                    #![allow(unused)]
+                    let _ = self.globals.set(sp::Rc::downgrade(globals));
+                    let self_rc = self;
+                    let _self = self_rc.as_ref();
+                    #(#init)*
+                }
 
-        #public_interface
-    )
+                #(#declared_functions)*
+            }
+        )
+    });
+
+    quote!(#private_interface #public_interface)
 }
 
 fn generate_global_getters(
@@ -1643,7 +1616,7 @@ fn generate_global_getters(
 fn generate_item_tree(
     sub_tree: &llr::ItemTree,
     root: &llr::CompilationUnit,
-    parent_ctx: Option<ParentCtx>,
+    parent_ctx: Option<&ParentScope>,
     index_property: Option<llr::PropertyIdx>,
     is_popup_menu: bool,
 ) -> TokenStream {
@@ -1653,7 +1626,7 @@ fn generate_item_tree(
         .iter()
         .map(|parent| {
             let parent_component_id =
-                self::inner_component_id(parent.ctx.current_sub_component().unwrap());
+                self::inner_component_id(&root.sub_components[parent.sub_component]);
             quote!(sp::VWeakMapped::<sp::ItemTreeVTable, #parent_component_id>)
         })
         .collect::<Vec<_>>();
@@ -1674,17 +1647,20 @@ fn generate_item_tree(
     };
 
     let parent_item_expression = parent_ctx.map(|parent| parent.repeater_index.map_or_else(|| {
-            // No repeater index, this could be a PopupWindow
-            quote!(if let Some(parent_rc) = self.parent.clone().upgrade() {
-                       let parent_origin = sp::VRcMapped::origin(&parent_rc);
-                       // TODO: store popup index in ctx and set it here instead of 0?
-                       *_result = sp::ItemRc::new(parent_origin, 0).downgrade();
-                   })
-        }, |idx| {
-            let current_sub_component = parent.ctx.current_sub_component().unwrap();
-            let sub_component_offset = current_sub_component.repeated[idx].index_in_tree;
+        // No repeater index, this could be a PopupWindow
+        quote!{
+            if let Some(parent_rc) = self.parent.clone().upgrade() {
+                let parent_origin = sp::VRcMapped::origin(&parent_rc);
+                // TODO: store popup index in ctx and set it here instead of 0?
+                *_result = sp::ItemRc::new(parent_origin, 0).downgrade();
+            }
+        }
+    }, |idx| {
+        let current_sub_component = &root.sub_components[parent.sub_component];
+        let sub_component_offset = current_sub_component.repeated[idx].index_in_tree;
 
-            quote!(if let Some((parent_component, parent_index)) = self
+        quote!{
+            if let Some((parent_component, parent_index)) = self
                 .parent
                 .clone()
                 .upgrade()
@@ -1692,10 +1668,11 @@ fn generate_item_tree(
             {
                 *_result = sp::ItemRc::new(parent_component, parent_index + #sub_component_offset - 1)
                     .downgrade();
-            })
-        }));
-    let mut item_tree_array = vec![];
-    let mut item_array = vec![];
+            }
+        }
+    }));
+    let mut item_tree_array = Vec::new();
+    let mut item_array = Vec::new();
     sub_tree.tree.visit_in_array(&mut |node, children_offset, parent_index| {
         let parent_index = parent_index as u32;
         let (path, component) =
@@ -1912,22 +1889,31 @@ fn generate_item_tree(
 fn generate_repeated_component(
     repeated: &llr::RepeatedElement,
     unit: &llr::CompilationUnit,
-    parent_ctx: ParentCtx,
+    parent_ctx: &ParentScope,
 ) -> TokenStream {
     let component =
         generate_item_tree(&repeated.sub_tree, unit, Some(parent_ctx), repeated.index_prop, false);
 
     let ctx = EvaluationContext {
         compilation_unit: unit,
-        current_sub_component: Some(repeated.sub_tree.root),
-        current_global: None,
+        current_scope: EvaluationScope::SubComponent(repeated.sub_tree.root, Some(parent_ctx)),
         generator_state: RustGeneratorContext { global_access: quote!(_self) },
-        parent: Some(parent_ctx),
         argument_types: &[],
     };
 
     let root_sc = &unit.sub_components[repeated.sub_tree.root];
     let inner_component_id = self::inner_component_id(root_sc);
+
+    let grid_layout_input_data_fn = root_sc.grid_layout_input_for_repeated.as_ref().map(|_| {
+        quote! {
+            fn grid_layout_input_data(
+                self: ::core::pin::Pin<&Self>,
+                new_row: bool) -> sp::GridLayoutInputData
+            {
+                self.as_ref().grid_layout_input_for_repeated(new_row)
+            }
+        }
+    });
 
     let extra_fn = if let Some(listview) = &repeated.listview {
         let p_y = access_member(&listview.prop_y, &ctx).unwrap();
@@ -1944,13 +1930,18 @@ fn generate_repeated_component(
             }
         }
     } else {
-        // TODO: we could generate this code only if we know that this component is in a box layout
-        quote! {
-            fn box_layout_data(self: ::core::pin::Pin<&Self>, o: sp::Orientation)
-                -> sp::BoxLayoutCellData
-            {
-                sp::BoxLayoutCellData { constraint: self.as_ref().layout_info(o) }
+        let layout_item_info_fn = root_sc.child_of_layout.then(|| {
+            quote! {
+                fn layout_item_info(self: ::core::pin::Pin<&Self>, o: sp::Orientation)
+                    -> sp::LayoutItemInfo
+                {
+                    sp::LayoutItemInfo { constraint: self.as_ref().layout_info(o) }
+                }
             }
+        });
+        quote! {
+            #layout_item_info_fn
+            #grid_layout_input_data_fn
         }
     };
 
@@ -1960,19 +1951,11 @@ fn generate_repeated_component(
         quote!(())
     };
 
-    let access_prop = |property_index| {
-        access_member(
-            &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
-            &ctx,
-        )
-        .unwrap()
-    };
+    let access_prop =
+        |property_index: llr::PropertyIdx| access_local_member(&property_index.into(), &ctx);
     let index_prop = repeated.index_prop.into_iter().map(access_prop);
     let set_data_expr = repeated.data_prop.into_iter().map(|property_index| {
-        let prop_type = ctx.property_ty(&llr::PropertyReference::Local {
-            sub_component_path: vec![],
-            property_index,
-        });
+        let prop_type = ctx.relative_property_ty(&property_index.into(), 0);
         let data_prop = access_prop(property_index);
         let value_tokens = set_primitive_property_value(prop_type, quote!(_data));
         quote!(#data_prop.set(#value_tokens);)
@@ -2022,7 +2005,7 @@ fn global_inner_name(g: &llr::GlobalComponent) -> TokenStream {
 }
 
 fn property_set_value_tokens(
-    property: &llr::PropertyReference,
+    property: &llr::MemberReference,
     value_tokens: TokenStream,
     ctx: &EvaluationContext,
 ) -> TokenStream {
@@ -2040,111 +2023,88 @@ fn property_set_value_tokens(
 }
 
 /// Returns the code that can access the given property or callback
-fn access_member(reference: &llr::PropertyReference, ctx: &EvaluationContext) -> MemberAccess {
-    fn in_native_item(
-        ctx: &EvaluationContext,
-        sub_component_path: &[llr::SubComponentInstanceIdx],
-        item_index: llr::ItemInstanceIdx,
-        prop_name: &str,
-        path: TokenStream,
-    ) -> (TokenStream, Option<TokenStream>) {
-        let (compo_path, sub_component) = follow_sub_component_path(
-            ctx.compilation_unit,
-            ctx.current_sub_component.unwrap(),
-            sub_component_path,
-        );
-        let component_id = inner_component_id(sub_component);
-        let item_name = ident(&sub_component.items[item_index].name);
-        let item_field = access_component_field_offset(&component_id, &item_name);
-        if prop_name.is_empty() {
-            // then this is actually a reference to the element itself
-            (quote!((#compo_path #item_field).apply_pin(#path)), None)
-        } else if matches!(
-            sub_component.items[item_index].ty.lookup_property(prop_name),
-            Some(&Type::Function(..))
-        ) {
-            let property_name = ident(prop_name);
-            (quote!((#compo_path #item_field).apply_pin(#path)), Some(quote!(.#property_name)))
-        } else {
-            let property_name = ident(prop_name);
-            let item_ty = ident(&sub_component.items[item_index].ty.class_name);
-            (
-                quote!((#compo_path #item_field + sp::#item_ty::FIELD_OFFSETS.#property_name).apply_pin(#path)),
-                None,
-            )
+fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> MemberAccess {
+    fn in_global(
+        g: &llr::GlobalComponent,
+        index: &llr::LocalMemberIndex,
+        _self: TokenStream,
+    ) -> MemberAccess {
+        let global_name = global_inner_name(g);
+        match index {
+            llr::LocalMemberIndex::Property(property_idx) => {
+                let property_name = ident(&g.properties[*property_idx].name);
+                let property_field = quote!({ *&#global_name::FIELD_OFFSETS.#property_name });
+                MemberAccess::Direct(quote!(#property_field.apply_pin(#_self)))
+            }
+            llr::LocalMemberIndex::Callback(callback_idx) => {
+                let callback_name = ident(&g.callbacks[*callback_idx].name);
+                let callback_field = quote!({ *&#global_name::FIELD_OFFSETS.#callback_name });
+                MemberAccess::Direct(quote!(#callback_field.apply_pin(#_self)))
+            }
+            llr::LocalMemberIndex::Function(function_idx) => {
+                let fn_id = ident(&format!("fn_{}", g.functions[*function_idx].name));
+                MemberAccess::Direct(quote!(#_self.#fn_id))
+            }
+            llr::LocalMemberIndex::Native { .. } => unreachable!(),
         }
     }
+
     match reference {
-        llr::PropertyReference::Local { sub_component_path, property_index } => {
-            if let Some(sub_component) = ctx.current_sub_component {
-                let (compo_path, sub_component) = follow_sub_component_path(
-                    ctx.compilation_unit,
-                    sub_component,
-                    sub_component_path,
-                );
-                let component_id = inner_component_id(sub_component);
-                let property_name = ident(&sub_component.properties[*property_index].name);
-                let property_field = access_component_field_offset(&component_id, &property_name);
-                MemberAccess::Direct(quote!((#compo_path #property_field).apply_pin(_self)))
-            } else if let Some(current_global) = ctx.current_global() {
-                let global_name = global_inner_name(current_global);
-                let property_name = ident(&current_global.properties[*property_index].name);
-                let property_field = quote!({ *&#global_name::FIELD_OFFSETS.#property_name });
-                MemberAccess::Direct(quote!(#property_field.apply_pin(_self)))
-            } else {
-                unreachable!()
-            }
-        }
-        llr::PropertyReference::InNativeItem { sub_component_path, item_index, prop_name } => {
-            let (a, b) =
-                in_native_item(ctx, sub_component_path, *item_index, prop_name, quote!(_self));
-            MemberAccess::Direct(quote!(#a #b))
-        }
-        llr::PropertyReference::InParent { level, parent_reference } => {
-            let mut path = quote!(_self.parent.upgrade());
-            let mut ctx = ctx.parent.as_ref().unwrap().ctx;
-            for _ in 1..level.get() {
-                path = quote!(#path.and_then(|x| x.parent.upgrade()));
-                ctx = ctx.parent.as_ref().unwrap().ctx;
+        llr::MemberReference::Relative { parent_level, local_reference } => {
+            if let Some(current_global) = ctx.current_global() {
+                return in_global(current_global, &local_reference.reference, quote!(_self));
             }
 
-            match &**parent_reference {
-                llr::PropertyReference::Local { sub_component_path, property_index } => {
-                    let sub_component = ctx.current_sub_component.unwrap();
+            let parent_path = (*parent_level != 0).then(|| {
+                let mut path = quote!(_self.parent.upgrade());
+                for _ in 1..*parent_level {
+                    path = quote!(#path.and_then(|x| x.parent.upgrade()));
+                }
+                path
+            });
+
+            match &local_reference.reference {
+                llr::LocalMemberIndex::Property(property_index) => {
                     let (compo_path, sub_component) = follow_sub_component_path(
                         ctx.compilation_unit,
-                        sub_component,
-                        sub_component_path,
+                        ctx.parent_sub_component_idx(*parent_level).unwrap(),
+                        &local_reference.sub_component_path,
                     );
                     let component_id = inner_component_id(sub_component);
                     let property_name = ident(&sub_component.properties[*property_index].name);
-                    MemberAccess::Option(
-                        quote!((#path.as_ref().map(|x| (#compo_path #component_id::FIELD_OFFSETS.#property_name).apply_pin(x.as_pin_ref())))),
+                    let property_field =
+                        access_component_field_offset(&component_id, &property_name);
+                    parent_path.map_or_else(
+                        || MemberAccess::Direct(quote!((#compo_path #property_field).apply_pin(_self))),
+                        |parent_path| {
+                            MemberAccess::Option(quote!(#parent_path.as_ref().map(|x| (#compo_path #property_field).apply_pin(x.as_pin_ref()))))
+                        },
                     )
                 }
-                llr::PropertyReference::InNativeItem {
-                    sub_component_path,
-                    item_index,
-                    prop_name,
-                } => {
-                    let (a, b) = in_native_item(
-                        ctx,
-                        sub_component_path,
-                        *item_index,
-                        prop_name,
-                        quote!(x.as_pin_ref()),
+                llr::LocalMemberIndex::Callback(callback_index) => {
+                    let (compo_path, sub_component) = follow_sub_component_path(
+                        ctx.compilation_unit,
+                        ctx.parent_sub_component_idx(*parent_level).unwrap(),
+                        &local_reference.sub_component_path,
                     );
-                    let opt = quote!(#path.as_ref().map(|x| #a));
-                    match b {
-                        None => MemberAccess::Option(opt),
-                        Some(b) => MemberAccess::OptionFn(opt, quote!(|x| x #b)),
-                    }
+                    let component_id = inner_component_id(sub_component);
+                    let callback_name = ident(&sub_component.callbacks[*callback_index].name);
+                    let callback_field =
+                        access_component_field_offset(&component_id, &callback_name);
+                    parent_path.map_or_else(
+                        || MemberAccess::Direct(quote!((#compo_path #callback_field).apply_pin(_self))),
+                        |parent_path| {
+                            MemberAccess::Option(quote!(#parent_path.as_ref().map(|x| (#compo_path #callback_field).apply_pin(x.as_pin_ref()))))
+                        },
+                    )
                 }
-                llr::PropertyReference::Function { sub_component_path, function_index } => {
-                    let mut sub_component = ctx.current_sub_component().unwrap();
-
-                    let mut compo_path = quote!(x.as_pin_ref());
-                    for i in sub_component_path {
+                llr::LocalMemberIndex::Function(function_index) => {
+                    let mut sub_component = &ctx.compilation_unit.sub_components
+                        [ctx.parent_sub_component_idx(*parent_level).unwrap()];
+                    let mut compo_path = parent_path
+                        .as_ref()
+                        .map_or_else(|| quote!(_self), |_| quote!(x.as_pin_ref()));
+                    for i in &local_reference.sub_component_path {
                         let component_id = inner_component_id(sub_component);
                         let sub_component_name = ident(&sub_component.sub_components[*i].name);
                         compo_path = quote!( #component_id::FIELD_OFFSETS.#sub_component_name.apply_pin(#compo_path));
@@ -2153,58 +2113,75 @@ fn access_member(reference: &llr::PropertyReference, ctx: &EvaluationContext) ->
                     }
                     let fn_id =
                         ident(&format!("fn_{}", sub_component.functions[*function_index].name));
-                    MemberAccess::OptionFn(path, quote!(|x| #compo_path.#fn_id))
+                    parent_path.map_or_else(
+                        || MemberAccess::Direct(quote!(#compo_path.#fn_id)),
+                        |parent_path| {
+                            MemberAccess::OptionFn(parent_path, quote!(|x| #compo_path.#fn_id))
+                        },
+                    )
                 }
-                llr::PropertyReference::InParent { .. }
-                | llr::PropertyReference::Global { .. }
-                | llr::PropertyReference::GlobalFunction { .. } => {
-                    unreachable!()
-                }
-            }
-        }
-        llr::PropertyReference::Global { global_index, property_index } => {
-            let global_access = &ctx.generator_state.global_access;
-            let global = &ctx.compilation_unit.globals[*global_index];
-            let global_id = format_ident!("global_{}", ident(&global.name));
-            let global_name = global_inner_name(global);
-            let property_name = ident(
-                &ctx.compilation_unit.globals[*global_index].properties[*property_index].name,
-            );
-            MemberAccess::Direct(
-                quote!(#global_name::FIELD_OFFSETS.#property_name.apply_pin(#global_access.#global_id.as_ref())),
-            )
-        }
-        llr::PropertyReference::Function { sub_component_path, function_index } => {
-            if let Some(mut sub_component) = ctx.current_sub_component() {
-                let mut compo_path = quote!(_self);
-                for i in sub_component_path {
+                llr::LocalMemberIndex::Native { item_index, prop_name } => {
+                    let (compo_path, sub_component) = follow_sub_component_path(
+                        ctx.compilation_unit,
+                        ctx.parent_sub_component_idx(*parent_level).unwrap(),
+                        &local_reference.sub_component_path,
+                    );
                     let component_id = inner_component_id(sub_component);
-                    let sub_component_name = ident(&sub_component.sub_components[*i].name);
-                    compo_path = quote!( #component_id::FIELD_OFFSETS.#sub_component_name.apply_pin(#compo_path));
-                    sub_component =
-                        &ctx.compilation_unit.sub_components[sub_component.sub_components[*i].ty];
+                    let item_name = ident(&sub_component.items[*item_index].name);
+                    let item_field = access_component_field_offset(&component_id, &item_name);
+                    if prop_name.is_empty() {
+                        // then this is actually a reference to the element itself
+                        parent_path.map_or_else(
+                            || MemberAccess::Direct(quote!((#compo_path #item_field).apply_pin(_self))),
+                            |parent_path| {
+                                MemberAccess::Option(quote!(#parent_path.as_ref().map(|x| (#compo_path #item_field).apply_pin(x.as_pin_ref()))))
+                            }
+                        )
+                    } else if matches!(
+                        sub_component.items[*item_index].ty.lookup_property(prop_name),
+                        Some(&Type::Function(..))
+                    ) {
+                        let property_name = ident(prop_name);
+                        parent_path.map_or_else(
+                            || MemberAccess::Direct(quote!((#compo_path #item_field).apply_pin(_self).#property_name)),
+                            |parent_path| {
+                                MemberAccess::OptionFn(quote!(#parent_path.as_ref().map(|x| (#compo_path #item_field).apply_pin(x.as_pin_ref()))), quote!(|x| x .#property_name))
+                            }
+                        )
+                    } else {
+                        let property_name = ident(prop_name);
+                        let item_ty = ident(&sub_component.items[*item_index].ty.class_name);
+                        let prop_offset = quote!((#compo_path #item_field + sp::#item_ty::FIELD_OFFSETS.#property_name));
+                        parent_path.map_or_else(
+                            || MemberAccess::Direct(quote!(#prop_offset.apply_pin(_self))),
+                            |parent_path| {
+                                MemberAccess::Option(quote!(#parent_path.as_ref().map(|x| #prop_offset.apply_pin(x.as_pin_ref()))))
+                            }
+                        )
+                    }
                 }
-                let fn_id = ident(&format!("fn_{}", sub_component.functions[*function_index].name));
-                MemberAccess::Direct(quote!(#compo_path.#fn_id))
-            } else if let Some(current_global) = ctx.current_global() {
-                let fn_id =
-                    ident(&format!("fn_{}", current_global.functions[*function_index].name));
-                MemberAccess::Direct(quote!(_self.#fn_id))
-            } else {
-                unreachable!()
             }
         }
-        llr::PropertyReference::GlobalFunction { global_index, function_index } => {
-            let global_access = &ctx.generator_state.global_access;
+        llr::MemberReference::Global { global_index, member } => {
             let global = &ctx.compilation_unit.globals[*global_index];
-            let global_id = format_ident!("global_{}", ident(&global.name));
-            let fn_id = ident(&format!(
-                "fn_{}",
-                ctx.compilation_unit.globals[*global_index].functions[*function_index].name
-            ));
-            MemberAccess::Direct(quote!(#global_access.#global_id.as_ref().#fn_id))
+            let s = if matches!(ctx.current_scope, EvaluationScope::Global(i) if i == *global_index)
+            {
+                quote!(_self)
+            } else {
+                let global_access = &ctx.generator_state.global_access;
+                let global_id = format_ident!("global_{}", ident(&global.name));
+                quote!(#global_access.#global_id.as_ref())
+            };
+            in_global(global, member, s)
         }
     }
+}
+
+fn access_local_member(
+    reference: &llr::LocalMemberReference,
+    ctx: &EvaluationContext,
+) -> TokenStream {
+    access_member(&reference.clone().into(), ctx).unwrap()
 }
 
 /// Helper to access a member property/callback of a component.
@@ -2293,44 +2270,38 @@ fn access_window_adapter_field(ctx: &EvaluationContext) -> TokenStream {
 
 /// Given a property reference to a native item (eg, the property name is empty)
 /// return tokens to the `ItemRc`
-fn access_item_rc(pr: &llr::PropertyReference, ctx: &EvaluationContext) -> TokenStream {
-    let mut ctx = ctx;
+fn access_item_rc(pr: &llr::MemberReference, ctx: &EvaluationContext) -> TokenStream {
     let mut component_access_tokens = quote!(_self);
 
-    let pr = match pr {
-        llr::PropertyReference::InParent { level, parent_reference } => {
-            for _ in 0..level.get() {
-                component_access_tokens =
-                    quote!(#component_access_tokens.parent.upgrade().unwrap().as_pin_ref());
-                ctx = ctx.parent.as_ref().unwrap().ctx;
-            }
-            parent_reference
-        }
-        other => other,
+    let llr::MemberReference::Relative { parent_level, local_reference } = pr else {
+        unreachable!()
+    };
+    let llr::LocalMemberIndex::Native { item_index, prop_name: _ } = &local_reference.reference
+    else {
+        unreachable!()
     };
 
-    match pr {
-        llr::PropertyReference::InNativeItem { sub_component_path, item_index, prop_name: _ } => {
-            let root = ctx.current_sub_component().unwrap();
-            let mut sub_component = root;
-            for i in sub_component_path {
-                let sub_component_name = ident(&sub_component.sub_components[*i].name);
-                component_access_tokens = quote!(#component_access_tokens . #sub_component_name);
-                sub_component =
-                    &ctx.compilation_unit.sub_components[sub_component.sub_components[*i].ty];
-            }
-            let component_rc_tokens = quote!(sp::VRcMapped::origin(&#component_access_tokens.self_weak.get().unwrap().upgrade().unwrap()));
-            let item_index_in_tree = sub_component.items[*item_index].index_in_tree;
-            let item_index_tokens = if item_index_in_tree == 0 {
-                quote!(#component_access_tokens.tree_index.get())
-            } else {
-                quote!(#component_access_tokens.tree_index_of_first_child.get() + #item_index_in_tree - 1)
-            };
-
-            quote!(&sp::ItemRc::new(#component_rc_tokens, #item_index_tokens))
-        }
-        _ => unreachable!(),
+    for _ in 0..*parent_level {
+        component_access_tokens =
+            quote!(#component_access_tokens.parent.upgrade().unwrap().as_pin_ref());
     }
+
+    let mut sub_component =
+        &ctx.compilation_unit.sub_components[ctx.parent_sub_component_idx(*parent_level).unwrap()];
+    for i in &local_reference.sub_component_path {
+        let sub_component_name = ident(&sub_component.sub_components[*i].name);
+        component_access_tokens = quote!(#component_access_tokens . #sub_component_name);
+        sub_component = &ctx.compilation_unit.sub_components[sub_component.sub_components[*i].ty];
+    }
+    let component_rc_tokens = quote!(sp::VRcMapped::origin(&#component_access_tokens.self_weak.get().unwrap().upgrade().unwrap()));
+    let item_index_in_tree = sub_component.items[*item_index].index_in_tree;
+    let item_index_tokens = if item_index_in_tree == 0 {
+        quote!(#component_access_tokens.tree_index.get())
+    } else {
+        quote!(#component_access_tokens.tree_index_of_first_child.get() + #item_index_in_tree - 1)
+    };
+
+    quote!(&sp::ItemRc::new(#component_rc_tokens, #item_index_tokens))
 }
 
 fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
@@ -2366,17 +2337,17 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                 (Type::Struct (lhs), Type::Struct (rhs)) => {
                     debug_assert_eq!(lhs.fields, rhs.fields, "cast of struct with deferent fields should be handled before llr");
                     match (&lhs.name, &rhs.name) {
-                        (None, Some(struct_name)) => {
+                        (StructName::None, targetstruct) if targetstruct.is_some() => {
                             // Convert from an anonymous struct to a named one
                             let fields = lhs.fields.iter().enumerate().map(|(index, (name, _))| {
                                 let index = proc_macro2::Literal::usize_unsuffixed(index);
                                 let name = ident(name);
                                 quote!(the_struct.#name =  obj.#index as _;)
                             });
-                            let id = struct_name_to_tokens(struct_name);
+                            let id = struct_name_to_tokens(targetstruct).unwrap();
                             quote!({ let obj = #f; let mut the_struct = #id::default(); #(#fields)* the_struct })
                         }
-                        (Some(_), None) => {
+                        (sourcestruct, StructName::None) if sourcestruct.is_some() => {
                             // Convert from a named struct to an anonymous one
                             let fields = lhs.fields.keys().map(|name| ident(name));
                             quote!({ let obj = #f; (#(obj.#fields,)*) })
@@ -2428,7 +2399,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                         let v = v.as_str();
                         quote!(#c => sp::SharedString::from(#v))
                     });
-                    quote!(match #f { #(#cases),* })
+                    quote!(match #f { #(#cases,)*  _ => sp::SharedString::default() })
                 }
                 (_, Type::Void) => {
                     quote!({#f;})
@@ -2518,28 +2489,21 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         Expression::ModelDataAssignment { level, value } => {
             let value = compile_expression(value, ctx);
             let mut path = quote!(_self);
-            let mut ctx2 = ctx;
+            let EvaluationScope::SubComponent(mut sc, mut par) = ctx.current_scope else { unreachable!() };
             let mut repeater_index = None;
             for _ in 0..=*level {
-                let x = ctx2.parent.unwrap();
-                ctx2 = x.ctx;
+                let x = par.unwrap();
+                par = x.parent;
                 repeater_index = x.repeater_index;
+                sc = x.sub_component;
                 path = quote!(#path.parent.upgrade().unwrap());
             }
             let repeater_index = repeater_index.unwrap();
-            let mut index_prop = llr::PropertyReference::Local {
-                sub_component_path: vec![],
-                property_index: ctx2.current_sub_component().unwrap().repeated[repeater_index].index_prop.unwrap(),
-            };
-            if let Some(level) = NonZeroUsize::new(*level) {
-                index_prop =
-                    llr::PropertyReference::InParent { level, parent_reference: index_prop.into() };
-            }
+            let sub_component = &ctx.compilation_unit.sub_components[sc];
+            let local_reference = sub_component.repeated[repeater_index].index_prop.unwrap().into();
+            let index_prop = llr::MemberReference::Relative { parent_level: *level, local_reference };
             let index_access = access_member(&index_prop, ctx).get_property();
-            let repeater = access_component_field_offset(
-                &inner_component_id(ctx2.current_sub_component().unwrap()),
-                &format_ident!("repeater{}", usize::from(repeater_index)),
-            );
+            let repeater = access_component_field_offset(&inner_component_id(sub_component), &format_ident!("repeater{}", usize::from(repeater_index)));
             quote!(#repeater.apply_pin(#path.as_pin_ref()).model_set_row_data(#index_access as _, #value as _))
         }
         Expression::ArrayIndexAssignment { array, index, value } => {
@@ -2663,10 +2627,10 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         }
         Expression::Struct { ty, values } => {
             let elem = ty.fields.keys().map(|k| values.get(k).map(|e| compile_expression(e, ctx)));
-            if let Some(name) = &ty.name {
-                let name_tokens: TokenStream = struct_name_to_tokens(name.as_str());
+            if ty.name.is_some() {
+                let name_tokens = struct_name_to_tokens(&ty.name).unwrap();
                 let keys = ty.fields.keys().map(|k| ident(k));
-                if name.starts_with("slint::private_api::") && name.ends_with("LayoutData") {
+                if matches!(&ty.name, StructName::BuiltinPrivate(private_type) if private_type.is_layout_data()) {
                     quote!(#name_tokens{#(#keys: #elem as _,)*})
                 } else {
                     quote!({ let mut the_struct = #name_tokens::default(); #(the_struct.#keys =  #elem as _;)* the_struct})
@@ -2741,14 +2705,15 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                 sp::RadialGradientBrush::new_circle([#(#stops),*])
             ))
         }
-        Expression::ConicGradient { stops } => {
+        Expression::ConicGradient { from_angle, stops } => {
+            let from_angle = compile_expression(from_angle, ctx);
             let stops = stops.iter().map(|(color, stop)| {
                 let color = compile_expression(color, ctx);
                 let position = compile_expression(stop, ctx);
                 quote!(sp::GradientStop{ color: #color, position: #position as _ })
             });
             quote!(slint::Brush::ConicGradient(
-                sp::ConicGradientBrush::new([#(#stops),*])
+                sp::ConicGradientBrush::new(#from_angle as _, [#(#stops),*])
             ))
         }
         Expression::EnumerationValue(value) => {
@@ -2760,26 +2725,26 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                 quote!(sp::#base_ident::#value_ident)
             }
         }
-        Expression::LayoutCacheAccess { layout_cache_prop, index, repeater_index } => {
+        Expression::LayoutCacheAccess { layout_cache_prop, index, repeater_index, entries_per_item } => {
             access_member(layout_cache_prop, ctx).map_or_default(|cache| {
                 if let Some(ri) = repeater_index {
                     let offset = compile_expression(ri, ctx);
                     quote!({
                         let cache = #cache.get();
-                        *cache.get((cache[#index] as usize) + #offset as usize * 2).unwrap_or(&(0 as sp::Coord))
+                        *cache.get((cache[#index] as usize) + #offset as usize * #entries_per_item).unwrap_or(&(0 as _))
                     })
                 } else {
                     quote!(#cache.get()[#index])
                 }
             })
         }
-        Expression::BoxLayoutFunction {
+        Expression::WithLayoutItemInfo {
             cells_variable,
             repeater_indices,
             elements,
             orientation,
             sub_expression,
-        } => box_layout_function(
+        } => generate_with_layout_item_info(
             cells_variable,
             repeater_indices.as_ref().map(SmolStr::as_str),
             elements.as_ref(),
@@ -2787,21 +2752,17 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             sub_expression,
             ctx,
         ),
-        Expression::ComputeDialogLayoutCells { cells_variable, roles, unsorted_cells } => {
-            let cells_variable = ident(cells_variable);
-            let roles = compile_expression(roles, ctx);
-            let cells = match &**unsorted_cells {
-                Expression::Array { values, .. } => {
-                    values.iter().map(|v| compile_expression(v, ctx))
-                }
-                _ => panic!("dialog layout unsorted cells not an array"),
-            };
-            quote! {
-                let mut #cells_variable = [#(#cells),*];
-                sp::reorder_dialog_button_layout(&mut #cells_variable, &#roles);
-                let #cells_variable = sp::Slice::from_slice(&#cells_variable);
-            }
-        }
+
+        Expression::WithGridInputData {
+            cells_variable, repeater_indices, elements, sub_expression
+        } => generate_with_grid_input_data(
+            cells_variable,
+            repeater_indices.as_ref().map(SmolStr::as_str),
+            elements.as_ref(),
+            sub_expression,
+            ctx,
+        ),
+
         Expression::MinMax { ty, op, lhs, rhs } => {
             let lhs = compile_expression(lhs, ctx);
             let t = rust_primitive_type(ty);
@@ -2887,36 +2848,41 @@ fn compile_builtin_function_call(
             }
         }
         BuiltinFunction::ShowPopupWindow => {
-            if let [Expression::NumberLiteral(popup_index), close_policy, Expression::PropertyReference(parent_ref)] =
-                arguments
+            if let [
+                Expression::NumberLiteral(popup_index),
+                close_policy,
+                Expression::PropertyReference(parent_ref),
+            ] = arguments
             {
-                let mut parent_ctx = ctx;
                 let mut component_access_tokens = MemberAccess::Direct(quote!(_self));
-                if let llr::PropertyReference::InParent { level, .. } = parent_ref {
-                    for _ in 0..level.get() {
-                        component_access_tokens = match component_access_tokens {
-                            MemberAccess::Option(token_stream) => MemberAccess::Option(
-                                quote!(#token_stream.and_then(|a| a.as_pin_ref().parent.upgrade())),
-                            ),
-                            MemberAccess::Direct(token_stream) => {
-                                MemberAccess::Option(quote!(#token_stream.parent.upgrade()))
-                            }
-                            _ => unreachable!(),
-                        };
-                        parent_ctx = parent_ctx.parent.as_ref().unwrap().ctx;
-                    }
+                let llr::MemberReference::Relative { parent_level, .. } = parent_ref else {
+                    unreachable!()
+                };
+                for _ in 0..*parent_level {
+                    component_access_tokens = match component_access_tokens {
+                        MemberAccess::Option(token_stream) => MemberAccess::Option(
+                            quote!(#token_stream.and_then(|a| a.as_pin_ref().parent.upgrade())),
+                        ),
+                        MemberAccess::Direct(token_stream) => {
+                            MemberAccess::Option(quote!(#token_stream.parent.upgrade()))
+                        }
+                        _ => unreachable!(),
+                    };
                 }
-                let current_sub_component = parent_ctx.current_sub_component().unwrap();
+
+                let current_sub_component = &ctx.compilation_unit.sub_components
+                    [ctx.parent_sub_component_idx(*parent_level).unwrap()];
                 let popup = &current_sub_component.popup_windows[*popup_index as usize];
                 let popup_window_id =
                     inner_component_id(&ctx.compilation_unit.sub_components[popup.item_tree.root]);
-                let parent_component = access_item_rc(parent_ref, ctx);
+                let parent_item = access_item_rc(parent_ref, ctx);
 
+                let parent_ctx = ParentScope::new(ctx, None);
                 let popup_ctx = EvaluationContext::new_sub_component(
                     ctx.compilation_unit,
                     popup.item_tree.root,
                     RustGeneratorContext { global_access: quote!(_self.globals.get().unwrap()) },
-                    Some(ParentCtx::new(ctx, None)),
+                    Some(&parent_ctx),
                 );
                 let position = compile_expression(&popup.position.borrow(), &popup_ctx);
 
@@ -2924,6 +2890,7 @@ fn compile_builtin_function_call(
                 let window_adapter_tokens = access_window_adapter_field(ctx);
                 let popup_id_name = internal_popup_id(*popup_index as usize);
                 component_access_tokens.then(|component_access_tokens| quote!({
+                    let parent_item = #parent_item;
                     let popup_instance = #popup_window_id::new(#component_access_tokens.self_weak.get().unwrap().clone()).unwrap();
                     let popup_instance_vrc = sp::VRc::map(popup_instance.clone(), |x| x);
                     let position = { let _self = popup_instance_vrc.as_pin_ref(); #position };
@@ -2935,7 +2902,7 @@ fn compile_builtin_function_call(
                             &sp::VRc::into_dyn(popup_instance.into()),
                             position,
                             #close_policy,
-                            #parent_component,
+                            parent_item,
                             false, // is_menu
                         ))
                     );
@@ -2946,24 +2913,25 @@ fn compile_builtin_function_call(
             }
         }
         BuiltinFunction::ClosePopupWindow => {
-            if let [Expression::NumberLiteral(popup_index), Expression::PropertyReference(parent_ref)] =
-                arguments
+            if let [
+                Expression::NumberLiteral(popup_index),
+                Expression::PropertyReference(parent_ref),
+            ] = arguments
             {
-                let mut parent_ctx = ctx;
                 let mut component_access_tokens = MemberAccess::Direct(quote!(_self));
-                if let llr::PropertyReference::InParent { level, .. } = parent_ref {
-                    for _ in 0..level.get() {
-                        component_access_tokens = match component_access_tokens {
-                            MemberAccess::Option(token_stream) => MemberAccess::Option(
-                                quote!(#token_stream.and_then(|a| a.parent.upgrade())),
-                            ),
-                            MemberAccess::Direct(token_stream) => {
-                                MemberAccess::Option(quote!(#token_stream.parent.upgrade()))
-                            }
-                            _ => unreachable!(),
-                        };
-                        parent_ctx = parent_ctx.parent.as_ref().unwrap().ctx;
-                    }
+                let llr::MemberReference::Relative { parent_level, .. } = parent_ref else {
+                    unreachable!()
+                };
+                for _ in 0..*parent_level {
+                    component_access_tokens = match component_access_tokens {
+                        MemberAccess::Option(token_stream) => MemberAccess::Option(
+                            quote!(#token_stream.and_then(|a| a.parent.upgrade())),
+                        ),
+                        MemberAccess::Direct(token_stream) => {
+                            MemberAccess::Option(quote!(#token_stream.parent.upgrade()))
+                        }
+                        _ => unreachable!(),
+                    };
                 }
                 let window_adapter_tokens = access_window_adapter_field(ctx);
                 let popup_id_name = internal_popup_id(*popup_index as usize);
@@ -3202,10 +3170,12 @@ fn compile_builtin_function_call(
             quote!(sp::WindowInner::from_pub(#window_adapter_tokens.window()).scale_factor())
         }
         BuiltinFunction::GetWindowDefaultFontSize => {
-            quote!(sp::WindowItem::resolved_default_font_size(sp::VRcMapped::origin(
-                &_self.self_weak.get().unwrap().upgrade().unwrap()
-            ))
-            .get())
+            quote!(
+                sp::WindowItem::resolved_default_font_size(sp::VRcMapped::origin(
+                    &_self.self_weak.get().unwrap().upgrade().unwrap()
+                ))
+                .get()
+            )
         }
         BuiltinFunction::AnimationTick => {
             quote!(sp::animation_tick())
@@ -3325,8 +3295,14 @@ fn compile_builtin_function_call(
         }
         BuiltinFunction::SetupMenuBar => {
             let window_adapter_tokens = access_window_adapter_field(ctx);
-            let [Expression::PropertyReference(entries_r), Expression::PropertyReference(sub_menu_r), Expression::PropertyReference(activated_r), Expression::NumberLiteral(tree_index), Expression::BoolLiteral(no_native), rest @ ..] =
-                arguments
+            let [
+                Expression::PropertyReference(entries_r),
+                Expression::PropertyReference(sub_menu_r),
+                Expression::PropertyReference(activated_r),
+                Expression::NumberLiteral(tree_index),
+                Expression::BoolLiteral(no_native),
+                rest @ ..,
+            ] = arguments
             else {
                 panic!("internal error: incorrect arguments to SetupMenuBar")
             };
@@ -3460,20 +3436,104 @@ fn compile_builtin_function_call(
             let url = a.next().unwrap();
             quote!(sp::open_url(&#url))
         }
+        BuiltinFunction::EscapeMarkdown => {
+            let text = a.next().unwrap();
+            quote!(sp::escape_markdown(&#text))
+        }
+        BuiltinFunction::ParseMarkdown => {
+            let text = a.next().unwrap();
+            quote!(sp::parse_markdown(&#text))
+        }
     }
 }
 
-/// Return a TokenStream for a name (as in [`Type::Struct::name`])
-fn struct_name_to_tokens(name: &str) -> TokenStream {
-    // the name match the C++ signature so we need to change that to the rust namespace
-    let mut name = name.replace("slint::private_api::", "sp::").replace('-', "_");
-    if !name.contains("::") {
-        name.insert_str(0, "r#")
+fn struct_name_to_tokens(name: &StructName) -> Option<proc_macro2::TokenStream> {
+    match name {
+        StructName::None => None,
+        StructName::User { name, .. } => Some(proc_macro2::TokenTree::from(ident(name)).into()),
+        StructName::BuiltinPrivate(builtin_private_struct) => {
+            let name: &'static str = builtin_private_struct.into();
+            let name = format_ident!("{}", name);
+            Some(quote!(sp::#name))
+        }
+        StructName::BuiltinPublic(builtin_public_struct) => {
+            let name: &'static str = builtin_public_struct.into();
+            let name = format_ident!("{}", name);
+            Some(quote!(slint::#name))
+        }
     }
-    name.parse().unwrap()
 }
 
-fn box_layout_function(
+fn generate_with_grid_input_data(
+    cells_variable: &str,
+    repeated_indices: Option<&str>,
+    elements: &[Either<Expression, llr::GridLayoutRepeatedElement>],
+    sub_expression: &Expression,
+    ctx: &EvaluationContext,
+) -> TokenStream {
+    let repeated_indices = repeated_indices.map(ident);
+    let inner_component_id = self::inner_component_id(ctx.current_sub_component().unwrap());
+    let mut fixed_count = 0usize;
+    let mut repeated_count = quote!();
+    let mut push_code = Vec::new();
+    let mut repeater_idx = 0usize;
+    for item in elements {
+        match item {
+            Either::Left(value) => {
+                let value = compile_expression(value, ctx);
+                fixed_count += 1;
+                push_code.push(quote!(items_vec.push(#value);))
+            }
+            Either::Right(repeater) => {
+                let repeater_id = format_ident!("repeater{}", usize::from(repeater.repeater_index));
+                let rep_inner_component_id = self::inner_component_id(
+                    &ctx.compilation_unit.sub_components[ctx
+                        .current_sub_component()
+                        .unwrap()
+                        .repeated[repeater.repeater_index]
+                        .sub_tree
+                        .root],
+                );
+                repeated_count = quote!(#repeated_count + _self.#repeater_id.len());
+                let ri = repeated_indices.as_ref().map(|ri| {
+                    quote!(
+                        #ri[#repeater_idx * 2] = items_vec.len() as u32;
+                        #ri[#repeater_idx * 2 + 1] = internal_vec.len() as u32;
+                    )
+                });
+                repeater_idx += 1;
+                let new_row = repeater.new_row;
+                push_code.push(quote!(
+                        #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated(
+                            || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone()).unwrap().into() }
+                        );
+                        let internal_vec = _self.#repeater_id.instances_vec();
+                        #ri
+                        let mut new_row = #new_row;
+                        for sub_comp in &internal_vec {
+                            items_vec.push(sub_comp.as_pin_ref().grid_layout_input_data(new_row));
+                            new_row = false;
+                        }
+                    ));
+            }
+        }
+    }
+    let ri = repeated_indices.as_ref().map(|ri| quote!(let mut #ri = [0u32; 2 * #repeater_idx];));
+    let ri2 = repeated_indices.map(|ri| quote!(let #ri = sp::Slice::from_slice(&#ri);));
+    let cells_variable = ident(cells_variable);
+    let sub_expression = compile_expression(sub_expression, ctx);
+
+    quote! { {
+        #ri
+        let mut items_vec = sp::Vec::with_capacity(#fixed_count #repeated_count);
+        #(#push_code)*
+        let #cells_variable = sp::Slice::from_slice(&items_vec);
+        #ri2
+        #sub_expression
+    } }
+}
+
+fn generate_with_layout_item_info(
     cells_variable: &str,
     repeated_indices: Option<&str>,
     elements: &[Either<Expression, llr::RepeatedElementIdx>],
@@ -3485,7 +3545,7 @@ fn box_layout_function(
     let inner_component_id = self::inner_component_id(ctx.current_sub_component().unwrap());
     let mut fixed_count = 0usize;
     let mut repeated_count = quote!();
-    let mut push_code = vec![];
+    let mut push_code = Vec::new();
     let mut repeater_idx = 0usize;
     for item in elements {
         match item {
@@ -3515,7 +3575,7 @@ fn box_layout_function(
                         let internal_vec = _self.#repeater_id.instances_vec();
                         #ri
                         for sub_comp in &internal_vec {
-                            items_vec.push(sub_comp.as_pin_ref().box_layout_data(#orientation))
+                            items_vec.push(sub_comp.as_pin_ref().layout_item_info(#orientation))
                         }
                     ));
             }
@@ -3685,20 +3745,37 @@ pub fn generate_named_exports(exports: &crate::object_tree::Exports) -> Vec<Toke
         .iter()
         .filter_map(|export| match &export.1 {
             Either::Left(component) if !component.is_global() => {
-                Some((&export.0.name, &component.id))
+                if export.0.name != component.id {
+                    Some((
+                        &export.0.name,
+                        proc_macro2::TokenTree::from(ident(&component.id)).into(),
+                    ))
+                } else {
+                    None
+                }
             }
             Either::Right(ty) => match &ty {
-                Type::Struct(s) if s.name.is_some() && s.node.is_some() => {
-                    Some((&export.0.name, s.name.as_ref().unwrap()))
+                Type::Struct(s) if s.node().is_some() => {
+                    if let StructName::User { name, .. } = &s.name
+                        && *name == export.0.name
+                    {
+                        None
+                    } else {
+                        Some((&export.0.name, struct_name_to_tokens(&s.name).unwrap()))
+                    }
                 }
-                Type::Enumeration(en) => Some((&export.0.name, &en.name)),
+                Type::Enumeration(en) => {
+                    if export.0.name != en.name {
+                        Some((&export.0.name, proc_macro2::TokenTree::from(ident(&en.name)).into()))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             },
             _ => None,
         })
-        .filter(|(export_name, type_name)| export_name != type_name)
-        .map(|(export_name, type_name)| {
-            let type_id = ident(type_name);
+        .map(|(export_name, type_id)| {
             let export_id = ident(export_name);
             quote!(#type_id as #export_id)
         })
@@ -3753,12 +3830,10 @@ fn generate_translations(
 
     let ctx = EvaluationContext {
         compilation_unit,
-        current_sub_component: None,
-        current_global: None,
+        current_scope: EvaluationScope::Global(0.into()),
         generator_state: RustGeneratorContext {
             global_access: quote!(compile_error!("language rule can't access state")),
         },
-        parent: None,
         argument_types: &[Type::Int32],
     };
     let rules = translations.plural_rules.iter().map(|rule| {

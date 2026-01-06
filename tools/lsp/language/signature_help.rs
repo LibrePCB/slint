@@ -6,7 +6,7 @@ use i_slint_compiler::expression_tree::Callable;
 use i_slint_compiler::langtype::{Function, Type};
 use i_slint_compiler::lookup::{LookupObject as _, LookupResult, LookupResultCallable};
 use i_slint_compiler::namedreference::NamedReference;
-use i_slint_compiler::parser::{syntax_nodes, SyntaxKind, SyntaxNode, SyntaxToken};
+use i_slint_compiler::parser::{SyntaxKind, SyntaxNode, SyntaxToken, syntax_nodes};
 use lsp_types::{ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation};
 
 pub(crate) fn get_signature_help(
@@ -15,7 +15,7 @@ pub(crate) fn get_signature_help(
 ) -> Option<SignatureHelp> {
     let pos = token.text_range().start();
     let mut node = token.parent();
-    let mut result = vec![];
+    let mut result = Vec::new();
 
     loop {
         if let Some(node) = syntax_nodes::FunctionCallExpression::new(node.clone()) {
@@ -135,11 +135,7 @@ fn signature_from_function_ty(
             .filter(|(x, _)| *x != &Type::ElementReference)
             .map(
                 |(ty, name)| {
-                    if !name.is_empty() {
-                        format!("{name}: {ty}")
-                    } else {
-                        ty.to_string()
-                    }
+                    if !name.is_empty() { format!("{name}: {ty}") } else { ty.to_string() }
                 },
             )
             .collect(),
@@ -203,7 +199,7 @@ export component Abc {
                     SignatureInformation {
                         label: "Sqrt()".into(),
                         documentation: None,
-                        parameters: Some(vec![]),
+                        parameters: Some(Vec::new()),
                         active_parameter: Some(0),
                     },
                     make_signature_info(

@@ -225,7 +225,7 @@ pub fn set_json_preview_data(
 
     let definition = &component_instance.definition();
 
-    let mut failed_properties = vec![];
+    let mut failed_properties = Vec::new();
 
     let it =
         find_component_properties_and_callbacks(definition, &container).map_err(|e| vec![e])?;
@@ -287,11 +287,7 @@ pub fn set_json_preview_data(
         return Err(failed_properties);
     }
 
-    if result.is_empty() {
-        Err(vec![format!("No property set")])
-    } else {
-        Ok(result)
-    }
+    if result.is_empty() { Err(vec![format!("No property set")]) } else { Ok(result) }
 }
 
 #[cfg(test)]

@@ -3,15 +3,15 @@
 
 // cSpell: ignore imum
 
-use smol_str::{format_smolstr, SmolStr, StrExt, ToSmolStr};
+use smol_str::{SmolStr, StrExt, ToSmolStr};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::expression_tree::BuiltinFunction;
 use crate::langtype::{
-    BuiltinElement, BuiltinPropertyDefault, BuiltinPropertyInfo, ElementType, Enumeration,
-    Function, PropertyLookupResult, Struct, Type,
+    BuiltinElement, BuiltinPrivateStruct, BuiltinPropertyDefault, BuiltinPropertyInfo,
+    BuiltinPublicStruct, ElementType, Enumeration, Function, PropertyLookupResult, Struct, Type,
 };
 use crate::object_tree::{Component, PropertyVisibility};
 use crate::typeloader;
@@ -41,10 +41,10 @@ pub const RESERVED_LAYOUT_PROPERTIES: &[(&str, Type)] = &[
 ];
 
 pub const RESERVED_GRIDLAYOUT_PROPERTIES: &[(&str, Type)] = &[
-    ("col", Type::Int32),
-    ("row", Type::Int32),
-    ("colspan", Type::Int32),
-    ("rowspan", Type::Int32),
+    ("col", Type::Float32),
+    ("row", Type::Float32),
+    ("colspan", Type::Float32),
+    ("rowspan", Type::Float32),
 ];
 
 macro_rules! declare_enums {
@@ -85,6 +85,7 @@ pub struct BuiltinTypes {
     pub logical_point_type: Rc<Struct>,
     pub font_metrics_type: Type,
     pub layout_info_type: Rc<Struct>,
+    pub gridlayout_input_data_type: Type,
     pub path_element_type: Type,
     pub box_layout_cell_data_type: Type,
 }
@@ -101,9 +102,7 @@ impl BuiltinTypes {
                         .map(|s| (SmolStr::new_static(s), Type::Float32)),
                 )
                 .collect(),
-            name: Some("slint::private_api::LayoutInfo".into()),
-            node: None,
-            rust_attributes: None,
+            name: BuiltinPrivateStruct::LayoutInfo.into(),
         });
         Self {
             enums: BuiltinEnums::new(),
@@ -113,9 +112,7 @@ impl BuiltinTypes {
                     (SmolStr::new_static("y"), Type::LogicalLength),
                 ])
                 .collect(),
-                name: Some("slint::LogicalPosition".into()),
-                node: None,
-                rust_attributes: None,
+                name: BuiltinPublicStruct::LogicalPosition.into(),
             }),
             font_metrics_type: Type::Struct(Rc::new(Struct {
                 fields: IntoIterator::into_iter([
@@ -125,33 +122,37 @@ impl BuiltinTypes {
                     (SmolStr::new_static("cap-height"), Type::LogicalLength),
                 ])
                 .collect(),
-                name: Some("slint::private_api::FontMetrics".into()),
-                node: None,
-                rust_attributes: None,
+                name: BuiltinPrivateStruct::FontMetrics.into(),
             })),
             noarg_callback_type: Type::Callback(Rc::new(Function {
                 return_type: Type::Void,
-                args: vec![],
-                arg_names: vec![],
+                args: Vec::new(),
+                arg_names: Vec::new(),
             })),
             strarg_callback_type: Type::Callback(Rc::new(Function {
                 return_type: Type::Void,
                 args: vec![Type::String],
-                arg_names: vec![],
+                arg_names: Vec::new(),
             })),
             layout_info_type: layout_info_type.clone(),
             path_element_type: Type::Struct(Rc::new(Struct {
                 fields: Default::default(),
-                name: Some("PathElement".into()),
-                node: None,
-                rust_attributes: None,
+                name: BuiltinPrivateStruct::PathElement.into(),
             })),
             box_layout_cell_data_type: Type::Struct(Rc::new(Struct {
                 fields: IntoIterator::into_iter([("constraint".into(), layout_info_type.into())])
                     .collect(),
-                name: Some("BoxLayoutCellData".into()),
-                node: None,
-                rust_attributes: None,
+                name: BuiltinPrivateStruct::LayoutItemInfo.into(),
+            })),
+            gridlayout_input_data_type: Type::Struct(Rc::new(Struct {
+                fields: IntoIterator::into_iter([
+                    ("row".into(), Type::Int32),
+                    ("column".into(), Type::Int32),
+                    ("rowspan".into(), Type::Int32),
+                    ("colspan".into(), Type::Int32),
+                ])
+                .collect(),
+                name: BuiltinPrivateStruct::GridLayoutInputData.into(),
             })),
         }
     }
@@ -207,6 +208,7 @@ pub fn reserved_accessibility_properties() -> impl Iterator<Item = (&'static str
         ("accessible-enabled", Type::Bool),
         ("accessible-expandable", Type::Bool),
         ("accessible-expanded", Type::Bool),
+        ("accessible-id", Type::String),
         ("accessible-label", Type::String),
         ("accessible-value", Type::String),
         ("accessible-value-maximum", Type::Float32),
@@ -245,7 +247,7 @@ pub fn reserved_properties() -> impl Iterator<Item = (&'static str, Type, Proper
         .chain(
             RESERVED_GRIDLAYOUT_PROPERTIES
                 .iter()
-                .map(|(k, v)| (*k, v.clone(), PropertyVisibility::Constexpr)),
+                .map(|(k, v)| (*k, v.clone(), PropertyVisibility::Input)),
         )
         .chain(IntoIterator::into_iter([
             ("absolute-position", logical_point_type().into(), PropertyVisibility::Output),
@@ -298,18 +300,18 @@ pub fn reserved_property(name: std::borrow::Cow<'_, str>) -> PropertyLookupResul
     for pre in &["min", "max"] {
         if let Some(a) = name.strip_prefix(pre) {
             for suf in &["width", "height"] {
-                if let Some(b) = a.strip_suffix(suf) {
-                    if b == "imum-" {
-                        return PropertyLookupResult {
-                            property_type: Type::LogicalLength,
-                            resolved_name: format!("{pre}-{suf}").into(),
-                            is_local_to_component: false,
-                            is_in_direct_base: false,
-                            property_visibility: crate::object_tree::PropertyVisibility::InOut,
-                            declared_pure: None,
-                            builtin_function: None,
-                        };
-                    }
+                if let Some(b) = a.strip_suffix(suf)
+                    && b == "imum-"
+                {
+                    return PropertyLookupResult {
+                        property_type: Type::LogicalLength,
+                        resolved_name: format!("{pre}-{suf}").into(),
+                        is_local_to_component: false,
+                        is_in_direct_base: false,
+                        property_visibility: crate::object_tree::PropertyVisibility::InOut,
+                        declared_pure: None,
+                        builtin_function: None,
+                    };
                 }
             }
         }
@@ -401,6 +403,7 @@ impl TypeRegister {
         register.insert_type(Type::Angle);
         register.insert_type(Type::Brush);
         register.insert_type(Type::Rem);
+        register.insert_type(Type::StyledText);
         register.types.insert("Point".into(), logical_point_type().into());
 
         BUILTIN.with(|e| e.enums.fill_register(&mut register));
@@ -436,7 +439,7 @@ impl TypeRegister {
             ($(
                 $(#[$attr:meta])*
                 struct $Name:ident {
-                    @name = $inner_name:literal
+                    @name = $inner_name:expr,
                     export {
                         $( $(#[$pub_attr:meta])* $pub_field:ident : $pub_type:ident, )*
                     }
@@ -450,9 +453,7 @@ impl TypeRegister {
                     fields: BTreeMap::from([
                         $((stringify!($pub_field).replace_smolstr("_", "-"), map_type!($pub_type, $pub_type))),*
                     ]),
-                    name: Some(format_smolstr!("{}", $inner_name)),
-                    node: None,
-                    rust_attributes: None,
+                    name: $inner_name.into(),
                 }));
                 register.insert_type_with_name(maybe_clone!($Name, $Name), SmolStr::new(stringify!($Name)));
             )* };
@@ -565,6 +566,15 @@ impl TypeRegister {
             _ => unreachable!(),
         };
 
+        match &mut register.elements.get_mut("TabWidget").unwrap() {
+            ElementType::Builtin(b) => {
+                let tabwidget = Rc::get_mut(b).unwrap();
+                tabwidget.properties.get_mut("orientation").unwrap().property_visibility =
+                    PropertyVisibility::Constexpr;
+            }
+            _ => unreachable!(),
+        }
+
         register
     }
 
@@ -585,7 +595,7 @@ impl TypeRegister {
         register.elements.remove("DropArea").unwrap();
         register.types.remove("DropEvent").unwrap(); // Also removed in xtask/src/slintdocs.rs
 
-        register.elements.remove("MarkdownText").unwrap();
+        register.elements.remove("StyledText").unwrap();
 
         Rc::new(RefCell::new(register))
     }
@@ -736,7 +746,7 @@ pub fn path_element_type() -> Type {
     BUILTIN.with(|types| types.path_element_type.clone())
 }
 
-/// The [`Type`] for a runtime BoxLayoutCellData structure
+/// The [`Type`] for a runtime LayoutItemInfo structure
 pub fn box_layout_cell_data_type() -> Type {
     BUILTIN.with(|types| types.box_layout_cell_data_type.clone())
 }

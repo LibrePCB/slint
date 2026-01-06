@@ -3,7 +3,7 @@
 
 use crate::common::{
     self,
-    token_info::{token_info, TokenInfo},
+    token_info::{TokenInfo, token_info},
 };
 use crate::util;
 use i_slint_compiler::parser::{SyntaxNode, SyntaxToken};
@@ -18,17 +18,20 @@ pub fn goto_definition(
 ) -> Option<GotoDefinitionResponse> {
     let token_info = token_info(document_cache, token.clone())?;
     if let Some(node) = token_info.declaration() {
-        return goto_node(&node);
+        return goto_node(&node, document_cache.format);
     }
     match token_info {
         TokenInfo::FileName(f) | TokenInfo::Image(f) => {
             if let Some(doc) = document_cache.get_document_by_path(&f) {
                 let doc_node = doc.node.clone()?;
-                goto_node(&doc_node)
+                goto_node(&doc_node, document_cache.format)
             } else if f.is_file() || cfg!(test) {
                 // WASM will never get here, but that is fine: Slintpad can not open images anyway;-)
                 return Some(GotoDefinitionResponse::Link(vec![LocationLink {
-                    origin_selection_range: Some(util::token_to_lsp_range(&token)),
+                    origin_selection_range: Some(util::token_to_lsp_range(
+                        &token,
+                        document_cache.format,
+                    )),
                     target_uri: lsp_types::Url::from_file_path(&f).ok()?,
                     target_range: Range::new(Position::new(0, 0), Position::new(0, 0)),
                     target_selection_range: Range::new(Position::new(0, 0), Position::new(0, 0)),
@@ -41,8 +44,8 @@ pub fn goto_definition(
     }
 }
 
-fn goto_node(node: &SyntaxNode) -> Option<GotoDefinitionResponse> {
-    let (target_uri, range) = crate::util::node_to_url_and_lsp_range(node)?;
+fn goto_node(node: &SyntaxNode, format: common::ByteFormat) -> Option<GotoDefinitionResponse> {
+    let (target_uri, range) = crate::util::node_to_url_and_lsp_range(node, format)?;
     let range = Range::new(range.start, range.start); // Shrink range to a position:-)
     Some(GotoDefinitionResponse::Link(vec![LocationLink {
         origin_selection_range: None,
@@ -178,7 +181,7 @@ fn test_goto_definition_multi_files() {
     "#;
     let (mut dc, url1, diags) = crate::language::test::loaded_document_cache(source1.into());
     for (u, ds) in diags {
-        assert_eq!(ds, vec![], "errors in {u}");
+        assert_eq!(ds, Vec::new(), "errors in {u}");
     }
     let url2 = url1.join("../file2.slint").unwrap();
     let source2 = format!(
@@ -196,9 +199,9 @@ fn test_goto_definition_multi_files() {
         Some(43),
         &mut dc,
     ));
-    let diag = crate::language::convert_diagnostics(&extra_files, diag);
+    let diag = crate::language::convert_diagnostics(&extra_files, diag, common::ByteFormat::Utf8);
     for (u, ds) in diag {
-        assert_eq!(ds, vec![], "errors in {u}");
+        assert_eq!(ds, Vec::new(), "errors in {u}");
     }
 
     let doc2 = dc.get_document(&url2).unwrap().node.clone().unwrap();

@@ -15,6 +15,7 @@
 //!    This register dependencies only on the rendering tracker.
 //!
 
+use crate::Coord;
 use crate::item_rendering::{
     ItemRenderer, ItemRendererFeatures, RenderBorderRectangle, RenderImage, RenderRectangle,
     RenderText,
@@ -29,7 +30,6 @@ use crate::lengths::{
 };
 use crate::properties::PropertyTracker;
 use crate::window::WindowAdapter;
-use crate::Coord;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
@@ -71,11 +71,7 @@ impl CachedRenderingData {
         cache: &'a mut PartialRendererCache,
     ) -> Option<&'a mut PartialRenderingCachedData> {
         let index = self.cache_index.get();
-        if self.cache_generation.get() == cache.generation() {
-            cache.get_mut(index)
-        } else {
-            None
-        }
+        if self.cache_generation.get() == cache.generation() { cache.get_mut(index) } else { None }
     }
 }
 
@@ -229,7 +225,7 @@ impl core::fmt::Debug for DirtyRegion {
 
 impl DirtyRegion {
     /// The maximum number of rectangles that can be stored in a DirtyRegion
-    pub(crate) const MAX_COUNT: usize = 3;
+    pub const MAX_COUNT: usize = 3;
 
     /// An iterator over the part of the region (they can overlap)
     pub fn iter(&self) -> impl Iterator<Item = euclid::Box2D<Coord, LogicalPx>> + '_ {
@@ -335,7 +331,7 @@ impl From<LogicalRect> for DirtyRegion {
     }
 }
 
-/// This enum describes which parts of the buffer passed to the [`SoftwareRenderer`](crate::software_renderer::SoftwareRenderer) may be re-used to speed up painting.
+/// This enum describes which parts of the buffer passed to the `SoftwareRenderer` may be re-used to speed up painting.
 // FIXME: #[non_exhaustive] #3023
 #[derive(PartialEq, Eq, Debug, Clone, Default, Copy)]
 pub enum RepaintBufferType {

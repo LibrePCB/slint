@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 //re-export for the generated code:
-pub use crate::{Compiler, ComponentInstance, Value};
+pub use crate::{Compiler, ComponentInstance, DefaultTranslationContext, Value};
 
 /// This struct is used to compile and instantiate a component from a .slint file on disk.
 /// The file is watched for changes and the component is recompiled and instantiated
@@ -23,8 +23,8 @@ pub struct LiveReloadingComponent {
     compiler: Compiler,
     file_name: PathBuf,
     component_name: String,
-    properties: HashMap<String, Value>,
-    callbacks: HashMap<String, Rc<dyn Fn(&[Value]) -> Value + 'static>>,
+    properties: RefCell<HashMap<String, Value>>,
+    callbacks: RefCell<HashMap<String, Rc<dyn Fn(&[Value]) -> Value + 'static>>>,
 }
 
 impl LiveReloadingComponent {
@@ -123,9 +123,13 @@ impl LiveReloadingComponent {
             eprintln!("Component {} not found", self.component_name);
             return false;
         }
+        true
+    }
 
+    /// Reload the properties and callbacks after a reload()
+    pub fn reload_properties_and_callbacks(&self) {
         // Set the properties
-        for (name, value) in self.properties.iter() {
+        for (name, value) in self.properties.borrow_mut().iter() {
             if let Some((global, prop)) = name.split_once('.') {
                 self.instance()
                     .set_global_property(global, prop, value.clone())
@@ -136,7 +140,7 @@ impl LiveReloadingComponent {
                     .unwrap_or_else(|e| panic!("Cannot set property {name}: {e}"));
             }
         }
-        for (name, callback) in self.callbacks.iter() {
+        for (name, callback) in self.callbacks.borrow_mut().iter() {
             let callback = callback.clone();
             if let Some((global, prop)) = name.split_once('.') {
                 self.instance()
@@ -150,8 +154,6 @@ impl LiveReloadingComponent {
         }
 
         eprintln!("Reloaded component {} from {}", self.component_name, self.file_name.display());
-
-        true
     }
 
     /// Return the instance
@@ -160,8 +162,8 @@ impl LiveReloadingComponent {
     }
 
     /// Set a property and remember its value for when the component is reloaded
-    pub fn set_property(&mut self, name: &str, value: Value) {
-        self.properties.insert(name.into(), value.clone());
+    pub fn set_property(&self, name: &str, value: Value) {
+        self.properties.borrow_mut().insert(name.into(), value.clone());
         self.instance()
             .set_property(&name, value)
             .unwrap_or_else(|e| panic!("Cannot set property {name}: {e}"))
@@ -182,16 +184,16 @@ impl LiveReloadingComponent {
     }
 
     /// Forward to set_callback
-    pub fn set_callback(&mut self, name: &str, callback: Rc<dyn Fn(&[Value]) -> Value + 'static>) {
-        self.callbacks.insert(name.into(), callback.clone());
+    pub fn set_callback(&self, name: &str, callback: Rc<dyn Fn(&[Value]) -> Value + 'static>) {
+        self.callbacks.borrow_mut().insert(name.into(), callback.clone());
         self.instance()
             .set_callback(&name, move |args| callback(args))
             .unwrap_or_else(|e| panic!("Cannot set callback {name}: {e}"));
     }
 
     /// forward to set_global_property
-    pub fn set_global_property(&mut self, global_name: &str, name: &str, value: Value) {
-        self.properties.insert(format!("{global_name}.{name}"), value.clone());
+    pub fn set_global_property(&self, global_name: &str, name: &str, value: Value) {
+        self.properties.borrow_mut().insert(format!("{global_name}.{name}"), value.clone());
         self.instance()
             .set_global_property(global_name, name, value)
             .unwrap_or_else(|e| panic!("Cannot set property {global_name}::{name}: {e}"))
@@ -213,12 +215,12 @@ impl LiveReloadingComponent {
 
     /// Forward to set_global_callback
     pub fn set_global_callback(
-        &mut self,
+        &self,
         global_name: &str,
         name: &str,
         callback: Rc<dyn Fn(&[Value]) -> Value + 'static>,
     ) {
-        self.callbacks.insert(format!("{global_name}.{name}"), callback.clone());
+        self.callbacks.borrow_mut().insert(format!("{global_name}.{name}"), callback.clone());
         self.instance()
             .set_global_callback(global_name, name, move |args| callback(args))
             .unwrap_or_else(|e| panic!("Cannot set callback {global_name}::{name}: {e}"));
@@ -261,7 +263,10 @@ impl Watcher {
                 WatcherState::Waiting(cx.waker().clone()),
             );
             if matches!(state, WatcherState::Changed) {
-                instance.borrow_mut().reload();
+                let success = instance.borrow_mut().reload();
+                if success {
+                    instance.borrow().reload_properties_and_callbacks();
+                };
             };
             std::task::Poll::Pending
         }));
@@ -274,7 +279,7 @@ impl Watcher {
         let watcher_weak = Arc::downgrade(&arc);
         arc.lock().unwrap().watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                use notify::{event::ModifyKind as M, EventKind as K};
+                use notify::{EventKind as K, event::ModifyKind as M};
                 let Ok(event) = event else { return };
                 let Some(watcher) = watcher_weak.upgrade() else { return };
                 if matches!(event.kind, K::Modify(M::Data(_) | M::Any) | K::Create(_))
@@ -324,7 +329,7 @@ mod ffi {
     use super::*;
     use core::ffi::c_void;
     use i_slint_core::window::WindowAdapter;
-    use i_slint_core::{slice::Slice, SharedString, SharedVector};
+    use i_slint_core::{SharedString, SharedVector, slice::Slice};
     type LiveReloadingComponentInner = RefCell<LiveReloadingComponent>;
 
     #[unsafe(no_mangle)]
@@ -336,6 +341,7 @@ mod ffi {
         library_paths: &SharedVector<SharedString>,
         style: Slice<u8>,
         translation_domain: Slice<u8>,
+        no_default_translation_context: bool,
     ) -> *const LiveReloadingComponentInner {
         let mut compiler = Compiler::default();
         compiler.set_include_paths(
@@ -355,6 +361,9 @@ mod ffi {
             compiler
                 .set_translation_domain(std::str::from_utf8(&translation_domain).unwrap().into());
         }
+        if no_default_translation_context {
+            compiler.set_default_translation_context(crate::DefaultTranslationContext::None);
+        }
         Rc::into_raw(
             LiveReloadingComponent::new(
                 compiler,
@@ -369,14 +378,14 @@ mod ffi {
     pub unsafe extern "C" fn slint_live_preview_clone(
         component: *const LiveReloadingComponentInner,
     ) {
-        Rc::increment_strong_count(component);
+        unsafe { Rc::increment_strong_count(component) };
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_live_preview_drop(
         component: *const LiveReloadingComponentInner,
     ) {
-        Rc::decrement_strong_count(component);
+        unsafe { Rc::decrement_strong_count(component) };
     }
 
     #[unsafe(no_mangle)]
@@ -434,7 +443,9 @@ mod ffi {
         user_data: *mut c_void,
         drop_user_data: Option<extern "C" fn(*mut c_void)>,
     ) {
-        let ud = crate::ffi::CallbackUserData::new(user_data, drop_user_data, callback_handler);
+        let ud = unsafe {
+            crate::ffi::CallbackUserData::new(user_data, drop_user_data, callback_handler)
+        };
         let handler = Rc::new(move |args: &[Value]| ud.call(args));
         let callback = std::str::from_utf8(&callback).unwrap();
         if let Some((global, prop)) = callback.split_once('.') {
@@ -456,6 +467,6 @@ mod ffi {
         );
         let borrow = component.borrow();
         let adapter = borrow.instance().inner.window_adapter_ref().unwrap();
-        core::ptr::write(out as *mut *const Rc<dyn WindowAdapter>, adapter as *const _)
+        unsafe { core::ptr::write(out as *mut *const Rc<dyn WindowAdapter>, adapter as *const _) };
     }
 }

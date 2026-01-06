@@ -2,15 +2,17 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use core::ops::ControlFlow;
+use i_slint_core::SharedString;
 use i_slint_core::accessibility::{AccessibilityAction, AccessibleStringProperty};
 use i_slint_core::api::{ComponentHandle, LogicalPosition};
 use i_slint_core::item_tree::{ItemTreeRc, ItemWeak, ParentItemTraversalMode};
 use i_slint_core::items::{ItemRc, Opacity};
 use i_slint_core::window::WindowInner;
-use i_slint_core::SharedString;
 
 fn warn_missing_debug_info() {
-    i_slint_core::debug_log!("The use of the ElementHandle API requires the presence of debug info in Slint compiler generated code. Set the `SLINT_EMIT_DEBUG_INFO=1` environment variable at application build time or use `compile_with_config` and `with_debug_info` with `slint_build`'s `CompilerConfiguration`")
+    i_slint_core::debug_log!(
+        "The use of the ElementHandle API requires the presence of debug info in Slint compiler generated code. Set the `SLINT_EMIT_DEBUG_INFO=1` environment variable at application build time or use `compile_with_config` and `with_debug_info` with `slint_build`'s `CompilerConfiguration`"
+    )
 }
 
 mod internal {
@@ -98,7 +100,7 @@ impl ElementQueryInstruction {
 
         match query {
             ElementQueryInstruction::MatchDescendants => {
-                let mut results = vec![];
+                let mut results = Vec::new();
                 match element.visit_descendants_impl(
                     &mut |child| {
                         let (next_control_flow, sub_results) = Self::match_recursively(
@@ -117,7 +119,7 @@ impl ElementQueryInstruction {
                 }
             }
             ElementQueryInstruction::MatchSingleElement(criteria) => {
-                let mut results = vec![];
+                let mut results = Vec::new();
                 let control_flow = if criteria.matches(&element) {
                     let (next_control_flow, sub_results) = Self::match_recursively(
                         tail,
@@ -487,11 +489,7 @@ impl ElementHandle {
                 .skip(1)
                 .filter_map(
                     |(type_name, _)| {
-                        if !type_name.is_empty() {
-                            Some(type_name)
-                        } else {
-                            None
-                        }
+                        if !type_name.is_empty() { Some(type_name) } else { None }
                     },
                 )
         })
@@ -622,6 +620,16 @@ impl ElementHandle {
         self.item
             .upgrade()
             .and_then(|item| item.accessible_string_property(AccessibleStringProperty::Description))
+    }
+
+    /// Returns the value of the `accessible-id` property, if present
+    pub fn accessible_id(&self) -> Option<SharedString> {
+        if self.element_index != 0 {
+            return None;
+        }
+        self.item
+            .upgrade()
+            .and_then(|item| item.accessible_string_property(AccessibleStringProperty::Id))
     }
 
     /// Returns the value of the `accessible-checked` property, if present
@@ -1077,13 +1085,14 @@ fn test_matches() {
 
     app.set_condition(true);
 
-    assert!(root
-        .query_descendants()
-        .match_id("App::visible-element")
-        .match_descendants()
-        .match_accessible_role(crate::AccessibleRole::Text)
-        .find_first()
-        .is_none());
+    assert!(
+        root.query_descendants()
+            .match_id("App::visible-element")
+            .match_descendants()
+            .match_accessible_role(crate::AccessibleRole::Text)
+            .find_first()
+            .is_none()
+    );
 
     let elems = root.query_descendants().match_id("App::dynamic-elem").find_all();
     assert_eq!(elems.len(), 1);
@@ -1139,20 +1148,22 @@ fn test_opacity() {
 
     use i_slint_core::graphics::euclid::approxeq::ApproxEq;
 
-    assert!(root
-        .query_descendants()
-        .match_id("App::translucent-label")
-        .find_first()
-        .unwrap()
-        .computed_opacity()
-        .approx_eq(&0.1));
-    assert!(root
-        .query_descendants()
-        .match_id("App::definitely-there")
-        .find_first()
-        .unwrap()
-        .computed_opacity()
-        .approx_eq(&1.0));
+    assert!(
+        root.query_descendants()
+            .match_id("App::translucent-label")
+            .find_first()
+            .unwrap()
+            .computed_opacity()
+            .approx_eq(&0.1)
+    );
+    assert!(
+        root.query_descendants()
+            .match_id("App::definitely-there")
+            .find_first()
+            .unwrap()
+            .computed_opacity()
+            .approx_eq(&1.0)
+    );
 }
 
 #[test]
@@ -1207,14 +1218,15 @@ fn test_popups() {
 
     let root = app.root_element();
 
-    assert!(root
-        .query_descendants()
-        .match_accessible_role(crate::AccessibleRole::Text)
-        .find_all()
-        .into_iter()
-        .filter_map(|elem| elem.accessible_label())
-        .collect::<Vec<_>>()
-        .is_empty());
+    assert!(
+        root.query_descendants()
+            .match_accessible_role(crate::AccessibleRole::Text)
+            .find_all()
+            .into_iter()
+            .filter_map(|elem| elem.accessible_label())
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
 
     root.query_descendants()
         .match_id("App::first-button")

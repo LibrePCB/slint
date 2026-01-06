@@ -63,6 +63,20 @@ export default defineConfig({
                                 collapsed: true,
                                 items: [
                                     "guide/tooling/vscode",
+                                    {
+                                        label: "Other Editors",
+                                        collapsed: true,
+                                        items: [
+                                            "guide/tooling/manual-setup",
+                                            "guide/tooling/kate",
+                                            "guide/tooling/qt-creator",
+                                            "guide/tooling/helix",
+                                            "guide/tooling/neo-vim",
+                                            "guide/tooling/sublime-text",
+                                            "guide/tooling/jetbrains-ide",
+                                            "guide/tooling/zed",
+                                        ],
+                                    },
                                     "guide/tooling/figma-inspector",
                                 ],
                             },
@@ -160,8 +174,15 @@ export default defineConfig({
                                 items: [
                                     "guide/platforms/desktop",
                                     "guide/platforms/embedded",
-                                    "guide/platforms/android",
-                                    "guide/platforms/ios",
+                                    {
+                                        label: "Mobile",
+                                        collapsed: true,
+                                        items: [
+                                            "guide/platforms/mobile/general",
+                                            "guide/platforms/mobile/android",
+                                            "guide/platforms/mobile/ios",
+                                        ],
+                                    },
                                     "guide/platforms/web",
                                     "guide/platforms/other",
                                 ],
@@ -312,6 +333,13 @@ export default defineConfig({
                                 items: [
                                     "reference/std-widgets/overview",
                                     "reference/std-widgets/style",
+                                    {
+                                        label: "Globals",
+                                        autogenerate: {
+                                            directory:
+                                                "reference/std-widgets/globals",
+                                        },
+                                    },
                                     {
                                         label: "Basic Widgets",
                                         autogenerate: {

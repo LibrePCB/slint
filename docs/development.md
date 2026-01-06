@@ -1,4 +1,3 @@
-<!-- Copyright © SixtyFPS GmbH <info@slint.dev> ; SPDX-License-Identifier: MIT -->
 <!-- cSpell: ignore frontends -->
 # Slint development guide
 
@@ -74,6 +73,9 @@ HTML documentation can be generated with something like
 ```sh
 cargo doc --document-private-items --no-deps --open
 ```
+
+The documentation that lives on <https://docs.slint.dev> is rendered with Astro Starlight.
+See the ./astro/README.md file for details.
 
 ## Rust to C++ bindings
 

@@ -1,5 +1,4 @@
 # CMake Reference
-<!-- Copyright © SixtyFPS GmbH <info@slint.dev> ; SPDX-License-Identifier: MIT -->
 
 ## `slint_target_sources`
 
@@ -35,6 +34,10 @@ the slint-compiler. If you want to speed up compilation of the generated `.cpp` 
 than 1 to create multiple `.cpp` files. These can be compiled in parallel, which might speed up overall build times. However, splitting the generated code
 across multiple `.cpp` files decreases the compiler's visibility and thus ability to perform optimizations. You can also pass `COMPILATION_UNITS 0` to generate
 only one single `.h` file.
+
+```{caution}
+Compiling multiple .slint files with the same namespace may create conflicting symbols. Avoid this by putting each .slint file in its own namespace.
+```
 
 ## Resource Embedding
 
@@ -88,3 +91,9 @@ set_property(TARGET my_application PROPERTY SLINT_BUNDLE_TRANSLATIONS "${CMAKE_C
 By default, the domain used for translations is the name of the CMake target the `.slint` files are targeted with.
 Use the `SLINT_TRANSLATION_DOMAIN` target property to override this and use the specified value as domain, instead.
 This is useful in build environments where the target name is given and not suitable, such as esp-idf.
+
+## Disable Default Translation Context
+
+Unless explicitly specified with the `@tr("context" => ...)`, the default translation context is the component name.
+Set the `SLINT_NO_DEFAULT_TRANSLATION_CONTEXT` target property to disable the default translation context.
+When doing that, the `--no-default-translation-context` flag must be passed to `slint-tr-extractor`.

@@ -3,6 +3,7 @@
 
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 // It would be nice to keep the compiler free of unsafe code
 #![deny(unsafe_code)]
 
@@ -58,6 +59,22 @@ pub enum EmbedResourcesKind {
     #[cfg(feature = "software-renderer")]
     /// Embed raw texture (process images and fonts)
     EmbedTextures,
+}
+
+/// This enum specifies the default translation context when no context is explicitly
+/// specified in the `@tr("context" => ...)` macro.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DefaultTranslationContext {
+    /// The default translation context is the component name in which the `@tr` is written.
+    ///
+    /// This is the default behavior of `slint-tr-extractor`.
+    ComponentName,
+    /// Opt out of the default translation context.
+    ///
+    /// When using this option, invoke `slint-tr-extractor` with `--no-default-translation-context`
+    /// to make sure that the translation files have no context for strings which didn't specify a context.
+    None,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
@@ -142,6 +159,8 @@ pub struct CompilerConfiguration {
     /// When Some, this is the path where the translations are looked at to bundle the translations
     #[cfg(feature = "bundle-translations")]
     pub translation_path_bundle: Option<std::path::PathBuf>,
+    /// Default translation context
+    pub default_translation_context: DefaultTranslationContext,
 
     /// Do not generate the hook to create native menus
     pub no_native_menu: bool,
@@ -177,7 +196,9 @@ impl CompilerConfiguration {
             || std::env::var_os("DEP_MCU_BOARD_SUPPORT_MCU_EMBED_TEXTURES").is_some()
         {
             #[cfg(not(feature = "software-renderer"))]
-            panic!("the software-renderer feature must be enabled in i-slint-compiler when embedding textures");
+            panic!(
+                "the software-renderer feature must be enabled in i-slint-compiler when embedding textures"
+            );
             #[cfg(feature = "software-renderer")]
             EmbedResourcesKind::EmbedTextures
         } else if let Ok(var) = std::env::var("SLINT_EMBED_RESOURCES") {
@@ -240,6 +261,7 @@ impl CompilerConfiguration {
             accessibility: true,
             enable_experimental,
             translation_domain: None,
+            default_translation_context: DefaultTranslationContext::ComponentName,
             no_native_menu: false,
             cpp_namespace,
             error_on_binding_loop_with_window_layout: false,

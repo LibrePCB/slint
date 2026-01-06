@@ -9,7 +9,7 @@ use crate::expression_tree::{BindingExpression, Expression, NamedReference};
 use crate::langtype::Type;
 use crate::object_tree::{self, Component, Element, ElementRc};
 use crate::typeregister::TypeRegister;
-use smol_str::{format_smolstr, SmolStr, ToSmolStr};
+use smol_str::{SmolStr, ToSmolStr, format_smolstr};
 use std::rc::Rc;
 
 /// If any element in `component` declares a binding to any of `property_names`, then a new
@@ -105,12 +105,11 @@ fn create_property_element(
             let mut bind = BindingExpression::new_two_way(
                 NamedReference::new(child, property_name.clone()).into(),
             );
-            if let Some(default_value_for_extra_properties) = default_value_for_extra_properties {
-                if !child.borrow().bindings.contains_key(&property_name) {
-                    if let Some(e) = default_value_for_extra_properties(child, &property_name) {
-                        bind.expression = e;
-                    }
-                }
+            if let Some(default_value_for_extra_properties) = default_value_for_extra_properties
+                && !child.borrow().bindings.contains_key(&property_name)
+                && let Some(e) = default_value_for_extra_properties(child, &property_name)
+            {
+                bind.expression = e;
             }
             (property_name, bind.into())
         })

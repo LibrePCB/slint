@@ -178,20 +178,20 @@ impl WrappedCompiledComp {
                 NEXT_CANVAS_ID.with(|next_id| {
                     *next_id.borrow_mut() = Some(canvas_id);
                 });
-                let instance =
-                    WrappedInstance(comp.take().create().unwrap());
+                let instance = WrappedInstance(comp.take().create().unwrap());
                 resolve.take().call1(&JsValue::UNDEFINED, &JsValue::from(instance)).unwrap_throw();
             }) {
                 reject
                     .call1(
                         &JsValue::UNDEFINED,
-                        &JsValue::from(
-                            format!("internal error: Failed to queue closure for event loop invocation: {e}"),
-                        ),
+                        &JsValue::from(format!(
+                            "internal error: Failed to queue closure for event loop invocation: {e}"
+                        )),
                     )
                     .unwrap_throw();
             }
-        })).unchecked_into::<InstancePromise>())
+        }))
+        .unchecked_into::<InstancePromise>())
     }
     /// Creates this compiled component in the canvas of the provided instance, wrapped in a promise.
     /// For this to work, the provided instance needs to be visible (show() must've been
@@ -205,7 +205,11 @@ impl WrappedCompiledComp {
         instance: WrappedInstance,
     ) -> Result<InstancePromise, JsValue> {
         Ok(JsValue::from(js_sys::Promise::new(&mut |resolve, reject| {
-            let params = send_wrapper::SendWrapper::new((self.0.clone(), instance.0.clone_strong(), resolve));
+            let params = send_wrapper::SendWrapper::new((
+                self.0.clone(),
+                instance.0.clone_strong(),
+                resolve,
+            ));
             if let Err(e) = slint_interpreter::invoke_from_event_loop(move || {
                 let (comp, instance, resolve) = params.take();
                 let instance =
@@ -215,13 +219,14 @@ impl WrappedCompiledComp {
                 reject
                     .call1(
                         &JsValue::UNDEFINED,
-                        &JsValue::from(
-                            format!("internal error: Failed to queue closure for event loop invocation: {e}"),
-                        ),
+                        &JsValue::from(format!(
+                            "internal error: Failed to queue closure for event loop invocation: {e}"
+                        )),
                     )
                     .unwrap_throw();
             }
-        })).unchecked_into::<InstancePromise>())
+        }))
+        .unchecked_into::<InstancePromise>())
     }
 }
 
@@ -254,9 +259,9 @@ impl WrappedInstance {
     fn invoke_from_event_loop_wrapped_in_promise(
         &self,
         callback: impl FnOnce(
-                &slint_interpreter::ComponentInstance,
-            ) -> Result<(), slint_interpreter::PlatformError>
-            + 'static,
+            &slint_interpreter::ComponentInstance,
+        ) -> Result<(), slint_interpreter::PlatformError>
+        + 'static,
     ) -> Result<js_sys::Promise, JsValue> {
         let callback = std::cell::RefCell::new(Some(callback));
         Ok(js_sys::Promise::new(&mut |resolve, reject| {
@@ -300,13 +305,13 @@ impl WrappedInstance {
                 }
             }) {
                 reject
-                .call1(
-                    &JsValue::UNDEFINED,
-                    &JsValue::from(
-                        format!("internal error: Failed to queue closure for event loop invocation: {e}"),
-                    ),
-                )
-                .unwrap_throw();
+                    .call1(
+                        &JsValue::UNDEFINED,
+                        &JsValue::from(format!(
+                            "internal error: Failed to queue closure for event loop invocation: {e}"
+                        )),
+                    )
+                    .unwrap_throw();
             }
         }))
     }
@@ -344,19 +349,19 @@ pub fn init() -> Result<(), JsValue> {
                         .document()
                         .expect("wasm-interpreter: Could not retrieve DOM document")
                         .get_element_by_id(&canvas_id)
-                        .expect( {
-                            &format!(
+                        .unwrap_or_else(|| {
+                            panic!(
                                 "wasm-interpreter: Could not retrieve existing HTML Canvas element '{}'",
                                 canvas_id
                             )
                         })
                         .dyn_into::<web_sys::HtmlCanvasElement>()
-                        .expect(
-                            &format!(
+                        .unwrap_or_else(|_| {
+                            panic!(
                                 "winit backend: Specified DOM element '{}' is not a HTML Canvas",
                                 canvas_id
                             )
-                        );
+                        });
                     attrs = attrs
                         .with_canvas(Some(html_canvas))
                         // Don't activate the window by default, as that will cause the page to scroll,

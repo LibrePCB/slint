@@ -6,7 +6,7 @@ name = "slint"
 description = "GUI toolkit to efficiently develop fluid graphical user interfaces for embedded devices and desktop applications"
 authors.workspace = true
 documentation.workspace = true
-edition.workspace = true
+edition = "2024"
 homepage = "https://slint.rs"
 keywords.workspace = true
 license.workspace = true
@@ -31,7 +31,7 @@ default = ["std", "backend-default", "renderer-femtovg", "renderer-software", "a
 "compat-1-0" = ["compat-1-2", "renderer-software"]
 
 ## Enable use of the Rust standard library.
-std = ["i-slint-core/std"]
+std = ["i-slint-core/std", "i-slint-renderer-software?/std"]
 
 ## Enable the translations using [gettext](https://www.gnu.org/software/gettext/gettext)
 ##
@@ -43,7 +43,7 @@ gettext = ["i-slint-core/gettext-rs"]
 
 ## This feature enables floating point arithmetic emulation using the [libm](https://crates.io/crates/libm) crate. Use this
 ## in MCU environments where the processor does not support floating point arithmetic.
-libm = ["i-slint-core/libm"]
+libm = ["i-slint-core/libm", "i-slint-renderer-software?/libm"]
 
 ## If enabled, calls of `debug()` in `.slint` files use to the [`log::debug!()`] macro
 ## of the [log](https://crates.io/crates/log) crate instead of just `println!()`.
@@ -53,8 +53,8 @@ log = ["dep:log"]
 ## such as `SharedString` and `SharedVector`.
 serde = ["i-slint-core/serde"]
 
-## This feature enables the software renderer to pick up fonts from the operating system for text rendering.
-software-renderer-systemfonts = ["renderer-software", "i-slint-core/software-renderer-systemfonts"]
+# Deprecated feature, this is now automatically enabled when the `renderer-software` and `std` features are enabled
+software-renderer-systemfonts = ["renderer-software"]
 
 ## Slint uses internally some `thread_local` state.
 ##
@@ -107,7 +107,7 @@ live-preview = ["dep:slint-interpreter"]
 #! with [`platform::set_platform()`].
 #!
 #! If you enable the Winit backend, you need to also include a renderer.
-#! `renderer-femtovg` is the only stable renderer, the other ones are experimental
+#! `renderer-femtovg` is the default renderer.
 #!
 #! It is also possible to select the backend and renderer at runtime when several
 #! are enabled, using the `SLINT_BACKEND`  environment variable.
@@ -167,14 +167,14 @@ renderer-skia-opengl = ["i-slint-backend-selector/renderer-skia-opengl", "std"]
 renderer-skia-vulkan = ["i-slint-backend-selector/renderer-skia-vulkan", "std"]
 
 ## Render using the software renderer.
-renderer-software = ["i-slint-backend-selector/renderer-software", "i-slint-core/software-renderer"]
+renderer-software = ["i-slint-backend-selector/renderer-software", "dep:i-slint-renderer-software", "dep:fontique"]
 
 ## KMS with Vulkan or EGL and libinput on Linux are used to render the application in full screen mode, without any
-## windowing system. Requires libseat. If you don't have libseat, select `backend-linuxkms-noseat` instead. (Experimental)
+## windowing system. Requires libseat. If you don't have libseat, select `backend-linuxkms-noseat` instead.
 backend-linuxkms = ["i-slint-backend-selector/backend-linuxkms", "std"]
 
 ## KMS with Vulkan or EGL and libinput on Linux are used to render the application in full screen mode, without any
-## windowing system. (Experimental)
+## windowing system.
 backend-linuxkms-noseat = ["i-slint-backend-selector/backend-linuxkms-noseat", "std"]
 
 ## Use the backend based on the [android-activity](https://docs.rs/android-activity) crate. (Using it's native activity feature)
@@ -259,6 +259,8 @@ i-slint-core = { workspace = true }
 slint-macros = { workspace = true }
 i-slint-backend-selector = { workspace = true }
 i-slint-core-macros = { workspace = true }
+i-slint-common = { workspace = true }
+i-slint-renderer-software = { workspace = true, optional = true }
 slint-interpreter = { workspace = true, optional = true, default-features = false, features = ["display-diagnostics", "compat-1-2", "internal-live-preview"] }
 
 const-field-offset = { version = "0.1.2", path = "../../../helper_crates/const-field-offset" }
@@ -287,6 +289,11 @@ i-slint-renderer-femtovg = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 i-slint-backend-android-activity = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+# Workaround cross compiling on linux where the build dependencies depends on fontique through slint-build
+# but fontconfig build script find the target library via pkg-config and causes link errors
+fontique = { workspace = true, optional = true, features = ["fontconfig-dlopen"] }
 
 [dev-dependencies]
 slint-build = { path = "../build" }

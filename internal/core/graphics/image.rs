@@ -289,7 +289,7 @@ pub struct StaticTextures {
 /// time of the file it points to.
 #[derive(PartialEq, Eq, Debug, Hash, Clone)]
 #[repr(C)]
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", feature = "ffi"))]
 pub struct CachedPath {
     path: SharedString,
     /// SystemTime since UNIX_EPOC as secs
@@ -318,7 +318,7 @@ pub enum ImageCacheKey {
     /// This variant indicates that no image cache key can be created for the image.
     /// For example this is the case for programmatically created images.
     Invalid = 0,
-    #[cfg(feature = "std")]
+    #[cfg(any(feature = "std", feature = "ffi"))]
     /// The image is identified by its path on the file system and the last modification time stamp.
     Path(CachedPath) = 1,
     /// The image is identified by a URL.
@@ -349,11 +349,7 @@ impl ImageCacheKey {
             #[cfg(any(feature = "unstable-wgpu-26", feature = "unstable-wgpu-27"))]
             ImageInner::WGPUTexture(..) => return None,
         };
-        if matches!(key, ImageCacheKey::Invalid) {
-            None
-        } else {
-            Some(key)
-        }
+        if matches!(key, ImageCacheKey::Invalid) { None } else { Some(key) }
     }
 
     /// Returns a cache key for static embedded image data.
@@ -877,7 +873,7 @@ impl Image {
         texture_id: core::num::NonZeroU32,
         size: IntSize,
     ) -> Self {
-        BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(texture_id, size).build()
+        unsafe { BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(texture_id, size).build() }
     }
 
     /// Creates a new Image from the specified buffer, which contains SVG raw data.
@@ -996,7 +992,7 @@ impl BorrowedOpenGLTextureBuilder {
     /// drivers. A valid texture id is one that was created by the same OpenGL context that is
     /// current during any of the invocations of the callback set on [`Window::set_rendering_notifier()`](crate::api::Window::set_rendering_notifier).
     /// OpenGL contexts between instances of [`slint::Window`](crate::api::Window) are not sharing resources. Consequently
-    /// [`slint::Image`](Self) objects created from borrowed OpenGL textures cannot be shared between
+    /// [`slint::Image`](Image) objects created from borrowed OpenGL textures cannot be shared between
     /// different windows.
     #[allow(unsafe_code)]
     pub unsafe fn new_gl_2d_rgba_texture(texture_id: core::num::NonZeroU32, size: IntSize) -> Self {
@@ -1223,7 +1219,7 @@ pub fn fit(
                 size: target,
                 offset: Default::default(),
                 tiled: None,
-            }
+            };
         }
         ImageFit::Preserve => scale_factor.get(),
         ImageFit::Contain => f32::min(target.width / o.width, target.height / o.height),
@@ -1340,10 +1336,13 @@ pub(crate) mod ffi {
     #[cfg(feature = "image-decoders")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_image_load_from_path(path: &SharedString, image: *mut Image) {
-        core::ptr::write(
-            image,
-            Image::load_from_path(std::path::Path::new(path.as_str())).unwrap_or(Image::default()),
-        )
+        unsafe {
+            core::ptr::write(
+                image,
+                Image::load_from_path(std::path::Path::new(path.as_str()))
+                    .unwrap_or(Image::default()),
+            )
+        }
     }
 
     #[cfg(feature = "std")]
@@ -1353,7 +1352,7 @@ pub(crate) mod ffi {
         format: Slice<'static, u8>,
         image: *mut Image,
     ) {
-        core::ptr::write(image, super::load_image_from_embedded_data(data, format));
+        unsafe { core::ptr::write(image, super::load_image_from_embedded_data(data, format)) };
     }
 
     #[unsafe(no_mangle)]
@@ -1386,7 +1385,7 @@ pub(crate) mod ffi {
         textures: &'static StaticTextures,
         image: *mut Image,
     ) {
-        core::ptr::write(image, Image::from(ImageInner::StaticTextures(textures)));
+        unsafe { core::ptr::write(image, Image::from(ImageInner::StaticTextures(textures))) };
     }
 
     #[unsafe(no_mangle)]

@@ -16,13 +16,14 @@ use std::rc::Rc;
 pub fn collect_globals(doc: &Document, _diag: &mut BuildDiagnostics) {
     doc.used_types.borrow_mut().globals.clear();
     let mut set = HashSet::new();
-    let mut sorted_globals = vec![];
+    let mut sorted_globals = Vec::new();
     for (_, ty) in &*doc.exports {
-        if let Some(c) = ty.as_ref().left() {
-            if c.is_global() && set.insert(ByAddress(c.clone())) {
-                collect_in_component(c, &mut set, &mut sorted_globals);
-                sorted_globals.push(c.clone());
-            }
+        if let Some(c) = ty.as_ref().left()
+            && c.is_global()
+            && set.insert(ByAddress(c.clone()))
+        {
+            collect_in_component(c, &mut set, &mut sorted_globals);
+            sorted_globals.push(c.clone());
         }
     }
     doc.visit_all_used_components(|component| {

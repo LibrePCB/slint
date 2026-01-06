@@ -40,7 +40,7 @@ jobs:
                       container: "ghcr.io/slint-ui/slint/armv7-unknown-linux-gnueabihf"
         runs-on: ${{ matrix.platform.runner }}
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
               if: runner.os == 'Linux'
             - uses: actions/setup-python@v6
@@ -69,7 +69,7 @@ jobs:
                   args: --release --out wheelhouse --find-interpreter
                   container: ${{ matrix.platform.container }}
             - name: Store the distribution packages
-              uses: actions/upload-artifact@v5
+              uses: actions/upload-artifact@v6
               with:
                 name: python-package-distributions-${{ matrix.platform.runner }}-${{ strategy.job-index }}
                 path: api/python/slint/wheelhouse/*.whl
@@ -94,7 +94,7 @@ jobs:
 
         runs-on: macos-14
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: aarch64-apple-ios
@@ -141,7 +141,7 @@ jobs:
                   args: --release --out wheelhouse --find-interpreter
 
             - name: Store the distribution packages
-              uses: actions/upload-artifact@v5
+              uses: actions/upload-artifact@v6
               with:
                 name: python-package-distributions-${{ matrix.target }}
                 path: api/python/slint/wheelhouse/*.whl
@@ -150,7 +150,7 @@ jobs:
         name: Build source package
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: baptiste0928/cargo-install@v3
               with:
                   crate: taplo-cli
@@ -170,7 +170,7 @@ jobs:
                   working-directory: api/python/slint
                   command: sdist
                   args: --out dist
-            - uses: actions/upload-artifact@v5
+            - uses: actions/upload-artifact@v6
               with:
                 name: python-package-distributions-source
                 path: api/python/slint/dist/*.tar.gz
@@ -187,7 +187,7 @@ jobs:
         permissions:
             id-token: write  # IMPORTANT: mandatory for trusted publishing
         steps:
-            - uses: actions/download-artifact@v6
+            - uses: actions/download-artifact@v7
               with:
                 pattern: python-package-distributions-*
                 path: dist
@@ -209,7 +209,7 @@ jobs:
       permissions:
           id-token: write  # IMPORTANT: mandatory for trusted publishing
       steps:
-          - uses: actions/download-artifact@v6
+          - uses: actions/download-artifact@v7
             with:
               pattern: python-package-distributions-*
               path: dist

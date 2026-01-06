@@ -7,14 +7,14 @@ use crate::{dynamic_type, eval};
 use core::ptr::NonNull;
 use dynamic_type::{Instance, InstanceBox};
 use i_slint_compiler::expression_tree::{Expression, NamedReference};
-use i_slint_compiler::langtype::Type;
+use i_slint_compiler::langtype::{BuiltinPrivateStruct, StructName, Type};
 use i_slint_compiler::object_tree::{ElementRc, ElementWeak, TransitionDirection};
+use i_slint_compiler::{CompilerConfiguration, generator, object_tree, parser};
 use i_slint_compiler::{diagnostics::BuildDiagnostics, object_tree::PropertyDeclaration};
-use i_slint_compiler::{generator, object_tree, parser, CompilerConfiguration};
 use i_slint_core::accessibility::{
     AccessibilityAction, AccessibleStringProperty, SupportedAccessibilityAction,
 };
-use i_slint_core::api::LogicalPosition;
+use i_slint_core::api::{LogicalPosition, StyledText};
 use i_slint_core::component_factory::ComponentFactory;
 use i_slint_core::item_tree::{
     IndexRange, ItemRc, ItemTree, ItemTreeNode, ItemTreeRef, ItemTreeRefPin, ItemTreeVTable,
@@ -24,7 +24,7 @@ use i_slint_core::item_tree::{
 use i_slint_core::items::{
     AccessibleRole, ItemRef, ItemVTable, PopupClosePolicy, PropertyAnimation,
 };
-use i_slint_core::layout::{BoxLayoutCellData, LayoutInfo, Orientation};
+use i_slint_core::layout::{LayoutInfo, LayoutItemInfo, Orientation};
 use i_slint_core::lengths::{LogicalLength, LogicalRect};
 use i_slint_core::menus::MenuFromItemTree;
 use i_slint_core::model::{ModelRc, RepeatedItemTree, Repeater};
@@ -95,10 +95,12 @@ impl ItemWithinItemTree {
         &self,
         mem: *const u8,
     ) -> Pin<vtable::VRef<'_, ItemVTable>> {
-        Pin::new_unchecked(vtable::VRef::from_raw(
-            NonNull::from(self.rtti.vtable),
-            NonNull::new(mem.add(self.offset) as _).unwrap(),
-        ))
+        unsafe {
+            Pin::new_unchecked(vtable::VRef::from_raw(
+                NonNull::from(self.rtti.vtable),
+                NonNull::new(mem.add(self.offset) as _).unwrap(),
+            ))
+        }
     }
 
     pub(crate) fn item_index(&self) -> u32 {
@@ -169,8 +171,8 @@ impl RepeatedItemTree for ErasedItemTreeBox {
         LogicalLength::new(self.borrow().as_ref().layout_info(Orientation::Horizontal).min)
     }
 
-    fn box_layout_data(self: Pin<&Self>, o: Orientation) -> BoxLayoutCellData {
-        BoxLayoutCellData { constraint: self.borrow().as_ref().layout_info(o) }
+    fn layout_item_info(self: Pin<&Self>, o: Orientation) -> LayoutItemInfo {
+        LayoutItemInfo { constraint: self.borrow().as_ref().layout_info(o) }
     }
 }
 
@@ -506,12 +508,12 @@ impl ItemTreeDescription<'_> {
         name: &str,
     ) -> Option<
         impl Iterator<
-                Item = (
-                    SmolStr,
-                    i_slint_compiler::langtype::Type,
-                    i_slint_compiler::object_tree::PropertyVisibility,
-                ),
-            > + '_,
+            Item = (
+                SmolStr,
+                i_slint_compiler::langtype::Type,
+                i_slint_compiler::object_tree::PropertyVisibility,
+            ),
+        > + '_,
     > {
         let g = self.compiled_globals.as_ref().expect("Root component should have globals");
         g.exported_globals_by_name
@@ -759,14 +761,13 @@ fn ensure_repeater_updated<'id>(
 ) {
     let repeater = rep_in_comp.offset.apply_pin(instance_ref.instance);
     let init = || {
-        let instance = instantiate(
+        instantiate(
             rep_in_comp.item_tree_to_repeat.clone(),
             instance_ref.self_weak().get().cloned(),
             None,
             None,
             Default::default(),
-        );
-        instance
+        )
     };
     if let Some(lv) = &rep_in_comp
         .item_tree_to_repeat
@@ -806,8 +807,8 @@ pub(crate) struct ItemRTTI {
     pub(crate) callbacks: HashMap<&'static str, Box<dyn eval::ErasedCallbackInfo>>,
 }
 
-fn rtti_for<T: 'static + Default + rtti::BuiltinItem + vtable::HasStaticVTable<ItemVTable>>(
-) -> (&'static str, Rc<ItemRTTI>) {
+fn rtti_for<T: 'static + Default + rtti::BuiltinItem + vtable::HasStaticVTable<ItemVTable>>()
+-> (&'static str, Rc<ItemRTTI>) {
     let rtti = ItemRTTI {
         vtable: T::static_vtable(),
         type_info: dynamic_type::StaticTypeInfo::new::<T>(),
@@ -950,8 +951,12 @@ pub async fn load(
                 Some((&export.0.name, &component.id))
             }
             Either::Right(ty) => match &ty {
-                Type::Struct(s) if s.name.is_some() && s.node.is_some() => {
-                    Some((&export.0.name, s.name.as_ref().unwrap()))
+                Type::Struct(s) if s.node().is_some() => {
+                    if let StructName::User { name, .. } = &s.name {
+                        Some((&export.0.name, name))
+                    } else {
+                        None
+                    }
                 }
                 Type::Enumeration(en) => Some((&export.0.name, &en.name)),
                 _ => None,
@@ -982,7 +987,7 @@ fn generate_rtti() -> HashMap<&'static str, Rc<ItemRTTI>> {
             rtti_for::<ImageItem>(),
             rtti_for::<ClippedImage>(),
             rtti_for::<ComplexText>(),
-            rtti_for::<MarkdownText>(),
+            rtti_for::<StyledTextItem>(),
             rtti_for::<SimpleText>(),
             rtti_for::<Rectangle>(),
             rtti_for::<BasicBorderRectangle>(),
@@ -1015,9 +1020,9 @@ fn generate_rtti() -> HashMap<&'static str, Rc<ItemRTTI>> {
         fn push(_rtti: &mut HashMap<&str, Rc<ItemRTTI>>) {}
     }
     impl<
-            T: 'static + Default + rtti::BuiltinItem + vtable::HasStaticVTable<ItemVTable>,
-            Next: NativeHelper,
-        > NativeHelper for (T, Next)
+        T: 'static + Default + rtti::BuiltinItem + vtable::HasStaticVTable<ItemVTable>,
+        Next: NativeHelper,
+    > NativeHelper for (T, Next)
     {
         fn push(rtti: &mut HashMap<&str, Rc<ItemRTTI>>) {
             let info = rtti_for::<T>();
@@ -1154,14 +1159,14 @@ pub(crate) fn generate_item_tree<'id>(
     }
 
     let mut builder = TreeBuilder {
-        tree_array: vec![],
-        item_array: vec![],
-        original_elements: vec![],
+        tree_array: Vec::new(),
+        item_array: Vec::new(),
+        original_elements: Vec::new(),
         items_types: HashMap::new(),
         type_builder: dynamic_type::TypeBuilder::new(guard),
-        repeater: vec![],
+        repeater: Vec::new(),
         repeater_names: HashMap::new(),
-        change_callbacks: vec![],
+        change_callbacks: Vec::new(),
         popup_menu_description,
     };
 
@@ -1191,8 +1196,8 @@ pub(crate) fn generate_item_tree<'id>(
             dynamic_type::StaticTypeInfo::new::<Property<T>>(),
         )
     }
-    fn animated_property_info<T>(
-    ) -> (Box<dyn PropertyInfo<u8, Value>>, dynamic_type::StaticTypeInfo)
+    fn animated_property_info<T>()
+    -> (Box<dyn PropertyInfo<u8, Value>>, dynamic_type::StaticTypeInfo)
     where
         T: Clone + Default + InterpolatedPropertyValue + std::convert::TryInto<Value> + 'static,
         Value: std::convert::TryInto<T>,
@@ -1210,6 +1215,7 @@ pub(crate) fn generate_item_tree<'id>(
 
     fn property_info_for_type(
         ty: &Type,
+        name: &str,
     ) -> Option<(Box<dyn PropertyInfo<u8, Value>>, dynamic_type::StaticTypeInfo)> {
         Some(match ty {
             Type::Float32 => animated_property_info::<f32>(),
@@ -1226,7 +1232,10 @@ pub(crate) fn generate_item_tree<'id>(
             Type::Bool => property_info::<bool>(),
             Type::ComponentFactory => property_info::<ComponentFactory>(),
             Type::Struct(s)
-                if s.name.as_ref().is_some_and(|name| name.ends_with("::StateInfo")) =>
+                if matches!(
+                    s.name,
+                    StructName::BuiltinPrivate(BuiltinPrivateStruct::StateInfo)
+                ) =>
             {
                 property_info::<i_slint_core::properties::StateInfo>()
             }
@@ -1252,8 +1261,9 @@ pub(crate) fn generate_item_tree<'id>(
                 }
             }
             Type::LayoutCache => property_info::<SharedVector<f32>>(),
+            Type::ArrayOfU16 => property_info::<SharedVector<u16>>(),
             Type::Function { .. } | Type::Callback { .. } => return None,
-
+            Type::StyledText => property_info::<StyledText>(),
             // These can't be used in properties
             Type::Invalid
             | Type::Void
@@ -1262,7 +1272,7 @@ pub(crate) fn generate_item_tree<'id>(
             | Type::Model
             | Type::PathData
             | Type::UnitProduct(_)
-            | Type::ElementReference => panic!("bad type {ty:?}"),
+            | Type::ElementReference => panic!("bad type {ty:?} for property {name}"),
         })
     }
 
@@ -1275,38 +1285,32 @@ pub(crate) fn generate_item_tree<'id>(
                 .insert(name.clone(), builder.type_builder.add_field_type::<Callback>());
             continue;
         }
-        let Some((prop, type_info)) = property_info_for_type(&decl.property_type) else { continue };
+        let Some((prop, type_info)) = property_info_for_type(&decl.property_type, name) else {
+            continue;
+        };
         custom_properties.insert(
             name.clone(),
             PropertiesWithinComponent { offset: builder.type_builder.add_field(type_info), prop },
         );
     }
-    if let Some(parent_element) = component.parent_element.upgrade() {
-        if let Some(r) = &parent_element.borrow().repeated {
-            if !r.is_conditional_element {
-                let (prop, type_info) = property_info::<u32>();
-                custom_properties.insert(
-                    SPECIAL_PROPERTY_INDEX.into(),
-                    PropertiesWithinComponent {
-                        offset: builder.type_builder.add_field(type_info),
-                        prop,
-                    },
-                );
+    if let Some(parent_element) = component.parent_element.upgrade()
+        && let Some(r) = &parent_element.borrow().repeated
+        && !r.is_conditional_element
+    {
+        let (prop, type_info) = property_info::<u32>();
+        custom_properties.insert(
+            SPECIAL_PROPERTY_INDEX.into(),
+            PropertiesWithinComponent { offset: builder.type_builder.add_field(type_info), prop },
+        );
 
-                let model_ty = Expression::RepeaterModelReference {
-                    element: component.parent_element.clone(),
-                }
-                .ty();
-                let (prop, type_info) = property_info_for_type(&model_ty).unwrap();
-                custom_properties.insert(
-                    SPECIAL_PROPERTY_MODEL_DATA.into(),
-                    PropertiesWithinComponent {
-                        offset: builder.type_builder.add_field(type_info),
-                        prop,
-                    },
-                );
-            }
-        }
+        let model_ty =
+            Expression::RepeaterModelReference { element: component.parent_element.clone() }.ty();
+        let (prop, type_info) =
+            property_info_for_type(&model_ty, SPECIAL_PROPERTY_MODEL_DATA).unwrap();
+        custom_properties.insert(
+            SPECIAL_PROPERTY_MODEL_DATA.into(),
+            PropertiesWithinComponent { offset: builder.type_builder.add_field(type_info), prop },
+        );
     }
 
     let parent_item_tree_offset =
@@ -1573,10 +1577,10 @@ pub fn instantiate(
         {
             continue;
         }
-        if let Some(b) = description.original.root_element.borrow().bindings.get(prop_name) {
-            if b.borrow().two_way_bindings.is_empty() {
-                continue;
-            }
+        if let Some(b) = description.original.root_element.borrow().bindings.get(prop_name)
+            && b.borrow().two_way_bindings.is_empty()
+        {
+            continue;
         }
         let p = description.custom_properties.get(prop_name).unwrap();
         unsafe {
@@ -1625,7 +1629,7 @@ pub fn instantiate(
             } else if let Some(PropertiesWithinComponent { offset, prop: prop_info, .. }) =
                 description.custom_properties.get(prop_name).filter(|_| is_root)
             {
-                let is_state_info = matches!(&property_type, Type::Struct (s) if s.name.as_ref().is_some_and(|name| name.ends_with("::StateInfo")));
+                let is_state_info = matches!(&property_type, Type::Struct (s) if matches!(s.name, StructName::BuiltinPrivate(BuiltinPrivateStruct::StateInfo)));
                 if is_state_info {
                     let prop = Pin::new_unchecked(
                         &*(instance_ref.as_ptr().add(*offset)
@@ -1797,13 +1801,12 @@ fn prepare_for_two_way_binding(
         eval::ComponentInstance::InstanceRef(enclosing_component) => {
             let element = element.borrow();
             if element.id == element.enclosing_component.upgrade().unwrap().root_element.borrow().id
+                && let Some(x) = enclosing_component.description.custom_properties.get(name)
             {
-                if let Some(x) = enclosing_component.description.custom_properties.get(name) {
-                    let item = unsafe { Pin::new_unchecked(&*instance_ref.as_ptr().add(x.offset)) };
-                    let common = x.prop.prepare_for_two_way_binding(item);
-                    return (common, map);
-                };
-            };
+                let item = unsafe { Pin::new_unchecked(&*instance_ref.as_ptr().add(x.offset)) };
+                let common = x.prop.prepare_for_two_way_binding(item);
+                return (common, map);
+            }
             let item_info = enclosing_component
                 .description
                 .items
@@ -1837,10 +1840,9 @@ pub(crate) fn get_property_ptr(nr: &NamedReference, instance: InstanceRef) -> *c
         eval::ComponentInstance::InstanceRef(enclosing_component) => {
             let element = element.borrow();
             if element.id == element.enclosing_component.upgrade().unwrap().root_element.borrow().id
+                && let Some(x) = enclosing_component.description.custom_properties.get(nr.name())
             {
-                if let Some(x) = enclosing_component.description.custom_properties.get(nr.name()) {
-                    return unsafe { enclosing_component.as_ptr().add(x.offset).cast() };
-                };
+                return unsafe { enclosing_component.as_ptr().add(x.offset).cast() };
             };
             let item_info = enclosing_component
                 .description
@@ -1987,14 +1989,14 @@ extern "C" fn layout_info(component: ItemTreeRefPin, orientation: Orientation) -
 unsafe extern "C" fn get_item_ref(component: ItemTreeRefPin, index: u32) -> Pin<ItemRef> {
     let tree = get_item_tree(component);
     match &tree[index as usize] {
-        ItemTreeNode::Item { item_array_index, .. } => {
+        ItemTreeNode::Item { item_array_index, .. } => unsafe {
             generativity::make_guard!(guard);
             let instance_ref = InstanceRef::from_pin_ref(component, guard);
             core::mem::transmute::<Pin<ItemRef>, Pin<ItemRef>>(
                 instance_ref.description.item_array[*item_array_index as usize]
                     .apply_pin(instance_ref.instance),
             )
-        }
+        },
         ItemTreeNode::DynamicTree { .. } => panic!("get_item_ref called on dynamic tree"),
     }
 }
@@ -2090,7 +2092,7 @@ extern "C" fn subtree_index(component: ItemTreeRefPin) -> usize {
 #[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
 unsafe extern "C" fn parent_node(component: ItemTreeRefPin, result: &mut ItemWeak) {
     generativity::make_guard!(guard);
-    let instance_ref = InstanceRef::from_pin_ref(component, guard);
+    let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
 
     let component_and_index = {
         // Normal inner-compilation unit case:
@@ -2258,7 +2260,9 @@ extern "C" fn accessibility_action(
         AccessibilityAction::Expand => perform("accessible-action-expand", &[]),
         AccessibilityAction::ReplaceSelectedText(_a) => {
             //perform("accessible-action-replace-selected-text", &[Value::String(a.clone())])
-            i_slint_core::debug_log!("AccessibilityAction::ReplaceSelectedText not implemented in interpreter's accessibility_action");
+            i_slint_core::debug_log!(
+                "AccessibilityAction::ReplaceSelectedText not implemented in interpreter's accessibility_action"
+            );
         }
         AccessibilityAction::SetValue(a) => {
             perform("accessible-action-set-value", &[Value::String(a.clone())])
@@ -2273,7 +2277,7 @@ extern "C" fn supported_accessibility_actions(
 ) -> SupportedAccessibilityAction {
     generativity::make_guard!(guard);
     let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
-    let val = instance_ref.description.original_elements[item_index as usize]
+    instance_ref.description.original_elements[item_index as usize]
         .borrow()
         .accessibility_props
         .0
@@ -2285,8 +2289,7 @@ extern "C" fn supported_accessibility_actions(
             ))
             .unwrap_or_else(|| panic!("Not an accessible action: {value:?}"))
                 | acc
-        });
-    val
+        })
 }
 
 #[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
@@ -2321,15 +2324,17 @@ extern "C" fn window_adapter(
 
 #[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
 unsafe extern "C" fn drop_in_place(component: vtable::VRefMut<ItemTreeVTable>) -> vtable::Layout {
-    let instance_ptr = component.as_ptr() as *mut Instance<'static>;
-    let layout = (*instance_ptr).type_info().layout();
-    dynamic_type::TypeInfo::drop_in_place(instance_ptr);
-    layout.into()
+    unsafe {
+        let instance_ptr = component.as_ptr() as *mut Instance<'static>;
+        let layout = (*instance_ptr).type_info().layout();
+        dynamic_type::TypeInfo::drop_in_place(instance_ptr);
+        layout.into()
+    }
 }
 
 #[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
 unsafe extern "C" fn dealloc(_vtable: &ItemTreeVTable, ptr: *mut u8, layout: vtable::Layout) {
-    std::alloc::dealloc(ptr, layout.try_into().unwrap());
+    unsafe { std::alloc::dealloc(ptr, layout.try_into().unwrap()) };
 }
 
 #[derive(Copy, Clone)]
@@ -2343,11 +2348,15 @@ impl<'a, 'id> InstanceRef<'a, 'id> {
         component: ItemTreeRefPin<'a>,
         _guard: generativity::Guard<'id>,
     ) -> Self {
-        Self {
-            instance: Pin::new_unchecked(&*(component.as_ref().as_ptr() as *const Instance<'id>)),
-            description: &*(Pin::into_inner_unchecked(component).get_vtable()
-                as *const ItemTreeVTable
-                as *const ItemTreeDescription<'id>),
+        unsafe {
+            Self {
+                instance: Pin::new_unchecked(
+                    &*(component.as_ref().as_ptr() as *const Instance<'id>),
+                ),
+                description: &*(Pin::into_inner_unchecked(component).get_vtable()
+                    as *const ItemTreeVTable
+                    as *const ItemTreeDescription<'id>),
+            }
         }
     }
 
@@ -2417,7 +2426,7 @@ impl<'a, 'id> InstanceRef<'a, 'id> {
                 let extra_data = description.extra_data_offset.apply(instance);
                 let window_adapter = // We are the root: Create a window adapter
                     i_slint_backend_selector::with_platform(|_b| {
-                        return _b.create_window_adapter();
+                        _b.create_window_adapter()
                     })?;
 
                 let comp_rc = extra_data.self_weak.get().unwrap().upgrade().unwrap();
@@ -2458,19 +2467,18 @@ impl<'a, 'id> InstanceRef<'a, 'id> {
     ) -> Option<InstanceRef<'a, 'id2>> {
         // we need a 'static guard in order to be able to re-borrow with lifetime 'a.
         // Safety: This is the only 'static Id in scope.
-        if let Some(parent_offset) = self.description.parent_item_tree_offset {
-            if let Some(parent) =
+        if let Some(parent_offset) = self.description.parent_item_tree_offset
+            && let Some(parent) =
                 parent_offset.apply(self.as_ref()).get().and_then(vtable::VWeak::upgrade)
-            {
-                let parent_instance = parent.unerase(_guard);
-                // And also assume that the parent lives for at least 'a.  FIXME: this may not be sound
-                let parent_instance = unsafe {
-                    std::mem::transmute::<InstanceRef<'_, 'id2>, InstanceRef<'a, 'id2>>(
-                        parent_instance.borrow_instance(),
-                    )
-                };
-                return Some(parent_instance);
+        {
+            let parent_instance = parent.unerase(_guard);
+            // And also assume that the parent lives for at least 'a.  FIXME: this may not be sound
+            let parent_instance = unsafe {
+                std::mem::transmute::<InstanceRef<'_, 'id2>, InstanceRef<'a, 'id2>>(
+                    parent_instance.borrow_instance(),
+                )
             };
+            return Some(parent_instance);
         }
         None
     }

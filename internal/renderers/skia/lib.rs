@@ -3,22 +3,26 @@
 
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
+#![cfg_attr(slint_nightly_test, feature(non_exhaustive_omitted_patterns_lint))]
+#![cfg_attr(slint_nightly_test, warn(non_exhaustive_omitted_patterns))]
 
 #[cfg(any(target_vendor = "apple", skia_backend_vulkan))]
 use std::cell::OnceCell;
 use std::cell::{Cell, RefCell};
+use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use i_slint_common::sharedfontique;
+use i_slint_core::Brush;
 use i_slint_core::api::{
     GraphicsAPI, PhysicalSize as PhysicalWindowSize, RenderingNotifier, RenderingState,
     SetRenderingNotifierError, Window,
 };
+use i_slint_core::graphics::RequestedGraphicsAPI;
 use i_slint_core::graphics::euclid::{self, Vector2D};
 use i_slint_core::graphics::rendering_metrics_collector::RenderingMetricsCollector;
-use i_slint_core::graphics::RequestedGraphicsAPI;
-use i_slint_core::graphics::{BorderRadius, FontRequest, SharedPixelBuffer};
+use i_slint_core::graphics::{BorderRadius, SharedPixelBuffer};
 use i_slint_core::item_rendering::{ItemCache, ItemRenderer};
 use i_slint_core::item_tree::ItemTreeWeak;
 use i_slint_core::lengths::{
@@ -28,7 +32,6 @@ use i_slint_core::partial_renderer::{DirtyRegion, PartialRenderingState};
 use i_slint_core::platform::PlatformError;
 use i_slint_core::textlayout::sharedparley;
 use i_slint_core::window::{WindowAdapter, WindowInner};
-use i_slint_core::Brush;
 
 type PhysicalLength = euclid::Length<f32, PhysicalPx>;
 type PhysicalRect = euclid::Rect<f32, PhysicalPx>;
@@ -60,7 +63,7 @@ mod wgpu_26_surface;
 #[cfg(feature = "unstable-wgpu-27")]
 mod wgpu_27_surface;
 
-use i_slint_core::items::TextWrap;
+use i_slint_core::items::{ItemRc, TextWrap};
 use itemrenderer::to_skia_rect;
 pub use skia_safe;
 
@@ -160,6 +163,7 @@ pub struct SkiaRenderer {
     maybe_window_adapter: RefCell<Option<Weak<dyn WindowAdapter>>>,
     rendering_notifier: RefCell<Option<Box<dyn RenderingNotifier>>>,
     image_cache: ItemCache<Option<skia_safe::Image>>,
+    layer_cache: ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Image)>>,
     path_cache: ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Path)>>,
     rendering_metrics_collector: RefCell<Option<Rc<RenderingMetricsCollector>>>,
     rendering_first_time: Cell<bool>,
@@ -185,6 +189,7 @@ impl SkiaRenderer {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
             image_cache: Default::default(),
+            layer_cache: Default::default(),
             path_cache: Default::default(),
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
@@ -205,6 +210,7 @@ impl SkiaRenderer {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
             image_cache: Default::default(),
+            layer_cache: Default::default(),
             path_cache: Default::default(),
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
@@ -238,6 +244,7 @@ impl SkiaRenderer {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
             image_cache: Default::default(),
+            layer_cache: Default::default(),
             path_cache: Default::default(),
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
@@ -271,6 +278,7 @@ impl SkiaRenderer {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
             image_cache: Default::default(),
+            layer_cache: Default::default(),
             path_cache: Default::default(),
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
@@ -304,6 +312,7 @@ impl SkiaRenderer {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
             image_cache: Default::default(),
+            layer_cache: Default::default(),
             path_cache: Default::default(),
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
@@ -337,6 +346,7 @@ impl SkiaRenderer {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
             image_cache: Default::default(),
+            layer_cache: Default::default(),
             path_cache: Default::default(),
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
@@ -370,6 +380,7 @@ impl SkiaRenderer {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
             image_cache: Default::default(),
+            layer_cache: Default::default(),
             path_cache: Default::default(),
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
@@ -403,6 +414,7 @@ impl SkiaRenderer {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
             image_cache: Default::default(),
+            layer_cache: Default::default(),
             path_cache: Default::default(),
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Default::default(),
@@ -452,6 +464,7 @@ impl SkiaRenderer {
             maybe_window_adapter: Default::default(),
             rendering_notifier: Default::default(),
             image_cache: Default::default(),
+            layer_cache: Default::default(),
             path_cache: Default::default(),
             rendering_metrics_collector: Default::default(),
             rendering_first_time: Cell::new(true),
@@ -647,6 +660,7 @@ impl SkiaRenderer {
             window,
             surface,
             &self.image_cache,
+            &self.layer_cache,
             &self.path_cache,
             &mut box_shadow_cache,
         );
@@ -722,21 +736,18 @@ impl SkiaRenderer {
             if let Some(window_item_rc) = window_inner.window_item_rc() {
                 let window_item =
                     window_item_rc.downcast::<i_slint_core::items::WindowItem>().unwrap();
-                match window_item.as_pin_ref().background() {
-                    Brush::SolidColor(clear_color) => {
-                        skia_canvas.clear(itemrenderer::to_skia_color(&clear_color));
-                    }
-                    _ => {
-                        // Draws the window background as gradient
-                        item_renderer.draw_rectangle(
-                            window_item.as_pin_ref(),
-                            &window_item_rc,
-                            i_slint_core::lengths::logical_size_from_api(
-                                window.size().to_logical(window_inner.scale_factor()),
-                            ),
-                            &window_item.as_pin_ref().cached_rendering_data,
-                        );
-                    }
+                if let Brush::SolidColor(clear_color) = window_item.as_pin_ref().background() {
+                    skia_canvas.clear(itemrenderer::to_skia_color(&clear_color));
+                } else {
+                    // Draws the window background as gradient
+                    item_renderer.draw_rectangle(
+                        window_item.as_pin_ref(),
+                        &window_item_rc,
+                        i_slint_core::lengths::logical_size_from_api(
+                            window.size().to_logical(window_inner.scale_factor()),
+                        ),
+                        &window_item.as_pin_ref().cached_rendering_data,
+                    );
                 }
             }
 
@@ -823,19 +834,26 @@ impl SkiaRenderer {
 impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
     fn text_size(
         &self,
-        font_request: i_slint_core::graphics::FontRequest,
-        text: &str,
+        text_item: Pin<&dyn i_slint_core::item_rendering::RenderString>,
+        item_rc: &ItemRc,
         max_width: Option<LogicalLength>,
-        scale_factor: ScaleFactor,
         text_wrap: TextWrap,
     ) -> LogicalSize {
-        sharedparley::text_size(font_request, text, max_width, scale_factor, text_wrap)
+        sharedparley::text_size(self, text_item, item_rc, max_width, text_wrap)
+    }
+
+    fn char_size(
+        &self,
+        text_item: Pin<&dyn i_slint_core::item_rendering::HasFont>,
+        item_rc: &i_slint_core::item_tree::ItemRc,
+        ch: char,
+    ) -> LogicalSize {
+        sharedparley::char_size(text_item, item_rc, ch).unwrap_or_default()
     }
 
     fn font_metrics(
         &self,
         font_request: i_slint_core::graphics::FontRequest,
-        _scale_factor: ScaleFactor,
     ) -> i_slint_core::items::FontMetrics {
         sharedparley::font_metrics(font_request)
     }
@@ -843,31 +861,19 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
     fn text_input_byte_offset_for_position(
         &self,
         text_input: std::pin::Pin<&i_slint_core::items::TextInput>,
+        item_rc: &i_slint_core::item_tree::ItemRc,
         pos: LogicalPoint,
-        font_request: FontRequest,
-        scale_factor: ScaleFactor,
     ) -> usize {
-        sharedparley::text_input_byte_offset_for_position(
-            text_input,
-            pos,
-            font_request,
-            scale_factor,
-        )
+        sharedparley::text_input_byte_offset_for_position(self, text_input, item_rc, pos)
     }
 
     fn text_input_cursor_rect_for_byte_offset(
         &self,
         text_input: std::pin::Pin<&i_slint_core::items::TextInput>,
+        item_rc: &i_slint_core::item_tree::ItemRc,
         byte_offset: usize,
-        font_request: FontRequest,
-        scale_factor: ScaleFactor,
     ) -> LogicalRect {
-        sharedparley::text_input_cursor_rect_for_byte_offset(
-            text_input,
-            byte_offset,
-            font_request,
-            scale_factor,
-        )
+        sharedparley::text_input_cursor_rect_for_byte_offset(self, text_input, item_rc, byte_offset)
     }
 
     fn register_font_from_memory(
@@ -929,7 +935,18 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
         }
     }
 
+    fn window_adapter(&self) -> Option<Rc<dyn WindowAdapter>> {
+        self.maybe_window_adapter
+            .borrow()
+            .as_ref()
+            .and_then(|window_adapter| window_adapter.upgrade())
+    }
+
     fn resize(&self, size: i_slint_core::api::PhysicalSize) -> Result<(), PlatformError> {
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
+
         if let Some(surface) = self.surface.borrow().as_ref() {
             surface.resize_event(size)
         } else {

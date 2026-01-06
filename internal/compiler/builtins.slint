@@ -120,10 +120,10 @@ component ComplexText inherits SimpleText {
 
 export { ComplexText as Text }
 
-export component MarkdownText inherits Empty {
+component StyledTextItem inherits Empty {
     in property <length> width;
     in property <length> height;
-    in property <string> text;
+    in property <styled-text> text;
     in property <length> font-size;
     in property <int> font-weight;
     in property <brush> color;
@@ -142,6 +142,8 @@ export component MarkdownText inherits Empty {
     in property <TextStrokeStyle> stroke-style;
     //-default_size_binding:implicit_size
 }
+
+export { StyledTextItem as StyledText }
 
 export component TouchArea {
     in property <bool> enabled: true;
@@ -311,6 +313,10 @@ component WindowItem {
     out property <length> safe-area-inset-bottom;
     out property <length> safe-area-inset-left;
     out property <length> safe-area-inset-right;
+    out property <length> virtual-keyboard-x;
+    out property <length> virtual-keyboard-y;
+    out property <length> virtual-keyboard-width;
+    out property <length> virtual-keyboard-height;
     in property <brush> background; // StyleMetrics.background  set in apply_default_properties_from_style
     in property <brush> color <=> background;
     in property <string> title: "Slint Window";
@@ -438,8 +444,7 @@ component MoveTo {
     in property <float> x;
     in property <float> y;
 
-    //-rust_type_constructor:slint::re_exports::PathElement::MoveTo(PathMoveTo{{}})
-    //-cpp_type:slint::private_api::PathMoveTo
+    //-builtin_struct:PathMoveTo
     //-is_non_item_type
 }
 
@@ -447,8 +452,7 @@ component LineTo {
     in property <float> x;
     in property <float> y;
 
-    //-rust_type_constructor:slint::re_exports::PathElement::LineTo(PathLineTo{{}})
-    //-cpp_type:slint::private_api::PathLineTo
+    //-builtin_struct:PathLineTo
     //-is_non_item_type
 }
 
@@ -461,8 +465,7 @@ component ArcTo {
     in property <bool> large_arc;
     in property <bool> sweep;
 
-    //-rust_type_constructor:slint::re_exports::PathElement::ArcTo(PathArcTo{{}})
-    //-cpp_type:slint::private_api::PathArcTo
+    //-builtin_struct:PathArcTo
     //-is_non_item_type
 }
 
@@ -474,8 +477,7 @@ component CubicTo {
     in property <float> x;
     in property <float> y;
 
-    //-rust_type_constructor:slint::re_exports::PathElement::CubicTo(PathCubicTo{{}})
-    //-cpp_type:slint::private_api::PathCubicTo
+    //-builtin_struct:PathCubicTo
     //-is_non_item_type
 }
 
@@ -485,14 +487,12 @@ component QuadraticTo {
     in property <float> x;
     in property <float> y;
 
-    //-rust_type_constructor:slint::re_exports::PathElement::QuadraticTo(PathQuadraticTo{{}})
-    //-cpp_type:slint::private_api::PathQuadraticTo
+    //-builtin_struct:PathQuadraticTo
     //-is_non_item_type
 }
 
 component Close {
-    //-rust_type_constructor:slint::re_exports::PathElement::Close
-    //-cpp_type:slint::private_api::PathClose
+    //-builtin_struct:PathClose
     //-is_non_item_type
 }
 
@@ -534,6 +534,7 @@ component Tab {
 // Note: not a native class, handled in the lower_tabs pass
 export component TabWidget {
     in-out property <int> current-index;
+    in property <Orientation> orientation;
 
     //-disallow_global_types_as_child_elements
     Tab { }
@@ -627,6 +628,7 @@ export component NativeSpinBox {
     in property <int> maximum: 100;
     in property <int> step-size: 1;
     in property <TextHorizontalAlignment> horizontal-alignment;
+    in property <bool> read-only;
     callback edited(value: int);
     //-is_internal
     //-accepts_focus
@@ -744,6 +746,7 @@ export component NativeTabWidget {
 
     in property <int> current-index;
     in property <int> current-focused;
+    in property <Orientation> orientation: Orientation.horizontal;
     //-default_size_binding:expands_to_parent_geometry
     //-is_internal
 }

@@ -4,63 +4,42 @@
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-/// Returns a list of all the `.slint` files in the `tests/cases` subfolders.
-pub fn collect_test_cases() -> std::io::Result<Vec<test_driver_lib::TestCase>> {
-    let mut results = vec![];
-
-    let case_root_dir: std::path::PathBuf = [env!("CARGO_MANIFEST_DIR"), "cases"].iter().collect();
-
-    println!("cargo:rerun-if-env-changed=SLINT_TEST_FILTER");
-    let filter = std::env::var("SLINT_TEST_FILTER").ok();
-
-    for entry in walkdir::WalkDir::new(case_root_dir.clone()).follow_links(true) {
-        let entry = entry?;
-        let absolute_path = entry.into_path();
-        if absolute_path.is_dir() {
-            println!("cargo:rerun-if-changed={}", absolute_path.display());
-            continue;
-        }
-        let relative_path =
-            std::path::PathBuf::from(absolute_path.strip_prefix(&case_root_dir).unwrap());
-        if let Some(filter) = &filter {
-            if !relative_path.to_str().unwrap().contains(filter) {
-                continue;
-            }
-        }
-        if let Some(ext) = absolute_path.extension() {
-            if ext == "60" || ext == "slint" {
-                results.push(test_driver_lib::TestCase {
-                    absolute_path,
-                    relative_path,
-                    requested_style: None,
-                });
-            }
-        }
-    }
-    Ok(results)
-}
-
 fn main() -> std::io::Result<()> {
     let default_font_path: std::path::PathBuf =
         [env!("CARGO_MANIFEST_DIR"), "..", "..", "demos", "printerdemo", "ui", "fonts"]
             .iter()
             .collect();
 
-    std::env::set_var("SLINT_DEFAULT_FONT", default_font_path.clone());
+    // Safety: there are no other threads at this point
+    unsafe {
+        std::env::set_var("SLINT_DEFAULT_FONT", default_font_path.clone());
+    }
     println!("cargo:rustc-env=SLINT_DEFAULT_FONT={}", default_font_path.display());
+    println!("cargo:rustc-env=SLINT_ENABLE_EXPERIMENTAL_FEATURES=1");
 
     let mut generated_file = BufWriter::new(std::fs::File::create(
         Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("generated.rs"),
     )?);
 
+    #[cfg(feature = "software")]
+    gen_software(&mut generated_file)?;
+
+    #[cfg(feature = "skia")]
+    gen_skia(&mut generated_file)?;
+
+    generated_file.flush()?;
+
+    Ok(())
+}
+
+#[cfg(feature = "software")]
+fn gen_software(generated_file: &mut impl Write) -> std::io::Result<()> {
     let references_root_dir: std::path::PathBuf =
-        [env!("CARGO_MANIFEST_DIR"), "references"].iter().collect();
+        [env!("CARGO_MANIFEST_DIR"), "references", "software"].iter().collect();
 
     let font_cache = i_slint_compiler::FontCache::default();
 
-    for (i, testcase) in
-        test_driver_lib::collect_test_cases("screenshots/cases")?.into_iter().enumerate()
-    {
+    for testcase in test_driver_lib::collect_test_cases("screenshots/cases")? {
         let mut reference_path = references_root_dir
             .join(testcase.relative_path.clone())
             .with_extension("png")
@@ -72,11 +51,9 @@ fn main() -> std::io::Result<()> {
         reference_path = format!("\"{reference_path}\"");
 
         println!("cargo:rerun-if-changed={}", testcase.absolute_path.display());
-        let mut module_name = testcase.identifier();
-        if module_name.starts_with(|c: char| !c.is_ascii_alphabetic()) {
-            module_name.insert(0, '_');
-        }
-        writeln!(generated_file, "#[path=\"{module_name}.rs\"] mod r#{module_name};")?;
+        let module_name = testcase.identifier();
+
+        writeln!(generated_file, "#[path=\"{module_name}.rs\"] mod r#software_{module_name};")?;
         let source = std::fs::read_to_string(&testcase.absolute_path)?;
 
         let needle = "SLINT_SCALE_FACTOR=";
@@ -110,6 +87,8 @@ fn main() -> std::io::Result<()> {
                 })
         });
         let skip_clipping = source.contains("SKIP_CLIPPING");
+        let skip_line_by_line =
+            if source.contains("SKIP_LINE_BY_LINE") { "#[cfg(false)]" } else { "" };
 
         let needle = "SIZE=";
         let (size_w, size_h) = source.find(needle).map_or((64, 64), |p| {
@@ -126,6 +105,8 @@ fn main() -> std::io::Result<()> {
             Path::new(&std::env::var_os("OUT_DIR").unwrap()).join(format!("{module_name}.rs")),
         )?);
 
+        let ignored = if testcase.is_ignored("software") { "#[ignore]" } else { "" };
+
         generate_source(
             source.as_str(),
             &mut output,
@@ -138,20 +119,20 @@ fn main() -> std::io::Result<()> {
         write!(
             output,
             r"
-    #[test] fn t_{i}() -> Result<(), Box<dyn std::error::Error>> {{
-    use crate::testing;
+    #[test] {ignored} fn sw() -> Result<(), Box<dyn std::error::Error>> {{
 
-    let window = testing::init_swr();
+    let window = crate::software::init_swr();
     window.set_size(slint::PhysicalSize::new({size_w}, {size_h}));
     let screenshot = {reference_path};
-    let options = testing::TestCaseOptions {{ base_threshold: {base_threshold}f32, rotation_threshold: {rotation_threshold}f32, skip_clipping: {skip_clipping} }};
+    let options = crate::testing::TestCaseOptions {{ base_threshold: {base_threshold}f32, rotation_threshold: {rotation_threshold}f32, skip_clipping: {skip_clipping} }};
 
     let instance = TestCase::new().unwrap();
     instance.show().unwrap();
 
-    testing::assert_with_render(screenshot, window.clone(), &options);
+    crate::software::assert_with_render(screenshot, window.clone(), &options);
 
-    testing::assert_with_render_by_line(screenshot, window.clone(), &options);
+    {skip_line_by_line}
+    crate::software::assert_with_render_by_line(screenshot, window.clone(), &options);
 
     Ok(())
     }}",
@@ -159,16 +140,10 @@ fn main() -> std::io::Result<()> {
 
         output.flush()?;
     }
-
-    generated_file.flush()?;
-
-    //Make sure to use a consistent style
-    println!("cargo:rustc-env=SLINT_STYLE=fluent");
-    println!("cargo:rustc-env=SLINT_ENABLE_EXPERIMENTAL_FEATURES=1");
-
     Ok(())
 }
 
+#[cfg(feature = "software")]
 fn generate_source(
     source: &str,
     output: &mut impl Write,
@@ -207,8 +182,43 @@ fn generate_source(
     generator::generate(
         generator::OutputFormat::Rust,
         output,
+        None,
         &root_component,
         &loader.compiler_config,
     )?;
+    Ok(())
+}
+
+#[cfg(feature = "skia")]
+fn gen_skia(generated_file: &mut impl Write) -> Result<(), std::io::Error> {
+    let references_root_dir: std::path::PathBuf =
+        [env!("CARGO_MANIFEST_DIR"), "references", "skia"].iter().collect();
+
+    for testcase in test_driver_lib::collect_test_cases("screenshots/cases")? {
+        let reference_path = references_root_dir
+            .join(testcase.relative_path.clone())
+            .with_extension("png")
+            .to_string_lossy()
+            .into_owned();
+        let absolute_path = testcase.absolute_path.to_string_lossy();
+        let relative_path = testcase.relative_path.to_string_lossy();
+
+        let identifier = testcase.identifier();
+        let ignored = if testcase.is_ignored("skia") { "#[ignore]" } else { "" };
+
+        write!(
+            generated_file,
+            r##"
+#[test] {ignored}
+fn skia_{identifier}() -> Result<(), Box<dyn std::error::Error>> {{
+    crate::skia::run_test(crate::skia::TestCase {{
+        absolute_path: std::path::PathBuf::from(r#"{absolute_path}"#),
+        relative_path: std::path::PathBuf::from(r#"{relative_path}"#),
+        reference_path: std::path::PathBuf::from(r#"{reference_path}"#),
+    }})
+}}"##,
+        )?;
+    }
+
     Ok(())
 }
