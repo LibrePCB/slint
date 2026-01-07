@@ -9,17 +9,19 @@ project(Slint HOMEPAGE_URL "https://slint.dev/" LANGUAGES C CXX VERSION 1.15.0)
 include(FeatureSummary)
 include(CMakeDependentOption)
 
-find_package(Corrosion QUIET 0.5)
-if (NOT Corrosion_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-        Corrosion
-        GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
-        GIT_TAG v0.6.0
-    )
-
-    FetchContent_MakeAvailable(Corrosion)
-endif (NOT Corrosion_FOUND)
+# For LibrePCB we don't want to download Corrosion through CMake to avoid
+# deployment issues, and because LibrePCB already ships Corrosion anyway.
+#find_package(Corrosion QUIET 0.5)
+#if (NOT Corrosion_FOUND)
+#    include(FetchContent)
+#    FetchContent_Declare(
+#        Corrosion
+#        GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
+#        GIT_TAG v0.6.0
+#    )
+#
+#    FetchContent_MakeAvailable(Corrosion)
+#endif (NOT Corrosion_FOUND)
 
 list(PREPEND CMAKE_MODULE_PATH ${Corrosion_SOURCE_DIR}/cmake)
 find_package(Rust 1.85 REQUIRED MODULE)
