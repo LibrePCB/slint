@@ -993,7 +993,9 @@ impl ItemRenderer for QtItemRenderer<'_> {
         let y: f32 = distance.y;
         let painter: &mut QPainterPtr = &mut self.painter;
         cpp! { unsafe [painter as "QPainterPtr*", x as "float", y as "float"] {
-            (*painter)->translate(x, y);
+            // LibrePCB patch to avoid unstable font kerning when resizing
+            // windows (see https://github.com/slint-ui/slint/issues/9831).
+            (*painter)->translate(std::round(x), std::round(y));
         }}
     }
 
@@ -1147,7 +1149,9 @@ impl QRawFont {
     pub fn load_from_data(&mut self, data: &[u8], pixel_size: f32) {
         let font_data = qttypes::QByteArray::from(data);
         cpp! { unsafe [ self as "QRawFont*", font_data as "QByteArray", pixel_size as "float"] {
-            self->loadFromData(font_data, pixel_size, QFont::PreferDefaultHinting);
+            // LibrePCB patch to fix wrong font kerning, see
+            // https://github.com/slint-ui/slint/issues/9831.
+            self->loadFromData(font_data, pixel_size, QFont::PreferVerticalHinting);
         }}
     }
 
