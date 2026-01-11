@@ -1360,10 +1360,19 @@ impl QtItemRenderer<'_> {
                         source_rect as "QRectF",
                         dest_rect as "QRectF",
                         smooth as "bool"] {
-                    (*painter)->save();
-                    (*painter)->setRenderHint(QPainter::SmoothPixmapTransform, smooth);
-                    (*painter)->drawPixmap(dest_rect, pixmap, source_rect);
-                    (*painter)->restore();
+                    // LibrePCB patch to work around pixelated FontAwesome SVGs
+                    // which need to be scaled down from 512x51px to e.g. 18x18px.
+                    // See comment about QPainter::SmoothPixmapTransform in
+                    // https://doc.qt.io/qt-6/qgraphicspixmapitem.html, and
+                    // see also https://forum.qt.io/post/815822.
+                    if ((source_rect == pixmap.rect()) && ((source_rect.width() / dest_rect.width() > 4))) {
+                        (*painter)->drawPixmap(dest_rect, pixmap.scaled(dest_rect.size().toSize(), Qt::KeepAspectRatio, Qt::SmoothTransformation), QRectF());
+                    } else {
+                        (*painter)->save();
+                        (*painter)->setRenderHint(QPainter::SmoothPixmapTransform, smooth);
+                        (*painter)->drawPixmap(dest_rect, pixmap, source_rect);
+                        (*painter)->restore();
+                    }
                 }};
             }
         }
