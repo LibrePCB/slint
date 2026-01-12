@@ -1554,17 +1554,15 @@ fn generate_item_tree(
                 // No repeater index, this could be a PopupWindow
                 vec![
                     format!("auto self = reinterpret_cast<const {item_tree_class_name}*>(component.instance);"),
-                    format!("auto parent = self->parent.lock().value();"),
                     // TODO: store popup index in ctx and set it here instead of 0?
-                    format!("*result = {{ parent->self_weak, 0 }};"),
+                    format!("if (auto parent = self->parent.lock()) *result = {{ parent.value()->self_weak, 0 }};"),
                     ]
                 }, |idx| {
                 let current_sub_component = &root.sub_components[parent.sub_component];
                 let parent_index = current_sub_component.repeated[idx].index_in_tree;
                 vec![
                     format!("auto self = reinterpret_cast<const {item_tree_class_name}*>(component.instance);"),
-                    format!("auto parent = self->parent.lock().value();"),
-                    format!("*result = {{ parent->self_weak, parent->tree_index_of_first_child + {} }};", parent_index - 1),
+                    format!("if (auto parent = self->parent.lock()) *result = {{ parent.value()->self_weak, parent.value()->tree_index_of_first_child + {} }};", parent_index - 1),
                 ]
             }))
         })
