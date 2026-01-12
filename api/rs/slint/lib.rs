@@ -212,10 +212,6 @@ compile_error!(
 pub use slint_macros::slint;
 
 pub use i_slint_backend_selector::api::*;
-#[cfg(feature = "std")]
-pub use i_slint_common::sharedfontique::{
-    FontHandle, RegisterFontError, register_font_from_memory,
-};
 pub use i_slint_core::api::*;
 #[doc(hidden)]
 #[deprecated(note = "Experimental type was made public by mistake")]
@@ -479,7 +475,7 @@ pub mod wgpu_26 {
     //!
     //! `Cargo.toml`:
     //! ```toml
-    //! slint = { version = "~1.13", features = ["unstable-wgpu-26"] }
+    //! slint = { version = "~1.15", features = ["unstable-wgpu-26"] }
     //! ```
     //!
     //! `main.rs`:
@@ -576,7 +572,7 @@ pub mod wgpu_27 {
     //!
     //! `Cargo.toml`:
     //! ```toml
-    //! slint = { version = "~1.14", features = ["unstable-wgpu-27"] }
+    //! slint = { version = "~1.15", features = ["unstable-wgpu-27"] }
     //! ```
     //!
     //! `main.rs`:
@@ -663,7 +659,7 @@ pub mod winit_030 {
     //!
     //! `Cargo.toml`:
     //! ```toml
-    //! slint = { version = "~1.12", features = ["unstable-winit-030"] }
+    //! slint = { version = "~1.15", features = ["unstable-winit-030"] }
     //! ```
     //!
     //! `main.rs`:
@@ -717,4 +713,56 @@ pub mod winit_030 {
     #[deprecated(note = "Renamed to `EventResult`")]
     /// Deprecated alias to [`EventResult`]
     pub type WinitWindowEventResult = EventResult;
+}
+
+#[cfg(feature = "unstable-fontique-07")]
+pub mod fontique {
+    //! Fontique 0.7 specific types and re-exports.
+    //!
+    //! *Note*: This module is behind a feature flag and may be removed or changed in future minor releases,
+    //!         as new major Fontique releases become available.
+    //!
+    //! Use the types, functions, and re-exports in this module to register custom fonts at run-time for use
+    //! by Slint's renderers.
+
+    pub use i_slint_common::sharedfontique::fontique;
+
+    #[i_slint_core_macros::slint_doc]
+    /// Returns a clone of [`fontique::Collection`] that's used by Slint for text rendering. It's set up
+    /// with shared storage, so fonts registered with the returned collection or additionally configured font
+    /// fallbacks apply to the entire process.
+    ///
+    /// Note: The recommended way of including custom fonts is at compile time of Slint files. For details,
+    ///       see also the [Font Handling](slint:FontHandling) documentation.
+    ///
+    /// The example below sketches out the steps for registering a downloaded font to add additional glyph
+    /// coverage for Japanese text:
+    ///
+    /// `Cargo.toml`:
+    /// ```toml
+    /// slint = { version = "~1.15", features = ["unstable-fontique-07"] }
+    /// ```
+    ///
+    /// `main.rs`:
+    /// ```rust,no_run
+    /// use slint::fontique::fontique;
+    ///
+    /// fn main() {
+    ///     // ...
+    ///     let downloaded_font: Vec<u8> = todo!("Download https://somewebsite.com/font.ttf");
+    ///     let blob = fontique::Blob::new(std::sync::Arc::new(downloaded_font));
+    ///     let mut collection = slint::fontique::shared_collection();
+    ///     let fonts = collection.register_fonts(blob, None);
+    ///     collection
+    ///         .append_fallbacks(fontique::FallbackKey::new("Hira", None), fonts.iter().map(|x| x.0));
+    ///     collection
+    ///         .append_fallbacks(fontique::FallbackKey::new("Kana", None), fonts.iter().map(|x| x.0));
+    ///     collection
+    ///         .append_fallbacks(fontique::FallbackKey::new("Hani", None), fonts.iter().map(|x| x.0));
+    ///     // ...
+    /// }
+    /// ```
+    pub fn shared_collection() -> fontique::Collection {
+        i_slint_common::sharedfontique::COLLECTION.inner.clone()
+    }
 }
