@@ -10,17 +10,19 @@ project(Slint HOMEPAGE_URL "https://slint.dev/" LANGUAGES C CXX VERSION 1.17.0)
 include(FeatureSummary)
 include(CMakeDependentOption)
 
-find_package(Corrosion QUIET 0.6)
-if (NOT Corrosion_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-        Corrosion
-        GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
-        GIT_TAG v0.6.1
-    )
-
-    FetchContent_MakeAvailable(Corrosion)
-endif ()
+# For LibrePCB we don't want to download Corrosion through CMake to avoid
+# deployment issues, and because LibrePCB already ships Corrosion anyway.
+#find_package(Corrosion QUIET 0.5)
+#if (NOT Corrosion_FOUND)
+#    include(FetchContent)
+#    FetchContent_Declare(
+#        Corrosion
+#        GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
+#        GIT_TAG v0.6.0
+#    )
+#
+#    FetchContent_MakeAvailable(Corrosion)
+#endif (NOT Corrosion_FOUND)
 
 list(PREPEND CMAKE_MODULE_PATH ${Corrosion_SOURCE_DIR}/cmake)
 find_package(Rust 1.92 REQUIRED MODULE)
@@ -155,15 +157,15 @@ if (SLINT_BUILD_RUNTIME)
         set(slint_compiler_crate "slint-compiler")
     endif()
 
-    if(BUILD_SHARED_LIBS)
+    #if(BUILD_SHARED_LIBS)
         set(rustc_lib_type "cdylib")
         set(slint_cpp_impl "slint_cpp-shared")
         set(cmake_lib_type "SHARED")
-    else()
-        set(rustc_lib_type "staticlib")
-        set(slint_cpp_impl "slint_cpp-static")
-        set(cmake_lib_type "STATIC")
-    endif()
+    #else()
+    #    set(rustc_lib_type "staticlib")
+    #    set(slint_cpp_impl "slint_cpp-static")
+    #    set(cmake_lib_type "STATIC")
+    #endif()
 
     corrosion_import_crate(MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../Cargo.toml"
         CRATES slint-cpp ${slint_compiler_crate} CRATE_TYPES bin ${rustc_lib_type})
@@ -483,19 +485,19 @@ if (SLINT_BUILD_RUNTIME)
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/SlintMacro.cmake)
     endif()
 
-    export(TARGETS Slint slint_cpp
-        NAMESPACE Slint:: FILE "${CMAKE_BINARY_DIR}/lib/cmake/Slint/SlintTargets.cmake")
-    install(EXPORT SlintTargets NAMESPACE Slint:: DESTINATION lib/cmake/Slint)
-    install(TARGETS Slint slint_cpp
-        EXPORT SlintTargets LIBRARY DESTINATION lib PUBLIC_HEADER DESTINATION include/slint)
-    install(DIRECTORY include/private DESTINATION include/slint FILES_MATCHING PATTERN "*.h")
-    install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated_include/private DESTINATION include/slint FILES_MATCHING PATTERN "*.h")
+    #export(TARGETS Slint slint_cpp
+    #    NAMESPACE Slint:: FILE "${CMAKE_BINARY_DIR}/lib/cmake/Slint/SlintTargets.cmake")
+    #install(EXPORT SlintTargets NAMESPACE Slint:: DESTINATION lib/cmake/Slint)
+    #install(TARGETS Slint slint_cpp
+    #    EXPORT SlintTargets LIBRARY DESTINATION lib PUBLIC_HEADER DESTINATION include/slint)
+    #install(DIRECTORY include/private DESTINATION include/slint FILES_MATCHING PATTERN "*.h")
+    #install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated_include/private DESTINATION include/slint FILES_MATCHING PATTERN "*.h")
 
     install(FILES $<TARGET_FILE:${slint_cpp_impl}> TYPE LIB)
 
-    if(WIN32)
-        install(FILES $<TARGET_LINKER_FILE:${slint_cpp_impl}> TYPE LIB)
-    endif()
+    #if(WIN32)
+    #    install(FILES $<TARGET_LINKER_FILE:${slint_cpp_impl}> TYPE LIB)
+    #endif()
 
 endif(SLINT_BUILD_RUNTIME)
 
@@ -503,9 +505,9 @@ include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
 
-if(SLINT_FEATURE_COMPILER AND NOT SLINT_COMPILER)
-    install(PROGRAMS $<TARGET_FILE:slint-compiler> TYPE BIN)
-endif()
+#if(SLINT_FEATURE_COMPILER AND NOT SLINT_COMPILER)
+#    install(PROGRAMS $<TARGET_FILE:slint-compiler> TYPE BIN)
+#endif()
 
 if(SLINT_BUILD_RUNTIME)
 
@@ -554,12 +556,12 @@ if(SLINT_BUILD_RUNTIME)
         COMPATIBILITY SameMajorVersion
     )
 
-    install(FILES
-        "${CMAKE_CURRENT_BINARY_DIR}/lib/cmake/Slint/SlintConfig.cmake"
-        "${CMAKE_CURRENT_BINARY_DIR}/lib/cmake/Slint/SlintConfigVersion.cmake"
-        "${CMAKE_CURRENT_LIST_DIR}/cmake/SlintMacro.cmake"
-        DESTINATION lib/cmake/Slint
-    )
+    #install(FILES
+    #    "${CMAKE_CURRENT_BINARY_DIR}/lib/cmake/Slint/SlintConfig.cmake"
+    #    "${CMAKE_CURRENT_BINARY_DIR}/lib/cmake/Slint/SlintConfigVersion.cmake"
+    #    "${CMAKE_CURRENT_LIST_DIR}/cmake/SlintMacro.cmake"
+    #    DESTINATION lib/cmake/Slint
+    #)
 
 endif(SLINT_BUILD_RUNTIME)
 
