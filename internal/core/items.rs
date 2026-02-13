@@ -144,11 +144,17 @@ pub struct ItemVTable {
     /// Then, depending on the return value, it is called for the children, and their children, then
     /// [`Self::input_event`] is called on the children, and finally [`Self::input_event`] is called
     /// on this item again.
+    ///
+    /// The `cursor` argument needs to be changed by either this function ot the `input_event` function
+    /// if this item wants to change the cursor.
+    /// The value of `cursor` is always reset to `MouseCursor::Default` before dispatching the event,
+    /// so any call to this function need to set the cursor
     pub input_event_filter_before_children: extern "C" fn(
         core::pin::Pin<VRef<ItemVTable>>,
         &MouseEvent,
         window_adapter: &WindowAdapterRc,
         self_rc: &ItemRc,
+        cursor: &mut MouseCursor,
     ) -> InputEventFilterResult,
 
     /// Handle input event for mouse and touch event
@@ -157,6 +163,7 @@ pub struct ItemVTable {
         &MouseEvent,
         window_adapter: &WindowAdapterRc,
         self_rc: &ItemRc,
+        cursor: &mut MouseCursor,
     ) -> InputEventResult,
 
     pub focus_event: extern "C" fn(
@@ -228,6 +235,7 @@ impl Item for Empty {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -237,6 +245,7 @@ impl Item for Empty {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -329,6 +338,7 @@ impl Item for Rectangle {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -338,6 +348,7 @@ impl Item for Rectangle {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -439,6 +450,7 @@ impl Item for BasicBorderRectangle {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -448,6 +460,7 @@ impl Item for BasicBorderRectangle {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -562,6 +575,7 @@ impl Item for BorderRectangle {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -571,6 +585,7 @@ impl Item for BorderRectangle {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -700,6 +715,7 @@ impl Item for Clip {
         event: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         if let Some(pos) = event.position() {
             let geometry = self_rc.geometry();
@@ -720,6 +736,7 @@ impl Item for Clip {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -821,6 +838,7 @@ impl Item for Opacity {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -830,6 +848,7 @@ impl Item for Opacity {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -948,6 +967,7 @@ impl Item for Layer {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -957,6 +977,7 @@ impl Item for Layer {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -1052,6 +1073,7 @@ impl Item for Transform {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -1061,6 +1083,7 @@ impl Item for Transform {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -1223,6 +1246,7 @@ impl Item for WindowItem {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -1232,6 +1256,7 @@ impl Item for WindowItem {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -1448,6 +1473,7 @@ impl Item for ContextMenu {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardEvent
     }
@@ -1457,6 +1483,7 @@ impl Item for ContextMenu {
         event: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         if !self.enabled() {
             return InputEventResult::EventIgnored;
@@ -1646,6 +1673,7 @@ impl Item for BoxShadow {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -1655,6 +1683,7 @@ impl Item for BoxShadow {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
