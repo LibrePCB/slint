@@ -16,7 +16,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use i_slint_core::SlintContext;
+pub use i_slint_core::SlintContext;
 use i_slint_core::platform::Platform;
 use i_slint_core::platform::PlatformError;
 
@@ -108,10 +108,10 @@ cfg_if::cfg_if! {
                     }
                     return builder.build().map(|b| Box::new(b) as Box<dyn Platform + 'static>)
                 },
-                //#[cfg(feature = "i-slint-backend-testing")]
-                //"testing" => return Ok(Box::new(i_slint_backend_testing::TestingBackend::new(
-                //    i_slint_backend_testing::TestingBackendOptions { mock_time: false, threading: true },
-                //))),
+                #[cfg(feature = "backend-testing")]
+                "testing" => return Ok(Box::new(i_slint_backend_testing::TestingBackend::new(
+                    i_slint_backend_testing::TestingBackendOptions { mock_time: false, threading: true },
+                ))),
                 _ => {},
             }
 

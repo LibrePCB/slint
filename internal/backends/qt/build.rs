@@ -42,18 +42,11 @@ fn main() {
     config.flag_if_supported("/std:c++17");
     // Workaround QTBUG-123153
     config.flag_if_supported("-Wno-template-id-cdtor");
-
-    // On some systems, the header GL/gl.h is not in the compilers default include path,
-    // which makes the build fail due to this header not beeing found. Thus we pass
-    // the corresponding include paths explicitly. Note that this has been tested only
-    // on FreeBSD so far, the other paths are not verified yet.
-    #[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
-    config.include("/usr/local/include");
-    #[cfg(target_os = "openbsd")]
-    config.include("/usr/X11R6/include");
-    #[cfg(target_os = "netbsd")]
-    config.include("/usr/pkg/include");
-
+    // On some systems, the header GL/gl.h (included by some Qt headers) is not
+    // in the compilers default include path, which makes the build fail due to
+    // this header not beeing found. As we don't need OpenGL, we explicitly
+    // disable it with this define. See issue #10989.
+    config.define("QT_NO_OPENGL", None);
     config.include(std::env::var("DEP_QT_INCLUDE_PATH").unwrap()).build("lib.rs");
 
     println!("cargo:rerun-if-changed=lib.rs");

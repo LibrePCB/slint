@@ -31,7 +31,8 @@ pub extern "C" fn slint_get_mocked_time() -> u64 {
     crate::animations::CURRENT_ANIMATION_DRIVER.with(|driver| driver.current_tick()).as_millis()
 }
 
-/// Simulate a click on a position within the component.
+/// Simulate a click on a position within the component and releasing after some time.
+/// The time until the release is hardcoded to 50ms
 #[unsafe(no_mangle)]
 pub extern "C" fn slint_send_mouse_click(
     x: f32,
@@ -47,7 +48,29 @@ pub extern "C" fn slint_send_mouse_click(
     window_adapter.window().dispatch_event(WindowEvent::PointerReleased { position, button });
 }
 
+/// Simulate a single key event with the given text (pressed or released).
+///
+/// Unlike [`slint_send_keyboard_char`], this dispatches a single [`WindowEvent`]
+/// with the complete text. This is important for multi-codepoint grapheme clusters
+/// (e.g. NFD-encoded `é` = `e` + `\u{0301}`).
+#[unsafe(no_mangle)]
+pub extern "C" fn slint_send_keyboard_key_text(
+    text: &crate::SharedString,
+    pressed: bool,
+    window_adapter: &crate::window::WindowAdapterRc,
+) {
+    window_adapter.window().dispatch_event(if pressed {
+        WindowEvent::KeyPressed { text: text.clone() }
+    } else {
+        WindowEvent::KeyReleased { text: text.clone() }
+    })
+}
+
 /// Simulate a character input event (pressed or released).
+///
+/// Each character in the string is dispatched as a separate [`WindowEvent`].
+/// This is useful for modifier keys where each special character code
+/// represents an independent key press.
 #[unsafe(no_mangle)]
 pub extern "C" fn slint_send_keyboard_char(
     string: &crate::SharedString,
@@ -55,11 +78,7 @@ pub extern "C" fn slint_send_keyboard_char(
     window_adapter: &crate::window::WindowAdapterRc,
 ) {
     for ch in string.chars() {
-        window_adapter.window().dispatch_event(if pressed {
-            WindowEvent::KeyPressed { text: ch.into() }
-        } else {
-            WindowEvent::KeyReleased { text: ch.into() }
-        })
+        slint_send_keyboard_key_text(&ch.into(), pressed, window_adapter);
     }
 }
 

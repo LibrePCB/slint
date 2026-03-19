@@ -2,74 +2,121 @@
 # Changelog
 All notable changes to this project are documented in this file.
 
-## [1.15.0] - Unreleased
+## [1.16.0] - Unreleased
 
 ### General
 
- - Adjust Android implementation of the window safe area to match the iOS implementation. This is a breaking change!
- - When resizing the window, try to keep the focus item visible if it's in a Flickable.
- - When focusing an element that's not fully visible, try to scroll a parent Flickable so that it is.
- - winit: Do not enable the x11/wayland feature through accessibility feature
- - Skia: Fixed colorized tile rendering (#9860)
- - partial renderer: Fixed `BorrowMutError` panic if items gets destroyed during rendering (#9882)
- - software renderer: Support for Path (with `std`)
- - linuxkms: Added support for FB Renderer Format DrmFourcc(BA24) in LinuxKMS (#9862)
- - Fixed rendering of clipped layer (#10037)
- - Change diagnostics to in use the `annotate-snippets` crate
- - Diagnostics now report range instead of just a position
- - Translations: allow to opt out of default context
- - Fixed debug performance overlay not working (#10198)
- - Qt backend: worked around leak in Plasma when setting a window icon.
+ - SoftwareRenderer: avoid doing dirty-region computation when we need to redraw the whole buffer
 
-### Slint Language
+### Slint
 
- - Added ability to have two way binding to struct fields
- - Added four new properties to the Window element for exposing the safe area to Slint.
- - Added the `accessible-id` property
- - Added `AccessibleRole.radio-button`
- - Added `stroke-line-join` for Path (#9912)
- - Added `from <angle>` syntax to `@conic-gradient`
- - `row`, `col`, `colspan`, and `rowspan` properties can now be changed at runtime
- - Support for `if` and `for` in `GridLayout`
- - New `StyledText` element for displaying rich text, as well as `styled-text` type
- - Fixed missing dependency detection on `Image.source-clip`
+ - Fixed empty GridLayout not taking padding into account
+ - Added `keyboard-shortcut` type and `@keys(...)` macro
+ - Added printer charachter in the `Key` namespace
 
 ### Widgets
 
- - ScrollView: In fluent style, fixed scroll bars to adjust to each other's visibility
- - Slider: Implemented increment, decrement and set-value accessibility actions on Slider (#9975)
- - Slider: Inverted vertical slider direction
- - Fixed some widgets that could still be edited when disabled or read-only
- - SpinBox: added `read-only` property
- - TabWidget: added `orientation` property (#3688)
- - TextEdit and LineEdit: Added `font-family` and `font-italic` properties
+ - CheckBox no longer intercepts the scroll event with the Qt style
 
 ### Rust
 
- - Added `slint::fontique` module, guarded with `unstable-fontique-07` feature, to provide access
-   to fontique collection types for registering custom fonts at run-time.
- - Added `slint::language::ColorScheme`
- - In live preview mode, fixed panic when custom Model access the component's property (#10278)
+ - Added `slint::platform::femtovg_renderer::FemtoVGWGPURenderer`
+ - Added variants for printable keys in the `slint::platform::Key` enum
 
 ### C++
 
- - Fixed crash when binding is accessing a deleted parent (#3464)
- - Fixed mingw-llvm builds
- - Fixed build generation failing when compiling multiple .slint files
- - Fixed binary incompatibility with freestanding build (#10077)
- - It's now possible to access platform native window handles, like a HWND.
+ - Added contant for printable keys in the `slint::platform::key_codes` namespace
+
+## [1.15.1] - 2026-02-12
+
+ - Fixed text rendering eliding when not required or not showing text due to rounding differences.
+ - `GridLayout`: Honor colspan and rowspan in repeated rows. (#10727)
+ - Rust: Fix cross-compilation when the target environment doens't provide a host fontconfig via pkg-config.
+ - Interpreter: Fix two way bindings with properties in a parent scope. (#10704)
+ - Winit: Fixed the "redo" (Ctrl+Shift+Z) shortcut.
+ - Qt backend: Fixed blurry svg rendering with a scale factor. (#10726)
+ - live-preview: Properly close the preview when the LSP exits instead of killing the process.
+ - LSP: Fixed error when the loaded file is deleted on disk.
+
+## [1.15.0] - 2026-02-04
+
+### General
+
+ - **breaking change**: Adjust Android implementation of the window safe area to match the iOS implementation.
+ - When resizing the window, try to keep the focus item visible if it's in a `Flickable`.
+ - When focusing an element that's not fully visible, try to scroll a parent `Flickable` so that it is.
+ - winit backend: Do not enable the x11/wayland feature through accessibility feature.
+ - Skia: Fixed colorized tile rendering. (#9860)
+ - partial renderer: Fixed `BorrowMutError` panic if items gets destroyed during rendering. (#9882)
+ - software renderer: Added support for the `Path` element (not supported in `no_std` or freestanding).
+ - Fixed rendering of clipped layers. (#10037)
+ - slint-compiler: Change diagnostics to use the `annotate-snippets` crate.
+ - slint-compiler: Diagnostics now report range instead of just a position.
+ - Translations: allow to opt out of default context.
+ - Fixed debug performance overlay not working. (#10198)
+ - Qt backend: worked around leak in Plasma when setting a window icon.
+ - Fixed flicking animation in ListView. (#7043)
+ - Align text and image rendering to pixel boundaries.
+
+### Slint Language
+
+ - Added support for two way bindings to struct fields.
+ - Added four new properties to the Window element for exposing the safe area to Slint.
+ - Added the `accessible-id` property.
+ - Added `AccessibleRole.radio-button`.
+ - Added `stroke-line-join` for Path. (#9912)
+ - Added `from <angle>` syntax to `@conic-gradient`.
+ - `GridLayout`: `row`, `col`, `colspan`, and `rowspan` properties can now be changed at runtime.
+ - `GridLayout`: Support for `if` and `for`.
+ - Fixed missing dependency detection on `Image.source-clip`.
+ - Accessing properties within `Menu` from the outside is now a compile error instead of a panic. (#9443)
+ - Added `Colors.oklch()` and `.to-oklch()` functions.
+ - Fixed reactivity of animated bindings. (#348)
+ - Add warning about non-top-level `Window` usage.
+
+### Widgets
+
+ - `ScrollView`: In fluent style, fixed scroll bars to adjust to each other's visibility.
+ - `Slider`: Implemented `increment`, `decrement` and `set-value` accessibility actions on Slider. (#9975)
+ - `Slider`: Inverted vertical slider direction.
+ - Fixed menu item spacing in fluent style (#10484)
+ - Fixed some widgets that could still be edited when disabled or read-only.
+ - `SpinBox`: added `read-only` property
+ - `TabWidget`: added `orientation` property (#3688)
+ - `TextEdit` and `LineEdit`: Added `font-family` and `font-italic` properties
+
+### Rust
+
+ - Added `slint::fontique_07` module, guarded with `unstable-fontique-07` feature, to provide access
+   to fontique collection types for registering custom fonts at run-time.
+ - Added `slint::language::ColorScheme`.
+ - In live preview mode, fixed panic when custom models access the component's property. (#10278)
+ - Relaxed bounds on associated functions in `slint::SortModel`.
+ - Don't generate full code for `slint!` macro when ran under rust-analyzer.
+ - Updated to WGPU 28 and drop WGPU 26.
+
+### C++
+
+ - Fixed crash when binding is accessing a deleted parent. (#3464)
+ - Fixed mingw-llvm builds.
+ - Fixed build generation failing when compiling multiple .slint files.
+ - Fixed crashes with freestanding builds. (#10077)
+ - It's now possible to access platform native window handles, like a HWND on Windows.
 
 ### Python
 
- - Fixed support for underscores in async callback decorators (#10024)
- - slint-compiler: added support for generating Python stubs (#4136)
+ - Fixed support for underscores in async callback decorators. (#10024)
+ - slint-compiler: added support for generating Python stubs. (#4136)
 
 ### Tools:
 
- - LSP: Fixed column position of non-acii for UTF16-based editor (#5669)
- - LSP: Fixed `vscode-remote://` url
- - tr-extractor: Make the paths argument required (#10156)
- - Added gdb pretty printer for `SharedVector` and `Slice`
+ - LSP: Fixed column position of non-acii for UTF16-based editor. (#5669)
+ - LSP: Fixed `vscode-remote://` url.
+ - LSP: Added support for `@conic-gradient` completion. (#10444)
+ - LSP: Fixed reloading dependencies when file changes on disk.
+ - LSP: add function argument name when auto-complete function call. (#10560)
+ - tr-extractor: Make the paths argument required. (#10156)
+ - Added gdb pretty printer for `SharedVector` and `Slice`.
 
 ## [1.14.1] - 2025-10-23
 
@@ -2190,3 +2237,6 @@ as well as the [Rust migration guide for the `sixtyfps` crate](api/rs/slint/migr
 [1.12.1]: https://github.com/slint-ui/slint/releases/tag/v1.12.1
 [1.13.0]: https://github.com/slint-ui/slint/releases/tag/v1.13.0
 [1.13.1]: https://github.com/slint-ui/slint/releases/tag/v1.13.1
+[1.14.0]: https://github.com/slint-ui/slint/releases/tag/v1.14.0
+[1.14.1]: https://github.com/slint-ui/slint/releases/tag/v1.14.1
+[1.15.0]: https://github.com/slint-ui/slint/releases/tag/v1.15.0

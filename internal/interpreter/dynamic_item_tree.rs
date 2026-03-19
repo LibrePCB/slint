@@ -14,8 +14,9 @@ use i_slint_compiler::{diagnostics::BuildDiagnostics, object_tree::PropertyDecla
 use i_slint_core::accessibility::{
     AccessibilityAction, AccessibleStringProperty, SupportedAccessibilityAction,
 };
-use i_slint_core::api::{LogicalPosition, StyledText};
+use i_slint_core::api::LogicalPosition;
 use i_slint_core::component_factory::ComponentFactory;
+use i_slint_core::input::KeyboardShortcut;
 use i_slint_core::item_tree::{
     IndexRange, ItemRc, ItemTree, ItemTreeNode, ItemTreeRef, ItemTreeRefPin, ItemTreeVTable,
     ItemTreeWeak, ItemVisitorRefMut, ItemVisitorVTable, ItemWeak, TraversalOrder,
@@ -32,6 +33,7 @@ use i_slint_core::platform::PlatformError;
 use i_slint_core::properties::{ChangeTracker, InterpolatedPropertyValue};
 use i_slint_core::rtti::{self, AnimatedBindingKind, FieldOffset, PropertyInfo};
 use i_slint_core::slice::Slice;
+use i_slint_core::styled_text::StyledText;
 use i_slint_core::timers::Timer;
 use i_slint_core::window::{WindowAdapterRc, WindowInner};
 use i_slint_core::{Brush, Color, Property, SharedString, SharedVector};
@@ -131,7 +133,7 @@ impl RepeatedItemTree for ErasedItemTreeBox {
     fn update(&self, index: usize, data: Self::Data) {
         generativity::make_guard!(guard);
         let s = self.unerase(guard);
-        let is_repeated = s.description.original.parent_element.upgrade().is_some_and(|p| {
+        let is_repeated = s.description.original.parent_element().is_some_and(|p| {
             p.borrow().repeated.as_ref().is_some_and(|r| !r.is_conditional_element)
         });
         if is_repeated {
@@ -171,7 +173,37 @@ impl RepeatedItemTree for ErasedItemTreeBox {
         LogicalLength::new(self.borrow().as_ref().layout_info(Orientation::Horizontal).min)
     }
 
-    fn layout_item_info(self: Pin<&Self>, o: Orientation) -> LayoutItemInfo {
+    fn layout_item_info(
+        self: Pin<&Self>,
+        o: Orientation,
+        child_index: Option<usize>,
+    ) -> LayoutItemInfo {
+        generativity::make_guard!(guard);
+        let s = self.unerase(guard);
+
+        if let Some(index) = child_index {
+            let instance_ref = s.borrow_instance();
+            let root_element = &s.description.original.root_element;
+
+            let children = root_element.borrow().children.clone();
+            if let Some(child_elem) = children.get(index) {
+                // Get the layout info for this child element
+                let layout_info = crate::eval_layout::get_layout_info(
+                    child_elem,
+                    instance_ref,
+                    &instance_ref.window_adapter(),
+                    crate::eval_layout::from_runtime(o),
+                );
+                return LayoutItemInfo { constraint: layout_info };
+            } else {
+                panic!(
+                    "child_index {} out of bounds for repeated item {}",
+                    index,
+                    s.description().id()
+                );
+            }
+        }
+
         LayoutItemInfo { constraint: self.borrow().as_ref().layout_info(o) }
     }
 }
@@ -273,13 +305,21 @@ impl Drop for ErasedItemTreeBox {
         generativity::make_guard!(guard);
         let unerase = self.unerase(guard);
         let instance_ref = unerase.borrow_instance();
-        // Do not walk out of our ItemTree here:
-        if let Some(window_adapter) = instance_ref.maybe_window_adapter() {
+
+        let maybe_window_adapter = instance_ref
+            .description
+            .extra_data_offset
+            .apply(instance_ref.as_ref())
+            .globals
+            .get()
+            .and_then(|globals| globals.window_adapter())
+            .and_then(|wa| wa.get());
+        if let Some(window_adapter) = maybe_window_adapter {
             i_slint_core::item_tree::unregister_item_tree(
                 instance_ref.instance,
                 vtable::VRef::new(self),
                 instance_ref.description.item_array.as_slice(),
-                &window_adapter,
+                window_adapter,
             );
         }
     }
@@ -384,8 +424,6 @@ pub struct ItemTreeDescription<'id> {
     pub(crate) parent_item_tree_offset:
         Option<FieldOffset<Instance<'id>, OnceCell<ErasedItemTreeBoxWeak>>>,
     pub(crate) root_offset: FieldOffset<Instance<'id>, OnceCell<ErasedItemTreeBoxWeak>>,
-    /// Offset to the window reference
-    pub(crate) window_adapter_offset: FieldOffset<Instance<'id>, OnceCell<WindowAdapterRc>>,
     /// Offset of a ComponentExtraData
     pub(crate) extra_data_offset: FieldOffset<Instance<'id>, ComponentExtraData>,
     /// Keep the Rc alive
@@ -761,18 +799,20 @@ fn ensure_repeater_updated<'id>(
 ) {
     let repeater = rep_in_comp.offset.apply_pin(instance_ref.instance);
     let init = || {
+        let extra_data = instance_ref.description.extra_data_offset.apply(instance_ref.as_ref());
         instantiate(
             rep_in_comp.item_tree_to_repeat.clone(),
             instance_ref.self_weak().get().cloned(),
             None,
             None,
-            Default::default(),
+            extra_data.globals.get().unwrap().clone(),
         )
     };
     if let Some(lv) = &rep_in_comp
         .item_tree_to_repeat
         .original
         .parent_element
+        .borrow()
         .upgrade()
         .unwrap()
         .borrow()
@@ -994,7 +1034,9 @@ fn generate_rtti() -> HashMap<&'static str, Rc<ItemRTTI>> {
             rtti_for::<BorderRectangle>(),
             rtti_for::<TouchArea>(),
             rtti_for::<FocusScope>(),
+            rtti_for::<Shortcut>(),
             rtti_for::<SwipeGestureHandler>(),
+            rtti_for::<PinchGestureHandler>(),
             rtti_for::<Path>(),
             rtti_for::<Flickable>(),
             rtti_for::<WindowItem>(),
@@ -1260,6 +1302,7 @@ pub(crate) fn generate_item_tree<'id>(
                     i_slint_common::for_each_enums!(match_enum_type)
                 }
             }
+            Type::KeyboardShortcutType => property_info::<KeyboardShortcut>(),
             Type::LayoutCache => property_info::<SharedVector<f32>>(),
             Type::ArrayOfU16 => property_info::<SharedVector<u16>>(),
             Type::Function { .. } | Type::Callback { .. } => return None,
@@ -1293,7 +1336,7 @@ pub(crate) fn generate_item_tree<'id>(
             PropertiesWithinComponent { offset: builder.type_builder.add_field(type_info), prop },
         );
     }
-    if let Some(parent_element) = component.parent_element.upgrade()
+    if let Some(parent_element) = component.parent_element()
         && let Some(r) = &parent_element.borrow().repeated
         && !r.is_conditional_element
     {
@@ -1303,8 +1346,10 @@ pub(crate) fn generate_item_tree<'id>(
             PropertiesWithinComponent { offset: builder.type_builder.add_field(type_info), prop },
         );
 
-        let model_ty =
-            Expression::RepeaterModelReference { element: component.parent_element.clone() }.ty();
+        let model_ty = Expression::RepeaterModelReference {
+            element: component.parent_element.borrow().clone(),
+        }
+        .ty();
         let (prop, type_info) =
             property_info_for_type(&model_ty, SPECIAL_PROPERTY_MODEL_DATA).unwrap();
         custom_properties.insert(
@@ -1313,17 +1358,13 @@ pub(crate) fn generate_item_tree<'id>(
         );
     }
 
-    let parent_item_tree_offset =
-        if component.parent_element.upgrade().is_some() || is_popup_menu_impl {
-            Some(builder.type_builder.add_field_type::<OnceCell<ErasedItemTreeBoxWeak>>())
-        } else {
-            None
-        };
+    let parent_item_tree_offset = if component.parent_element().is_some() || is_popup_menu_impl {
+        Some(builder.type_builder.add_field_type::<OnceCell<ErasedItemTreeBoxWeak>>())
+    } else {
+        None
+    };
 
     let root_offset = builder.type_builder.add_field_type::<OnceCell<ErasedItemTreeBoxWeak>>();
-
-    let window_adapter_offset = builder.type_builder.add_field_type::<OnceCell<WindowAdapterRc>>();
-
     let extra_data_offset = builder.type_builder.add_field_type::<ComponentExtraData>();
 
     let change_trackers = (!builder.change_callbacks.is_empty()).then(|| {
@@ -1340,7 +1381,7 @@ pub(crate) fn generate_item_tree<'id>(
         .collect();
 
     // only the public exported component needs the public property list
-    let public_properties = if component.parent_element.upgrade().is_none() {
+    let public_properties = if component.parent_element().is_none() {
         component.root_element.borrow().property_declarations.clone()
     } else {
         Default::default()
@@ -1380,7 +1421,6 @@ pub(crate) fn generate_item_tree<'id>(
         repeater_names: builder.repeater_names,
         parent_item_tree_offset,
         root_offset,
-        window_adapter_offset,
         extra_data_offset,
         public_properties,
         compiled_globals,
@@ -1406,10 +1446,28 @@ pub fn animation_for_property(
 ) -> AnimatedBindingKind {
     match animation {
         Some(i_slint_compiler::object_tree::PropertyAnimation::Static(anim_elem)) => {
-            AnimatedBindingKind::Animation(eval::new_struct_with_bindings(
-                &anim_elem.borrow().bindings,
-                &mut eval::EvalLocalContext::from_component_instance(component),
-            ))
+            AnimatedBindingKind::Animation(Box::new({
+                let component_ptr = component.as_ptr();
+                let vtable = NonNull::from(&component.description.ct).cast();
+                let anim_elem = Rc::clone(anim_elem);
+                move || -> PropertyAnimation {
+                    generativity::make_guard!(guard);
+                    let component = unsafe {
+                        InstanceRef::from_pin_ref(
+                            Pin::new_unchecked(vtable::VRef::from_raw(
+                                vtable,
+                                NonNull::new_unchecked(component_ptr as *mut u8),
+                            )),
+                            guard,
+                        )
+                    };
+
+                    eval::new_struct_with_bindings(
+                        &anim_elem.borrow().bindings,
+                        &mut eval::EvalLocalContext::from_component_instance(component),
+                    )
+                }
+            }))
         }
         Some(i_slint_compiler::object_tree::PropertyAnimation::Transition {
             animations,
@@ -1498,7 +1556,7 @@ pub fn instantiate(
     parent_ctx: Option<ErasedItemTreeBoxWeak>,
     root: Option<ErasedItemTreeBoxWeak>,
     window_options: Option<&WindowOptions>,
-    mut globals: crate::global_component::GlobalStorage,
+    globals: crate::global_component::GlobalStorage,
 ) -> DynamicComponentVRc {
     let instance = description.dynamic_type.clone().create_instance();
 
@@ -1513,6 +1571,12 @@ pub fn instantiate(
     instance_ref.self_weak().set(self_weak.clone()).ok();
     let description = comp.description();
 
+    if let Some(WindowOptions::UseExistingWindow(existing_adapter)) = &window_options
+        && let Err((a, b)) = globals.window_adapter().unwrap().try_insert(existing_adapter.clone())
+    {
+        assert!(Rc::ptr_eq(a, &b), "window not the same as parent window");
+    }
+
     if let Some(parent) = parent_ctx {
         description
             .parent_item_tree_offset
@@ -1521,16 +1585,13 @@ pub fn instantiate(
             .set(parent)
             .ok()
             .unwrap();
-    } else {
-        if let Some(g) = description.compiled_globals.as_ref() {
-            for g in g.compiled_globals.iter() {
-                crate::global_component::instantiate(g, &mut globals, self_weak.clone());
-            }
+    } else if let Some(g) = description.compiled_globals.as_ref() {
+        for g in g.compiled_globals.iter() {
+            crate::global_component::instantiate(g, &globals, self_weak.clone());
         }
-        let extra_data = description.extra_data_offset.apply(instance_ref.as_ref());
-        extra_data.globals.set(globals).ok().unwrap();
     }
-
+    let extra_data = description.extra_data_offset.apply(instance_ref.as_ref());
+    extra_data.globals.set(globals).ok().unwrap();
     if let Some(WindowOptions::Embed { parent_item_tree, parent_item_tree_index }) = window_options
     {
         vtable::VRc::borrow_pin(&self_rc)
@@ -1557,15 +1618,6 @@ pub fn instantiate(
 
         let component_rc = vtable::VRc::into_dyn(self_rc.clone());
         i_slint_core::item_tree::register_item_tree(&component_rc, maybe_window_adapter);
-    }
-
-    if let Some(WindowOptions::UseExistingWindow(existing_adapter)) = &window_options {
-        description
-            .window_adapter_offset
-            .apply(instance_ref.as_ref())
-            .set(existing_adapter.clone())
-            .ok()
-            .unwrap();
     }
 
     // Some properties are generated as Value, but for which the default constructed Value must be initialized
@@ -1803,7 +1855,8 @@ fn prepare_for_two_way_binding(
             if element.id == element.enclosing_component.upgrade().unwrap().root_element.borrow().id
                 && let Some(x) = enclosing_component.description.custom_properties.get(name)
             {
-                let item = unsafe { Pin::new_unchecked(&*instance_ref.as_ptr().add(x.offset)) };
+                let item =
+                    unsafe { Pin::new_unchecked(&*enclosing_component.as_ptr().add(x.offset)) };
                 let common = x.prop.prepare_for_two_way_binding(item);
                 return (common, map);
             }
@@ -2101,6 +2154,7 @@ unsafe extern "C" fn parent_node(component: ItemTreeRefPin, result: &mut ItemWea
                 .description
                 .original
                 .parent_element
+                .borrow()
                 .upgrade()
                 .and_then(|e| e.borrow().item_index.get().cloned())
                 .unwrap_or(u32::MAX);
@@ -2409,34 +2463,42 @@ impl<'a, 'id> InstanceRef<'a, 'id> {
         instance: &'b Instance<'id2>,
     ) -> Result<&'b WindowAdapterRc, PlatformError> {
         // We are the actual root: Generate and store a window_adapter if necessary
-        description.window_adapter_offset.apply(instance).get_or_try_init(|| {
-            let mut parent_node = ItemWeak::default();
-            if let Some(rc) = vtable::VWeak::upgrade(&root_weak) {
-                vtable::VRc::borrow_pin(&rc).as_ref().parent_node(&mut parent_node);
-            }
+        description
+            .extra_data_offset
+            .apply(instance)
+            .globals
+            .get()
+            .unwrap()
+            .window_adapter()
+            .unwrap()
+            .get_or_try_init(|| {
+                let mut parent_node = ItemWeak::default();
+                if let Some(rc) = vtable::VWeak::upgrade(&root_weak) {
+                    vtable::VRc::borrow_pin(&rc).as_ref().parent_node(&mut parent_node);
+                }
 
-            if let Some(parent) = parent_node.upgrade() {
-                // We are embedded: Get window adapter from our parent
-                let mut result = None;
-                vtable::VRc::borrow_pin(parent.item_tree())
-                    .as_ref()
-                    .window_adapter(do_create, &mut result);
-                result.ok_or(PlatformError::NoPlatform)
-            } else if do_create {
-                let extra_data = description.extra_data_offset.apply(instance);
-                let window_adapter = // We are the root: Create a window adapter
+                if let Some(parent) = parent_node.upgrade() {
+                    // We are embedded: Get window adapter from our parent
+                    let mut result = None;
+                    vtable::VRc::borrow_pin(parent.item_tree())
+                        .as_ref()
+                        .window_adapter(do_create, &mut result);
+                    result.ok_or(PlatformError::NoPlatform)
+                } else if do_create {
+                    let extra_data = description.extra_data_offset.apply(instance);
+                    let window_adapter = // We are the root: Create a window adapter
                     i_slint_backend_selector::with_platform(|_b| {
                         _b.create_window_adapter()
                     })?;
 
-                let comp_rc = extra_data.self_weak.get().unwrap().upgrade().unwrap();
-                WindowInner::from_pub(window_adapter.window())
-                    .set_component(&vtable::VRc::into_dyn(comp_rc));
-                Ok(window_adapter)
-            } else {
-                Err(PlatformError::NoPlatform)
-            }
-        })
+                    let comp_rc = extra_data.self_weak.get().unwrap().upgrade().unwrap();
+                    WindowInner::from_pub(window_adapter.window())
+                        .set_component(&vtable::VRc::into_dyn(comp_rc));
+                    Ok(window_adapter)
+                } else {
+                    Err(PlatformError::NoPlatform)
+                }
+            })
     }
 
     pub fn maybe_window_adapter(&self) -> Option<WindowAdapterRc> {
@@ -2482,22 +2544,6 @@ impl<'a, 'id> InstanceRef<'a, 'id> {
         }
         None
     }
-
-    pub fn toplevel_instance<'id2>(
-        &self,
-        _guard: generativity::Guard<'id2>,
-    ) -> InstanceRef<'a, 'id2> {
-        generativity::make_guard!(guard2);
-        if let Some(parent) = self.parent_instance(guard2) {
-            let tl = parent.toplevel_instance(_guard);
-            // assuming that the parent lives at least for lifetime 'a.
-            // FIXME: this may not be sound
-            unsafe { std::mem::transmute::<InstanceRef<'_, 'id2>, InstanceRef<'a, 'id2>>(tl) }
-        } else {
-            // Safety: casting from an id to a new id is valid
-            unsafe { std::mem::transmute::<InstanceRef<'a, 'id>, InstanceRef<'a, 'id2>>(*self) }
-        }
-    }
 }
 
 /// Show the popup at the given location
@@ -2524,12 +2570,13 @@ pub fn show_popup(
     );
     compiled.recursively_set_debug_handler(debug_handler);
 
+    let extra_data = instance.description.extra_data_offset.apply(instance.as_ref());
     let inst = instantiate(
         compiled,
         Some(parent_comp),
         None,
         Some(&WindowOptions::UseExistingWindow(parent_window_adapter.clone())),
-        Default::default(),
+        extra_data.globals.get().unwrap().clone(),
     );
     let pos = {
         generativity::make_guard!(guard);
@@ -2577,12 +2624,14 @@ pub fn make_menu_item_tree(
         guard,
     );
     let enclosing_component_weak = enclosing_component.self_weak().get().unwrap();
+    let extra_data =
+        enclosing_component.description.extra_data_offset.apply(enclosing_component.as_ref());
     let mit_inst = instantiate(
         mit_compiled.clone(),
         Some(enclosing_component_weak.clone()),
         None,
         None,
-        Default::default(),
+        extra_data.globals.get().unwrap().clone(),
     );
     mit_inst.run_setup_code();
     let item_tree = vtable::VRc::into_dyn(mit_inst);

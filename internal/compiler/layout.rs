@@ -19,31 +19,24 @@ pub enum Orientation {
     Vertical,
 }
 
+#[derive(Clone, Debug, Copy, Eq, PartialEq, Default)]
+pub enum FlexDirection {
+    /// Items are laid out in rows (horizontal primary axis)
+    #[default]
+    Row,
+    /// Items are laid out in rows in reverse order (horizontal primary axis, right to left)
+    RowReverse,
+    /// Items are laid out in columns (vertical primary axis)
+    Column,
+    /// Items are laid out in columns in reverse order (vertical primary axis, bottom to top)
+    ColumnReverse,
+}
+
 #[derive(Clone, Debug, derive_more::From)]
 pub enum Layout {
     GridLayout(GridLayout),
     BoxLayout(BoxLayout),
-}
-
-impl Layout {
-    pub fn rect(&self) -> &LayoutRect {
-        match self {
-            Layout::GridLayout(g) => &g.geometry.rect,
-            Layout::BoxLayout(g) => &g.geometry.rect,
-        }
-    }
-    pub fn rect_mut(&mut self) -> &mut LayoutRect {
-        match self {
-            Layout::GridLayout(g) => &mut g.geometry.rect,
-            Layout::BoxLayout(g) => &mut g.geometry.rect,
-        }
-    }
-    pub fn geometry(&self) -> &LayoutGeometry {
-        match self {
-            Layout::GridLayout(l) => &l.geometry,
-            Layout::BoxLayout(l) => &l.geometry,
-        }
-    }
+    FlexBoxLayout(FlexBoxLayout),
 }
 
 impl Layout {
@@ -52,6 +45,7 @@ impl Layout {
         match self {
             Layout::GridLayout(grid) => grid.visit_named_references(visitor),
             Layout::BoxLayout(l) => l.visit_named_references(visitor),
+            Layout::FlexBoxLayout(l) => l.visit_named_references(visitor),
         }
     }
 }
@@ -61,6 +55,45 @@ impl Layout {
 pub struct LayoutItem {
     pub element: ElementRc,
     pub constraints: LayoutConstraints,
+}
+
+/// A child within a repeated Row in a GridLayout.
+/// Can be either a static item or a nested repeater (`for y in model: ...`).
+#[derive(Debug, Clone)]
+pub enum RowChildTemplate {
+    Static(LayoutItem),
+    Repeated {
+        item: LayoutItem,
+        /// The repeated element (the `for y in ...` element inside the Row)
+        repeated_element: ElementRc,
+    },
+}
+
+impl RowChildTemplate {
+    pub fn layout_item(&self) -> &LayoutItem {
+        match self {
+            RowChildTemplate::Static(item) => item,
+            RowChildTemplate::Repeated { item, .. } => item,
+        }
+    }
+
+    pub fn layout_item_mut(&mut self) -> &mut LayoutItem {
+        match self {
+            RowChildTemplate::Static(item) => item,
+            RowChildTemplate::Repeated { item, .. } => item,
+        }
+    }
+
+    pub fn repeated_element(&self) -> Option<&ElementRc> {
+        match self {
+            RowChildTemplate::Static(_) => None,
+            RowChildTemplate::Repeated { repeated_element, .. } => Some(repeated_element),
+        }
+    }
+
+    pub fn is_repeated(&self) -> bool {
+        self.repeated_element().is_some()
+    }
 }
 
 impl LayoutItem {
@@ -289,12 +322,35 @@ pub struct GridLayoutCell {
     pub row_expr: RowColExpr,
     pub colspan_expr: RowColExpr,
     pub rowspan_expr: RowColExpr,
+    pub child_items: Option<Vec<RowChildTemplate>>, // for repeated rows
+}
+
+impl GridLayoutCell {
+    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+        if let RowColExpr::Named(ref mut e) = self.col_expr {
+            visitor(e);
+        }
+        if let RowColExpr::Named(ref mut e) = self.row_expr {
+            visitor(e);
+        }
+        if let RowColExpr::Named(ref mut e) = self.colspan_expr {
+            visitor(e);
+        }
+        if let RowColExpr::Named(ref mut e) = self.rowspan_expr {
+            visitor(e);
+        }
+        if let Some(children) = &mut self.child_items {
+            for child in children {
+                child.layout_item_mut().constraints.visit_named_references(visitor);
+            }
+        }
+    }
 }
 
 /// An element in a GridLayout
 #[derive(Debug, Clone)]
 pub struct GridLayoutElement {
-    // Rc<RefCell<GridLayoutCell>> because shared with the repeated component's element
+    /// `Rc<RefCell<GridLayoutCell>>` because shared with the repeated component's element
     pub cell: Rc<RefCell<GridLayoutCell>>,
     pub item: LayoutItem,
 }
@@ -501,8 +557,13 @@ impl GridLayout {
 
     pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
         self.visit_rowcol_named_references(visitor);
-        for cell in &mut self.elems {
-            cell.item.constraints.visit_named_references(visitor);
+        for layout_elem in &mut self.elems {
+            layout_elem.item.constraints.visit_named_references(visitor);
+            if let Some(child_items) = &mut layout_elem.cell.borrow_mut().child_items {
+                for child in child_items {
+                    child.layout_item_mut().constraints.visit_named_references(visitor);
+                }
+            }
         }
         self.geometry.visit_named_references(visitor);
     }
@@ -518,11 +579,43 @@ pub struct BoxLayout {
 }
 
 impl BoxLayout {
-    fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
         for cell in &mut self.elems {
             cell.constraints.visit_named_references(visitor);
         }
         self.geometry.visit_named_references(visitor);
+    }
+}
+
+/// Internal representation of a FlexBoxLayout (row or column direction with wrapping)
+#[derive(Debug, Clone)]
+pub struct FlexBoxLayout {
+    pub elems: Vec<LayoutItem>,
+    pub geometry: LayoutGeometry,
+    pub direction: Option<NamedReference>,
+    pub align_content: Option<NamedReference>,
+    pub align_items: Option<NamedReference>,
+    pub flex_wrap: Option<NamedReference>,
+}
+
+impl FlexBoxLayout {
+    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+        for cell in &mut self.elems {
+            cell.constraints.visit_named_references(visitor);
+        }
+        self.geometry.visit_named_references(visitor);
+        if let Some(e) = self.direction.as_mut() {
+            visitor(&mut *e)
+        }
+        if let Some(e) = self.align_content.as_mut() {
+            visitor(&mut *e)
+        }
+        if let Some(e) = self.align_items.as_mut() {
+            visitor(&mut *e)
+        }
+        if let Some(e) = self.flex_wrap.as_mut() {
+            visitor(&mut *e)
+        }
     }
 }
 
@@ -615,7 +708,10 @@ pub fn is_layout(base_type: &ElementType) -> bool {
     match base_type {
         ElementType::Component(c) => is_layout(&c.root_element.borrow().base_type),
         ElementType::Builtin(be) => {
-            matches!(be.name.as_str(), "GridLayout" | "HorizontalLayout" | "VerticalLayout")
+            matches!(
+                be.name.as_str(),
+                "GridLayout" | "HorizontalLayout" | "VerticalLayout" | "FlexBoxLayout"
+            )
         }
         _ => false,
     }

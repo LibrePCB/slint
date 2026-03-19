@@ -11,7 +11,7 @@ use i_slint_core::api::{
     LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, PlatformError, Window,
 };
 use i_slint_core::items::ColorScheme;
-use i_slint_core::lengths::PhysicalInset;
+use i_slint_core::lengths::PhysicalEdges;
 use i_slint_core::platform::{
     Key, PointerEventButton, WindowAdapter, WindowEvent, WindowProperties,
 };
@@ -166,7 +166,7 @@ impl i_slint_core::window::WindowAdapterInternal for AndroidWindowAdapter {
         self.color_scheme.as_ref().get()
     }
 
-    fn safe_area_inset(&self) -> PhysicalInset {
+    fn safe_area_inset(&self) -> PhysicalEdges {
         if self.fullscreen.get() {
             Default::default()
         } else {
@@ -189,12 +189,12 @@ impl AndroidWindowAdapter {
         Rc::<Self>::new_cyclic(|w| Self {
             app,
             window: Window::new(w.clone()),
-            #[cfg(not(any(feature = "unstable-wgpu-26", feature = "unstable-wgpu-27")))]
+            #[cfg(not(any(feature = "unstable-wgpu-27", feature = "unstable-wgpu-28")))]
             renderer: SkiaRenderer::default(&SkiaSharedContext::default()),
-            #[cfg(feature = "unstable-wgpu-27")]
+            #[cfg(feature = "unstable-wgpu-28")]
+            renderer: SkiaRenderer::default_wgpu_28(&SkiaSharedContext::default()),
+            #[cfg(all(feature = "unstable-wgpu-27", not(feature = "unstable-wgpu-28")))]
             renderer: SkiaRenderer::default_wgpu_27(&SkiaSharedContext::default()),
-            #[cfg(all(feature = "unstable-wgpu-26", not(feature = "unstable-wgpu-27")))]
-            renderer: SkiaRenderer::default_wgpu_26(&SkiaSharedContext::default()),
             requested_graphics_api: RefCell::new(None),
             event_queue: Default::default(),
             pending_redraw: Default::default(),
@@ -269,13 +269,11 @@ impl AndroidWindowAdapter {
                     self.window.try_dispatch_event(WindowEvent::Resized {
                         size: self.size().to_logical(scale_factor),
                     })?;
-                    self.window.try_dispatch_event(WindowEvent::SafeAreaChanged {
-                        inset: self
-                            .internal(i_slint_core::InternalToken)
+                    WindowInner::from_pub(&self.window).set_window_item_safe_area(
+                        self.internal(i_slint_core::InternalToken)
                             .map(|internal| internal.safe_area_inset().to_logical(scale_factor))
                             .unwrap_or_default(),
-                        token: i_slint_core::InternalToken,
-                    })?;
+                    );
                 }
             }
             PollEvent::Main(MainEvent::Destroy) => {
@@ -331,100 +329,137 @@ impl AndroidWindowAdapter {
                     }
                     None => InputStatus::Unhandled,
                 },
-                InputEvent::MotionEvent(motion_event) => match motion_event.action() {
-                    MotionAction::ButtonPress => {
-                        result = self.window.try_dispatch_event(WindowEvent::PointerPressed {
-                            position: position_for_event(motion_event, self.offset.get())
-                                .to_logical(self.window.scale_factor()),
-                            button: button_for_event(motion_event, &self.last_pressed_state),
-                        });
-                        InputStatus::Handled
-                    }
-                    MotionAction::ButtonRelease => {
-                        result = self.window.try_dispatch_event(WindowEvent::PointerReleased {
-                            position: position_for_event(motion_event, self.offset.get())
-                                .to_logical(self.window.scale_factor()),
-                            button: button_for_event(motion_event, &self.last_pressed_state),
-                        });
-                        InputStatus::Handled
-                    }
-                    MotionAction::Down => {
-                        let position = position_for_event(motion_event, self.offset.get())
-                            .to_logical(self.window.scale_factor());
-
-                        self.show_cursor_handles.set(true);
-                        let _timer = Timer::default();
-                        _timer.start(
-                            TimerMode::SingleShot,
-                            self.java_helper
-                                .long_press_timeout()
-                                .unwrap_or_else(|e| print_jni_error(&self.app, e)),
-                            long_press_timeout,
-                        );
-                        self.long_press.replace(Some(LongPressDetection { position, _timer }));
-
-                        let pointer_index = motion_event.pointer_index();
-                        let pointer = motion_event.pointer_at_index(pointer_index);
-                        let pointer_id = pointer.pointer_id();
-                        let window_event =
-                            WindowEvent::TouchPressed { touch_id: pointer_id, position };
-                        result = self.window.try_dispatch_event(window_event);
-                        InputStatus::Handled
-                    }
-                    MotionAction::Up => {
-                        let position = position_for_event(motion_event, self.offset.get())
-                            .to_logical(self.window.scale_factor());
-                        self.long_press.take();
-
-                        let pointer_index = motion_event.pointer_index();
-                        let pointer = motion_event.pointer_at_index(pointer_index);
-                        let pointer_id = pointer.pointer_id();
-                        let window_event =
-                            WindowEvent::TouchReleased { touch_id: pointer_id, position };
-                        result = self.window.try_dispatch_event(window_event).and_then(|_| {
-                            // Also send exit to avoid remaining hover state
-                            self.window.try_dispatch_event(WindowEvent::PointerExited)
-                        });
-                        InputStatus::Handled
-                    }
-                    MotionAction::Move => {
-                        let position = position_for_event(motion_event, self.offset.get())
-                            .to_logical(self.window.scale_factor());
-
-                        let mut lp = self.long_press.borrow_mut();
-                        let sq = |x| x * x;
-                        if lp.as_ref().map_or(false, |lp| {
-                            sq(lp.position.x - position.x) + sq(lp.position.y - position.y) > 100.
-                        }) {
-                            *lp = None;
+                InputEvent::MotionEvent(motion_event) => {
+                    let offset = self.offset.get();
+                    let scale = self.window.scale_factor();
+                    let touch_pos = |p: &android_activity::input::Pointer<'_>| {
+                        i_slint_core::lengths::logical_point_from_api(pointer_logical_position(
+                            p.x(),
+                            p.y(),
+                            offset,
+                            scale,
+                        ))
+                    };
+                    match motion_event.action() {
+                        MotionAction::ButtonPress => {
+                            result = self.window.try_dispatch_event(WindowEvent::PointerPressed {
+                                position: position_for_event(motion_event, offset, scale),
+                                button: button_for_event(motion_event, &self.last_pressed_state),
+                            });
+                            InputStatus::Handled
                         }
+                        MotionAction::ButtonRelease => {
+                            result = self.window.try_dispatch_event(WindowEvent::PointerReleased {
+                                position: position_for_event(motion_event, offset, scale),
+                                button: button_for_event(motion_event, &self.last_pressed_state),
+                            });
+                            InputStatus::Handled
+                        }
+                        MotionAction::Down => {
+                            let position = position_for_event(motion_event, offset, scale);
 
-                        let pointer_index = motion_event.pointer_index();
-                        let pointer = motion_event.pointer_at_index(pointer_index);
-                        let pointer_id = pointer.pointer_id();
-                        let window_event =
-                            WindowEvent::TouchMoved { touch_id: pointer_id, position };
-                        result = self.window.try_dispatch_event(window_event);
-                        InputStatus::Handled
+                            self.show_cursor_handles.set(true);
+                            let _timer = Timer::default();
+                            _timer.start(
+                                TimerMode::SingleShot,
+                                self.java_helper
+                                    .long_press_timeout()
+                                    .unwrap_or_else(|e| print_jni_error(&self.app, e)),
+                                long_press_timeout,
+                            );
+                            self.long_press.replace(Some(LongPressDetection { position, _timer }));
+                            if let Some(p) = motion_event.pointers().next() {
+                                WindowInner::from_pub(&self.window).process_touch_input(
+                                    p.pointer_id() as u64,
+                                    touch_pos(&p),
+                                    i_slint_core::input::TouchPhase::Started,
+                                );
+                            }
+                            InputStatus::Handled
+                        }
+                        MotionAction::Up => {
+                            self.long_press.take();
+                            if let Some(p) = motion_event.pointers().next() {
+                                WindowInner::from_pub(&self.window).process_touch_input(
+                                    p.pointer_id() as u64,
+                                    touch_pos(&p),
+                                    i_slint_core::input::TouchPhase::Ended,
+                                );
+                            }
+                            InputStatus::Handled
+                        }
+                        MotionAction::Move => {
+                            let position = position_for_event(motion_event, offset, scale);
+
+                            let mut lp = self.long_press.borrow_mut();
+                            let sq = |x| x * x;
+                            if lp.as_ref().map_or(false, |lp| {
+                                sq(lp.position.x - position.x) + sq(lp.position.y - position.y)
+                                    > 100.
+                            }) {
+                                *lp = None;
+                            }
+                            drop(lp);
+
+                            let runtime_window = WindowInner::from_pub(&self.window);
+                            for p in motion_event.pointers() {
+                                runtime_window.process_touch_input(
+                                    p.pointer_id() as u64,
+                                    touch_pos(&p),
+                                    i_slint_core::input::TouchPhase::Moved,
+                                );
+                            }
+                            InputStatus::Handled
+                        }
+                        MotionAction::PointerDown => {
+                            // A second finger means no long-press.
+                            self.long_press.take();
+                            let idx = motion_event.pointer_index();
+                            if let Some(p) = motion_event.pointers().nth(idx) {
+                                WindowInner::from_pub(&self.window).process_touch_input(
+                                    p.pointer_id() as u64,
+                                    touch_pos(&p),
+                                    i_slint_core::input::TouchPhase::Started,
+                                );
+                            }
+                            InputStatus::Handled
+                        }
+                        MotionAction::PointerUp => {
+                            let idx = motion_event.pointer_index();
+                            if let Some(p) = motion_event.pointers().nth(idx) {
+                                WindowInner::from_pub(&self.window).process_touch_input(
+                                    p.pointer_id() as u64,
+                                    touch_pos(&p),
+                                    i_slint_core::input::TouchPhase::Ended,
+                                );
+                            }
+                            InputStatus::Handled
+                        }
+                        MotionAction::HoverMove => {
+                            let position = position_for_event(motion_event, offset, scale);
+                            let window_event = WindowEvent::PointerMoved { position };
+                            result = self.window.try_dispatch_event(window_event);
+                            InputStatus::Handled
+                        }
+                        MotionAction::Cancel | MotionAction::Outside => {
+                            self.long_press.take();
+                            let runtime_window = WindowInner::from_pub(&self.window);
+                            for p in motion_event.pointers() {
+                                runtime_window.process_touch_input(
+                                    p.pointer_id() as u64,
+                                    touch_pos(&p),
+                                    i_slint_core::input::TouchPhase::Cancelled,
+                                );
+                            }
+                            InputStatus::Handled
+                        }
+                        MotionAction::Scroll => todo!(),
+                        MotionAction::HoverEnter | MotionAction::HoverExit => {
+                            InputStatus::Unhandled
+                        }
+                        _ => InputStatus::Unhandled,
                     }
-                    MotionAction::HoverMove => {
-                        let position = position_for_event(motion_event, self.offset.get())
-                            .to_logical(self.window.scale_factor());
-                        let window_event = WindowEvent::PointerMoved { position };
-                        result = self.window.try_dispatch_event(window_event);
-                        InputStatus::Handled
-                    }
-                    MotionAction::Cancel | MotionAction::Outside => {
-                        self.long_press.take();
-                        result = self.window.try_dispatch_event(WindowEvent::PointerExited);
-                        InputStatus::Handled
-                    }
-                    MotionAction::Scroll => todo!(),
-                    MotionAction::HoverEnter | MotionAction::HoverExit => InputStatus::Unhandled,
-                    // Multi-touch not yet supported
-                    MotionAction::PointerDown | MotionAction::PointerUp => InputStatus::Unhandled,
-                    _ => InputStatus::Unhandled,
-                },
+                }
                 InputEvent::TextEvent(state) => {
                     self.show_cursor_handles.set(false);
                     let runtime_window = WindowInner::from_pub(&self.window);
@@ -484,13 +519,11 @@ impl AndroidWindowAdapter {
         let scale_factor = self.window.scale_factor();
         self.window
             .try_dispatch_event(WindowEvent::Resized { size: size.to_logical(scale_factor) })?;
-        self.window.try_dispatch_event(WindowEvent::SafeAreaChanged {
-            inset: self
-                .internal(i_slint_core::InternalToken)
+        WindowInner::from_pub(&self.window).set_window_item_safe_area(
+            self.internal(i_slint_core::InternalToken)
                 .map(|internal| internal.safe_area_inset().to_logical(scale_factor))
                 .unwrap_or_default(),
-            token: i_slint_core::InternalToken,
-        })?;
+        );
         self.offset.set(offset);
         Ok(())
     }
@@ -519,14 +552,12 @@ impl AndroidWindowAdapter {
         &self,
         window_origin: PhysicalPosition,
         window_size: PhysicalSize,
-        safe_area: PhysicalInset,
-        keyboard: PhysicalInset,
+        safe_area: PhysicalEdges,
+        keyboard: PhysicalEdges,
     ) {
         let scale_factor = self.window.scale_factor();
-        self.window.dispatch_event(WindowEvent::SafeAreaChanged {
-            inset: safe_area.to_logical(scale_factor),
-            token: i_slint_core::InternalToken,
-        });
+        WindowInner::from_pub(&self.window)
+            .set_window_item_safe_area(safe_area.to_logical(scale_factor));
 
         let window_origin = window_origin.to_logical(scale_factor);
         let window_size = window_size.to_logical(scale_factor);
@@ -597,11 +628,26 @@ fn long_press_timeout() {
     };
 }
 
-fn position_for_event(motion_event: &MotionEvent, offset: PhysicalPosition) -> PhysicalPosition {
-    motion_event.pointers().next().map_or_else(Default::default, |p| PhysicalPosition {
-        x: p.x() as i32 - offset.x,
-        y: p.y() as i32 - offset.y,
-    })
+/// Convert raw pointer coordinates to a LogicalPosition, applying the
+/// display offset and scale factor.
+fn pointer_logical_position(
+    x: f32,
+    y: f32,
+    offset: PhysicalPosition,
+    scale_factor: f32,
+) -> LogicalPosition {
+    PhysicalPosition::new(x as i32 - offset.x, y as i32 - offset.y).to_logical(scale_factor)
+}
+
+fn position_for_event(
+    motion_event: &MotionEvent,
+    offset: PhysicalPosition,
+    scale: f32,
+) -> LogicalPosition {
+    motion_event
+        .pointers()
+        .next()
+        .map_or_else(Default::default, |p| pointer_logical_position(p.x(), p.y(), offset, scale))
 }
 
 fn button_for_event(

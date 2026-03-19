@@ -79,7 +79,9 @@ export type KnownType =
     | "length"
     | "percent"
     | "physical-length"
+    | "Edges"
     | "Point"
+    | "Size"
     | "relative-font-size"
     | "string"
     | "struct";
@@ -129,6 +131,11 @@ export function getTypeInfo(typeName: KnownType): TypeInfo {
                 href: linkMap.EnumType.href,
                 defaultValue: "the first enum value",
             };
+        case "Edges":
+            return {
+                href: linkMap.Edges.href,
+                defaultValue: "0px",
+            };
         case "float":
             return {
                 href: linkMap.float.href,
@@ -138,6 +145,11 @@ export function getTypeInfo(typeName: KnownType): TypeInfo {
             return {
                 href: linkMap.ImageType.href,
                 defaultValue: "the empty image",
+            };
+        case "keyboard-shortcut":
+            return {
+                href: linkMap["keyboard-shortcut"].href,
+                defaultValue: "@keys()",
             };
         case "int":
             return {
@@ -161,7 +173,12 @@ export function getTypeInfo(typeName: KnownType): TypeInfo {
             };
         case "Point":
             return {
-                href: linkMap.StructType.href,
+                href: linkMap.Point.href,
+                defaultValue: "(0px, 0px)",
+            };
+        case "Size":
+            return {
+                href: linkMap.Size.href,
                 defaultValue: "(0px, 0px)",
             };
         case "relative-font-size":
@@ -172,6 +189,16 @@ export function getTypeInfo(typeName: KnownType): TypeInfo {
         case "string":
             return {
                 href: linkMap.StringType.href,
+                defaultValue: '""',
+            };
+        case "styled-text":
+            return {
+                href: linkMap.styled_text.href,
+                defaultValue: '""',
+            };
+        case "callback":
+            return {
+                href: linkMap.callback.href,
                 defaultValue: '""',
             };
         case "struct":

@@ -16,6 +16,12 @@ pub fn generate() -> Result<(), Box<dyn std::error::Error>> {
 
     let root = super::root_dir();
 
+    {
+        let enums = extract_enum_docs();
+        let structs = extract_builtin_structs();
+        write_global_structs_enums_index(&root, &structs, &enums)?;
+    }
+
     let docs_source_dir = root.join("docs/astro");
 
     {
@@ -24,6 +30,67 @@ pub fn generate() -> Result<(), Box<dyn std::error::Error>> {
         cmd!(sh, "pnpm install --frozen-lockfile --ignore-scripts").run()?;
         cmd!(sh, "pnpm run build").run()?;
     }
+
+    Ok(())
+}
+
+fn write_global_structs_enums_index(
+    root_dir: &Path,
+    structs: &std::collections::BTreeMap<String, StructDoc>,
+    enums: &std::collections::BTreeMap<String, EnumDoc>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = root_dir.join("docs/astro/src/content/docs/reference/global-structs-enums.mdx");
+    let mut file =
+        BufWriter::new(std::fs::File::create(&path).context(format!("error creating {path:?}"))?);
+
+    writeln!(
+        file,
+        r#"---
+title: Global Structs and Enums
+description: Global Structs and Enums
+---
+"#
+    )?;
+
+    for name in structs.keys() {
+        writeln!(file, "import {0} from \"../../collections/structs/{0}.md\"", name)?;
+    }
+
+    if !structs.is_empty() {
+        writeln!(file)?;
+    }
+
+    for name in enums.keys() {
+        // `keys.md` is generated separately and documented elsewhere.
+        if name == "keys" {
+            continue;
+        }
+        writeln!(file, "import {0} from \"../../collections/enums/{0}.md\"", name)?;
+    }
+
+    writeln!(file)?;
+    writeln!(file, "## Structs")?;
+    writeln!(file)?;
+
+    for name in structs.keys() {
+        writeln!(file, "### {name}")?;
+        writeln!(file, "<{name} />")?;
+        writeln!(file)?;
+    }
+
+    writeln!(file, "## Enums")?;
+    writeln!(file)?;
+
+    for name in enums.keys() {
+        if name == "keys" {
+            continue;
+        }
+        writeln!(file, "### {name}")?;
+        writeln!(file, "<{name} />")?;
+        writeln!(file)?;
+    }
+
+    file.flush()?;
 
     Ok(())
 }
@@ -59,12 +126,7 @@ description: {0} content
             k, e.description
         )?;
         for v in &e.values {
-            write!(
-                file,
-                r#"* **`{}`**: {}
-"#,
-                v.key, v.description
-            )?;
+            writeln!(file, r#"* **`{}`**: {}"#, v.key, v.description)?;
         }
 
         file.flush()?;
@@ -137,24 +199,45 @@ pub struct StructDoc {
 pub fn extract_builtin_structs() -> std::collections::BTreeMap<String, StructDoc> {
     // `Point` should be in the documentation, but it's not inside of `for_each_builtin_structs`,
     // so we manually create its entry first.
-    let mut structs = std::collections::BTreeMap::from([(
-        "Point".to_string(),
-        StructDoc {
-            description: "This structure represents a point with x and y coordinate".to_string(),
-            fields: vec![
-                StructFieldDoc {
-                    key: "x".to_string(),
-                    description: String::new(),
-                    type_name: "length".to_string(),
-                },
-                StructFieldDoc {
-                    key: "y".to_string(),
-                    description: String::new(),
-                    type_name: "length".to_string(),
-                },
-            ],
-        },
-    )]);
+    let mut structs = std::collections::BTreeMap::from([
+        (
+            "Point".to_string(),
+            StructDoc {
+                description: "This structure represents a point with x and y coordinate"
+                    .to_string(),
+                fields: vec![
+                    StructFieldDoc {
+                        key: "x".to_string(),
+                        description: String::new(),
+                        type_name: "length".to_string(),
+                    },
+                    StructFieldDoc {
+                        key: "y".to_string(),
+                        description: String::new(),
+                        type_name: "length".to_string(),
+                    },
+                ],
+            },
+        ),
+        (
+            "Size".to_string(),
+            StructDoc {
+                description: "This structure represents a size with width and height".to_string(),
+                fields: vec![
+                    StructFieldDoc {
+                        key: "width".to_string(),
+                        description: String::new(),
+                        type_name: "length".to_string(),
+                    },
+                    StructFieldDoc {
+                        key: "height".to_string(),
+                        description: String::new(),
+                        type_name: "length".to_string(),
+                    },
+                ],
+            },
+        ),
+    ]);
 
     macro_rules! map_type {
         (i32) => {
@@ -256,12 +339,7 @@ description: {0} content
         )?;
 
         for f in &v.fields {
-            write!(
-                file,
-                r#"- **`{}`** (_{}_): {}
-"#,
-                f.key, f.type_name, f.description
-            )?;
+            writeln!(file, r#"- **`{}`** (_{}_): {}"#, f.key, f.type_name, f.description)?;
         }
 
         file.flush()?;
@@ -298,12 +376,12 @@ fn generate_keys_docs() -> Result<(), Box<dyn std::error::Error>> {
         "Failed to create folder holding individual enum doc files {enums_dir:?}"
     ))?;
 
-    let path = enums_dir.join(format!("keys.md"));
+    let path = enums_dir.join("keys.md");
     let mut file =
         BufWriter::new(std::fs::File::create(&path).context(format!("error creating {path:?}"))?);
 
     macro_rules! collect_special_key {
-        ($($char:literal # $name:ident # $($qt:ident)|* # $($winit:ident $(($_pos:ident))?)|* # $($_xkb:ident)|*;)*) => {
+        ($($char:literal # $name:ident # $($shifted:expr)? $(=> $($qt:ident)|* # $($winit:ident $(($_pos:ident))?)|* # $($_xkb:ident)|*)?;)*) => {
             $(
                  write!(file, r#"-   **`{}`**
 "#, stringify!($name)
@@ -312,7 +390,7 @@ fn generate_keys_docs() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 
-    i_slint_common::for_each_special_keys!(collect_special_key);
+    i_slint_common::for_each_keys!(collect_special_key);
 
     file.flush()?;
 

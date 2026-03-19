@@ -15,8 +15,6 @@ use core::pin::Pin;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-#[cfg(feature = "software-renderer")]
-use std::sync::Arc;
 
 pub mod builtin_macros;
 pub mod diagnostics;
@@ -52,7 +50,7 @@ pub enum EmbedResourcesKind {
     Nothing,
     /// Only embed builtin resources
     OnlyBuiltinResources,
-    /// Do not embed resources, but list them in the Document as it they were embedded
+    /// Do not embed resources, but list them in the Document as if they were embedded
     ListAllResources,
     /// Embed all images resources (the content of their files)
     EmbedAllResources,
@@ -98,17 +96,16 @@ pub enum ComponentSelection {
     Named(String),
 }
 
-#[cfg(feature = "software-renderer")]
-pub type FontCache = Rc<
-    RefCell<
-        std::collections::HashMap<
-            (i_slint_common::sharedfontique::fontique::FamilyId, usize),
-            fontdue::FontResult<Arc<fontdue::Font>>,
-        >,
-    >,
->;
-
-pub type OpenImportFallback =
+/// Type alias for the callback to open files mentioned in `import` statements
+///
+/// This is a dyn-compatible version of:
+///
+/// ```ignore
+/// async fn(String) -> Option<std::io::Result<String>>
+/// ```
+///
+/// Unfortunately AsyncFn is not dyn-compatible yet.
+pub type OpenImportCallback =
     Rc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<std::io::Result<String>>>>>>;
 pub type ResourceUrlMapper = Rc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = Option<String>>>>>;
 
@@ -128,11 +125,11 @@ pub struct CompilerConfiguration {
     /// the name of the style. (eg: "native")
     pub style: Option<String>,
 
-    /// Callback to load import files which is called if the file could not be found
+    /// Callback to load import files
     ///
     /// The callback should open the file specified by the given file name and
-    /// return an future that provides the text content of the file as output.
-    pub open_import_fallback: Option<OpenImportFallback>,
+    /// return a future that provides the text content of the file as output.
+    pub open_import_callback: Option<OpenImportCallback>,
     /// Callback to map URLs for resources
     ///
     /// The function takes the url and returns the mapped URL (or None if not mapped)
@@ -179,9 +176,6 @@ pub struct CompilerConfiguration {
     pub debug_hooks: Option<std::hash::RandomState>,
 
     pub components_to_generate: ComponentSelection,
-
-    #[cfg(feature = "software-renderer")]
-    pub font_cache: FontCache,
 
     /// The name of the library when compiling as a library.
     pub library_name: Option<String>,
@@ -241,10 +235,7 @@ impl CompilerConfiguration {
             #[cfg(feature = "cpp")]
             OutputFormat::Cpp(config) => match config.namespace {
                 Some(namespace) => Some(namespace),
-                None => match std::env::var("SLINT_CPP_NAMESPACE") {
-                    Ok(namespace) => Some(namespace),
-                    Err(_) => None,
-                },
+                None => std::env::var("SLINT_CPP_NAMESPACE").ok(),
             },
             _ => None,
         };
@@ -254,7 +245,7 @@ impl CompilerConfiguration {
             include_paths: Default::default(),
             library_paths: Default::default(),
             style: Default::default(),
-            open_import_fallback: None,
+            open_import_callback: None,
             resource_url_mapper: None,
             inline_all_elements,
             const_scale_factor,
@@ -268,8 +259,6 @@ impl CompilerConfiguration {
             debug_info,
             debug_hooks: None,
             components_to_generate: ComponentSelection::ExportedWindows,
-            #[cfg(feature = "software-renderer")]
-            font_cache: Default::default(),
             #[cfg(all(feature = "software-renderer", feature = "sdf-fonts"))]
             use_sdf_fonts: false,
             #[cfg(feature = "bundle-translations")]
@@ -279,28 +268,6 @@ impl CompilerConfiguration {
             library_name: None,
             rust_module: None,
         }
-    }
-
-    #[cfg(feature = "software-renderer")]
-    fn load_font_by_id(
-        &self,
-        font: &i_slint_common::sharedfontique::fontique::QueryFont,
-    ) -> fontdue::FontResult<Arc<fontdue::Font>> {
-        self.font_cache
-            .borrow_mut()
-            .entry(font.family)
-            .or_insert_with(|| {
-                fontdue::Font::from_bytes(
-                    font.blob.data(),
-                    fontdue::FontSettings {
-                        collection_index: font.index,
-                        scale: 40.,
-                        ..Default::default()
-                    },
-                )
-                .map(Arc::new)
-            })
-            .clone()
     }
 }
 
@@ -320,13 +287,7 @@ fn prepare_for_compile(
 
     diagnostics.enable_experimental = compiler_config.enable_experimental;
 
-    let global_type_registry = if compiler_config.enable_experimental {
-        crate::typeregister::TypeRegister::builtin_experimental()
-    } else {
-        crate::typeregister::TypeRegister::builtin()
-    };
-
-    typeloader::TypeLoader::new(global_type_registry, compiler_config, diagnostics)
+    typeloader::TypeLoader::new(compiler_config, diagnostics)
 }
 
 pub async fn compile_syntax_node(

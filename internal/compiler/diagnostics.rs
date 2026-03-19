@@ -259,6 +259,8 @@ pub enum DiagnosticLevel {
     Error,
     /// The diagnostic found is a warning.
     Warning,
+    /// The diagnostic is an note to further help with the error or warning
+    Note,
 }
 
 /// This structure represent a diagnostic emitted while compiling .slint code.
@@ -299,11 +301,9 @@ impl Diagnostic {
         }
     }
 
-    /// Return the length of this diagnostic in characters.
+    /// Return the length of this diagnostic in UTF-8 encoded bytes.
     pub fn length(&self) -> usize {
-        // The length should always be at least 1, even if the span indicates a
-        // length of 0, as otherwise there is no character to display the diagnostic on.
-        self.span.span.length.max(1)
+        self.span.span.length
     }
 
     // NOTE: The return-type differs from the Spanned trait.
@@ -405,6 +405,12 @@ impl BuildDiagnostics {
     pub fn push_warning(&mut self, message: String, source: &dyn Spanned) {
         self.push_warning_with_span(message, source.to_source_location());
     }
+    pub fn push_note_with_span(&mut self, message: String, span: SourceLocation) {
+        self.push_diagnostic_with_span(message, span, DiagnosticLevel::Note)
+    }
+    pub fn push_note(&mut self, message: String, source: &dyn Spanned) {
+        self.push_note_with_span(message, source.to_source_location());
+    }
     pub fn push_compiler_error(&mut self, error: Diagnostic) {
         self.inner.push(error);
     }
@@ -450,6 +456,7 @@ impl BuildDiagnostics {
                 let annotate_snippets_level = match d.level {
                     DiagnosticLevel::Error => annotate_snippets::Level::ERROR,
                     DiagnosticLevel::Warning => annotate_snippets::Level::WARNING,
+                    DiagnosticLevel::Note => annotate_snippets::Level::NOTE,
                 };
                 let message = annotate_snippets_level.primary_title(d.message());
 
@@ -525,21 +532,31 @@ impl BuildDiagnostics {
                     })
                 });
                 let message = &diag.message;
+
+                let span: proc_macro2::Span = if let Some(span) = span {
+                    span.into()
+                } else {
+                    proc_macro2::Span::call_site()
+                };
                 match diag.level {
                     DiagnosticLevel::Error => {
                         needs_error = false;
-                        result.extend(proc_macro::TokenStream::from(if let Some(span) = span {
-                            quote::quote_spanned!(span.into()=> compile_error!{ #message })
-                        } else {
-                            quote::quote!(compile_error! { #message })
-                        }));
+                        result.extend(proc_macro::TokenStream::from(
+                            quote::quote_spanned!(span => compile_error!{ #message })
+                        ));
                     }
                     DiagnosticLevel::Warning => {
-                        result.extend(proc_macro::TokenStream::from(if let Some(span) = span {
-                            quote::quote_spanned!(span.into()=> const _ : () = { #[deprecated(note = #message)] const WARNING: () = (); WARNING };)
-                        } else {
-                            quote::quote!(const _ : () = { #[deprecated(note = #message)] const WARNING: () = (); WARNING };)
-                        }));
+                        result.extend(proc_macro::TokenStream::from(
+                            quote::quote_spanned!(span => const _ : () = { #[deprecated(note = #message)] const WARNING: () = (); WARNING };)
+                        ));
+                    },
+                    DiagnosticLevel::Note => {
+                        // TODO: Notes are not (yet) supported in proc-macros, we'll just print them as warnings for now.
+                        // We can fix this once proc-macro diagnostics support notes
+                        let message = format!("note: {message}");
+                        result.extend(proc_macro::TokenStream::from(
+                            quote::quote_spanned!(span => const _ : () = { #[deprecated(note = #message)] const NOTE: () = (); NOTE };)
+                        ));
                     },
                 }
             }),

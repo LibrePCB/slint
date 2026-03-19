@@ -35,7 +35,7 @@ impl From<SoftBufferPixel> for PremultipliedRgbaColor {
         PremultipliedRgbaColor {
             red: (v >> 16) as u8,
             green: (v >> 8) as u8,
-            blue: (v >> 0) as u8,
+            blue: v as u8,
             alpha: (v >> 24) as u8,
         }
     }
@@ -148,11 +148,10 @@ impl super::WinitCompatibleRenderer for WinitSoftwareRenderer {
             })
         };
 
-        winit_window.pre_present_notify();
-
         let size = region.bounding_box_size();
         if let Some((w, h)) = Option::zip(NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         {
+            winit_window.pre_present_notify();
             let pos = region.bounding_box_origin();
             target_buffer
                 .present_with_damage(&[softbuffer::Rect {

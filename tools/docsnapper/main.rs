@@ -111,11 +111,11 @@ fn main() -> Result<()> {
                 let path = entry.path();
                 let ext = path.extension();
 
-                if ext == Some(&OsString::from("md")) || ext == Some(&OsString::from("mdx")) {
-                    if let Err(e) = process_doc_file(path, &project_root, &args) {
-                        print_error(&mut stderr, &format!("{e:?}"));
-                        error_count += 1;
-                    }
+                if (ext == Some(&OsString::from("md")) || ext == Some(&OsString::from("mdx")))
+                    && let Err(e) = process_doc_file(path, &project_root, &args)
+                {
+                    print_error(&mut stderr, &format!("{e:?}"));
+                    error_count += 1;
                 }
             }
         }
@@ -245,7 +245,10 @@ fn extract_code_from_text(text: &str, size: Option<(usize, usize)>) -> Result<St
         return Err("text in CodeSnippetMD tag is not a slint code block".into());
     };
 
-    if !without_leading.starts_with(' ') && !without_leading.starts_with('\n') {
+    if !without_leading.starts_with(' ')
+        && !without_leading.starts_with('\n')
+        && !without_leading.starts_with('\r')
+    {
         return Err("text in CodeSnippetMD tag is not a slint code block".into());
     }
 
@@ -525,11 +528,12 @@ fn init_compiler(args: &Cli) -> slint_interpreter::Compiler {
         compiler.set_style(style.clone());
     }
 
-    compiler.compiler_configuration(i_slint_core::InternalToken).components_to_generate =
-        match &args.component {
-            Some(component) => ComponentSelection::Named(component.clone()),
-            None => ComponentSelection::LastExported,
-        };
+    let config = compiler.compiler_configuration(i_slint_core::InternalToken);
+    config.components_to_generate = match &args.component {
+        Some(component) => ComponentSelection::Named(component.clone()),
+        None => ComponentSelection::LastExported,
+    };
+    config.enable_experimental = true;
 
     compiler
 }

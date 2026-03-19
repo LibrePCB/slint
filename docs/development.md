@@ -14,6 +14,12 @@ we ship. Afterwards `mise install` makes all the necessary tooling available.
 Even if you do not want to use mise: `.mise/config.toml` contains a handy list of tools
 to make available.
 
+If you would like to automatically invoke autofix tasks (formatting, linting) before committing changes using a git pre-commit hook, set up the hook with the following command:
+
+```
+mise generate git-pre-commit --write --task=ci:autofix:fix
+```
+
 ## Repository structures
 
 ### `helper_crates`
@@ -67,7 +73,7 @@ Some manual tests
 
 ## Documentation
 
-There are some documentations comments in the code.
+There are some documentation comments in the code.
 HTML documentation can be generated with something like
 
 ```sh
@@ -76,6 +82,8 @@ cargo doc --document-private-items --no-deps --open
 
 The documentation that lives on <https://docs.slint.dev> is rendered with Astro Starlight.
 See the ./astro/README.md file for details.
+
+For a deep dive into certain aspects of slint's architecture and implementation, see the files in the **`development`** subdirectory.
 
 ## Rust to C++ bindings
 

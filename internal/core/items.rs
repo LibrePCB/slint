@@ -59,9 +59,9 @@ mod image;
 pub use self::image::*;
 mod drag_n_drop;
 pub use drag_n_drop::*;
-#[cfg(feature = "std")]
+#[cfg(feature = "path")]
 mod path;
-#[cfg(feature = "std")]
+#[cfg(feature = "path")]
 pub use path::*;
 
 /// Alias for `&mut dyn ItemRenderer`. Required so cbindgen generates the ItemVTable
@@ -196,6 +196,8 @@ pub struct ItemVTable {
         size: LogicalSize,
     ) -> RenderingResult,
 
+    /// Returns the rendering bounding rect for that particular item in the parent's item coordinate
+    /// (same coordinate system as the geometry)
     pub bounding_rect: extern "C" fn(
         core::pin::Pin<VRef<ItemVTable>>,
         window_adapter: &WindowAdapterRc,
@@ -680,8 +682,16 @@ declare_item_vtable! {
     fn slint_get_FocusScopeVTable() -> FocusScopeVTable for FocusScope
 }
 
+crate::declare_item_vtable! {
+    fn slint_get_ShortcutVTable() -> ShortcutVTable for Shortcut
+}
+
 declare_item_vtable! {
     fn slint_get_SwipeGestureHandlerVTable() -> SwipeGestureHandlerVTable for SwipeGestureHandler
+}
+
+declare_item_vtable! {
+    fn slint_get_PinchGestureHandlerVTable() -> PinchGestureHandlerVTable for PinchGestureHandler
 }
 
 #[repr(C)]
@@ -1167,6 +1177,7 @@ declare_item_vtable! {
 }
 
 /// The implementation of the `PropertyAnimation` element
+/// This animation has the time as animation limit
 #[repr(C)]
 #[derive(FieldOffsets, SlintElement, Clone, Debug)]
 #[pin]
@@ -1205,14 +1216,9 @@ impl Default for PropertyAnimation {
 pub struct WindowItem {
     pub width: Property<LogicalLength>,
     pub height: Property<LogicalLength>,
-    pub safe_area_inset_top: Property<LogicalLength>,
-    pub safe_area_inset_bottom: Property<LogicalLength>,
-    pub safe_area_inset_left: Property<LogicalLength>,
-    pub safe_area_inset_right: Property<LogicalLength>,
-    pub virtual_keyboard_x: Property<LogicalLength>,
-    pub virtual_keyboard_y: Property<LogicalLength>,
-    pub virtual_keyboard_width: Property<LogicalLength>,
-    pub virtual_keyboard_height: Property<LogicalLength>,
+    pub safe_area_insets: Property<crate::lengths::LogicalEdges>,
+    pub virtual_keyboard_position: Property<crate::lengths::LogicalPoint>,
+    pub virtual_keyboard_size: Property<crate::lengths::LogicalSize>,
     pub background: Property<Brush>,
     pub title: Property<SharedString>,
     pub no_frame: Property<bool>,
@@ -1324,7 +1330,7 @@ impl RenderRectangle for WindowItem {
 }
 
 fn next_window_item(item: &ItemRc) -> Option<ItemRc> {
-    let root_item_in_local_item_tree = ItemRc::new(item.item_tree().clone(), 0);
+    let root_item_in_local_item_tree = ItemRc::new_root(item.item_tree().clone());
 
     if root_item_in_local_item_tree.downcast::<crate::items::WindowItem>().is_some() {
         Some(root_item_in_local_item_tree)
@@ -1352,7 +1358,7 @@ impl WindowItem {
     }
 
     pub fn resolved_default_font_size(item_tree: ItemTreeRc) -> LogicalLength {
-        let first_item = ItemRc::new(item_tree, 0);
+        let first_item = ItemRc::new_root(item_tree);
         let window_item = next_window_item(&first_item).unwrap();
         Self::resolve_font_property(&window_item, Self::font_size)
             .unwrap_or_else(|| first_item.window_adapter().unwrap().renderer().default_font_size())
@@ -1429,11 +1435,29 @@ impl WindowItem {
             italic: local_italic,
         }
     }
+
+    pub fn hide(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>) {
+        let _ = WindowInner::from_pub(window_adapter.window()).hide();
+    }
 }
 
 impl ItemConsts for WindowItem {
     const cached_rendering_data_offset: const_field_offset::FieldOffset<Self, CachedRenderingData> =
         Self::FIELD_OFFSETS.cached_rendering_data.as_unpinned_projection();
+}
+
+#[cfg(feature = "ffi")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_windowitem_hide(
+    window_item: Pin<&WindowItem>,
+    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
+    _self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
+    _self_index: u32,
+) {
+    unsafe {
+        let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
+        window_item.hide(window_adapter);
+    }
 }
 
 declare_item_vtable! {
@@ -1501,7 +1525,7 @@ impl Item for ContextMenu {
                 timer.start(
                     crate::timers::TimerMode::SingleShot,
                     WindowInner::from_pub(_window_adapter.window())
-                        .ctx
+                        .context()
                         .platform()
                         .long_press_interval(crate::InternalToken),
                     move || {
@@ -1778,7 +1802,7 @@ declare_item_vtable! {
     fn slint_get_ClippedImageVTable() -> ClippedImageVTable for ClippedImage
 }
 
-#[cfg(feature = "std")]
+#[cfg(feature = "path")]
 declare_item_vtable! {
     fn slint_get_PathVTable() -> PathVTable for Path
 }

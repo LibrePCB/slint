@@ -364,18 +364,18 @@ fn region_line_ranges(
                             return true;
                         }
                         r.start = it.start;
-                        return false;
+                        false
                     } else if it.start <= r.end {
                         if it.end <= r.end {
-                            return false;
+                            false
                         } else {
                             it.start = r.start;
                             tmp = None;
-                            return true;
+                            true
                         }
                     } else {
                         core::mem::swap(it, r);
-                        return true;
+                        true
                     }
                 } else {
                     true
@@ -443,6 +443,8 @@ pub struct SoftwareRenderer {
     maybe_window_adapter: RefCell<Option<Weak<dyn i_slint_core::window::WindowAdapter>>>,
     rotation: Cell<RenderingRotation>,
     rendering_metrics_collector: Option<Rc<RenderingMetricsCollector>>,
+    #[cfg(feature = "systemfonts")]
+    text_layout_cache: sharedparley::TextLayoutCache,
 }
 
 impl Default for SoftwareRenderer {
@@ -454,7 +456,17 @@ impl Default for SoftwareRenderer {
             rotation: Default::default(),
             rendering_metrics_collector: RenderingMetricsCollector::new("software"),
             repaint_buffer_type: Default::default(),
+            #[cfg(feature = "systemfonts")]
+            text_layout_cache: Default::default(),
         }
+    }
+}
+
+#[cfg(feature = "testing")]
+impl SoftwareRenderer {
+    /// Returns a reference to the text layout cache for testing purposes.
+    pub fn text_layout_cache(&self) -> &sharedparley::TextLayoutCache {
+        &self.text_layout_cache
     }
 }
 
@@ -547,6 +559,8 @@ impl SoftwareRenderer {
             return Default::default();
         };
         let window_inner = WindowInner::from_pub(window.window());
+        #[cfg(feature = "systemfonts")]
+        self.text_layout_cache.clear_cache_if_scale_factor_changed(window.window());
         let factor = ScaleFactor::new(window_inner.scale_factor());
         let rotation = self.rotation.get();
         let (size, background) = if let Some(window_item) =
@@ -591,6 +605,8 @@ impl SoftwareRenderer {
                 dirty_region: Default::default(),
             },
             rotation,
+            #[cfg(feature = "systemfonts")]
+            &self.text_layout_cache,
         );
         let mut renderer = self.partial_rendering_state.create_partial_renderer(buffer_renderer);
         let window_adapter = renderer.window_adapter.clone();
@@ -599,23 +615,29 @@ impl SoftwareRenderer {
             .draw_contents(|components| {
                 let logical_size = (size.cast() / factor).cast();
 
-                let dirty_region_of_existing_buffer = match self.repaint_buffer_type.get() {
+                match self.repaint_buffer_type.get() {
                     RepaintBufferType::NewBuffer => {
-                        Some(LogicalRect::from_size(logical_size).into())
+                        renderer.dirty_region = LogicalRect::from_size(logical_size).into();
+                        self.partial_rendering_state.clear_cache();
                     }
-                    RepaintBufferType::ReusedBuffer => None,
-                    RepaintBufferType::SwappedBuffers => Some(self.prev_frame_dirty.take()),
-                };
-
-                let dirty_region_for_this_frame = self.partial_rendering_state.apply_dirty_region(
-                    &mut renderer,
-                    components,
-                    logical_size,
-                    dirty_region_of_existing_buffer,
-                );
-
-                if self.repaint_buffer_type.get() == RepaintBufferType::SwappedBuffers {
-                    self.prev_frame_dirty.set(dirty_region_for_this_frame);
+                    RepaintBufferType::ReusedBuffer => {
+                        self.partial_rendering_state.apply_dirty_region(
+                            &mut renderer,
+                            components,
+                            logical_size,
+                            None,
+                        );
+                    }
+                    RepaintBufferType::SwappedBuffers => {
+                        let dirty_region_for_this_frame =
+                            self.partial_rendering_state.apply_dirty_region(
+                                &mut renderer,
+                                components,
+                                logical_size,
+                                Some(self.prev_frame_dirty.take()),
+                            );
+                        self.prev_frame_dirty.set(dirty_region_for_this_frame);
+                    }
                 }
 
                 let rotation = RotationInfo { orientation: rotation, screen_size: size };
@@ -653,11 +675,12 @@ impl SoftwareRenderer {
                     );
                 }
 
+                let partial = self.repaint_buffer_type.get() != RepaintBufferType::NewBuffer;
                 for (component, origin) in components {
                     if let Some(component) = ItemTreeWeak::upgrade(component) {
                         i_slint_core::item_rendering::render_component_items(
                             &component,
-                            &mut renderer,
+                            if partial { &mut renderer } else { &mut renderer.actual_renderer },
                             *origin,
                             &window_adapter,
                         );
@@ -726,6 +749,8 @@ impl SoftwareRenderer {
             return Default::default();
         };
         let window_inner = WindowInner::from_pub(window.window());
+        #[cfg(feature = "systemfonts")]
+        self.text_layout_cache.clear_cache_if_scale_factor_changed(window.window());
         let component_rc = window_inner.component();
         let component = i_slint_core::item_tree::ItemTreeRc::borrow_pin(&component_rc);
         if let Some(window_item) = i_slint_core::items::ItemRef::downcast_pin::<
@@ -761,11 +786,31 @@ impl RendererSealed for SoftwareRenderer {
             return LogicalSize::default();
         };
         let font_request = text_item.font_request(item_rc);
-        let font = fonts::match_font(&font_request, scale_factor);
+        #[cfg(feature = "systemfonts")]
+        let Some(slint_ctx) = self.slint_context() else {
+            return Default::default();
+        };
+        #[cfg(feature = "systemfonts")]
+        let mut font_ctx = slint_ctx.font_context().borrow_mut();
+        let font = fonts::match_font(
+            &font_request,
+            scale_factor,
+            #[cfg(feature = "systemfonts")]
+            &mut font_ctx,
+        );
 
         #[cfg(feature = "systemfonts")]
         if matches!(font, fonts::Font::VectorFont(_)) && !parley_disabled() {
-            return sharedparley::text_size(self, text_item, item_rc, max_width, text_wrap);
+            drop(font_ctx);
+            return sharedparley::text_size(
+                self,
+                text_item,
+                item_rc,
+                max_width,
+                text_wrap,
+                Some(&self.text_layout_cache),
+            )
+            .unwrap_or_default();
         }
 
         let content = text_item.text();
@@ -807,12 +852,23 @@ impl RendererSealed for SoftwareRenderer {
             return LogicalSize::default();
         };
         let font_request = text_item.font_request(item_rc);
-        let font = fonts::match_font(&font_request, scale_factor);
+        #[cfg(feature = "systemfonts")]
+        let Some(slint_ctx) = self.slint_context() else {
+            return Default::default();
+        };
+        #[cfg(feature = "systemfonts")]
+        let mut font_ctx = slint_ctx.font_context().borrow_mut();
+        let font = fonts::match_font(
+            &font_request,
+            scale_factor,
+            #[cfg(feature = "systemfonts")]
+            &mut font_ctx,
+        );
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
-                sharedparley::char_size(text_item, item_rc, ch).unwrap_or_default()
+                sharedparley::char_size(&mut font_ctx, text_item, item_rc, ch).unwrap_or_default()
             }
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(vf), true) => {
@@ -841,11 +897,24 @@ impl RendererSealed for SoftwareRenderer {
         let Some(scale_factor) = self.scale_factor() else {
             return i_slint_core::items::FontMetrics::default();
         };
-        let font = fonts::match_font(&font_request, scale_factor);
+        #[cfg(feature = "systemfonts")]
+        let Some(slint_ctx) = self.slint_context() else {
+            return Default::default();
+        };
+        #[cfg(feature = "systemfonts")]
+        let mut font_ctx = slint_ctx.font_context().borrow_mut();
+        let font = fonts::match_font(
+            &font_request,
+            scale_factor,
+            #[cfg(feature = "systemfonts")]
+            &mut font_ctx,
+        );
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(_), false) => sharedparley::font_metrics(font_request),
+            (fonts::Font::VectorFont(_), false) => {
+                sharedparley::font_metrics(&mut font_ctx, font_request)
+            }
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(font), true) => {
                 let ascent: LogicalLength = (font.ascent().cast() / scale_factor).cast();
@@ -886,11 +955,23 @@ impl RendererSealed for SoftwareRenderer {
             return 0;
         };
         let font_request = text_input.font_request(item_rc);
-        let font = fonts::match_font(&font_request, scale_factor);
+        #[cfg(feature = "systemfonts")]
+        let Some(slint_ctx) = self.slint_context() else {
+            return Default::default();
+        };
+        #[cfg(feature = "systemfonts")]
+        let mut font_ctx = slint_ctx.font_context().borrow_mut();
+        let font = fonts::match_font(
+            &font_request,
+            scale_factor,
+            #[cfg(feature = "systemfonts")]
+            &mut font_ctx,
+        );
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
+                drop(font_ctx);
                 sharedparley::text_input_byte_offset_for_position(self, text_input, item_rc, pos)
             }
             #[cfg(feature = "systemfonts")]
@@ -963,11 +1044,23 @@ impl RendererSealed for SoftwareRenderer {
             return LogicalRect::default();
         };
         let font_request = text_input.font_request(item_rc);
-        let font = fonts::match_font(&font_request, scale_factor);
+        #[cfg(feature = "systemfonts")]
+        let Some(slint_ctx) = self.slint_context() else {
+            return Default::default();
+        };
+        #[cfg(feature = "systemfonts")]
+        let mut font_ctx = slint_ctx.font_context().borrow_mut();
+        let font = fonts::match_font(
+            &font_request,
+            scale_factor,
+            #[cfg(feature = "systemfonts")]
+            &mut font_ctx,
+        );
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
+                drop(font_ctx);
                 sharedparley::text_input_cursor_rect_for_byte_offset(
                     self,
                     text_input,
@@ -1052,6 +1145,8 @@ impl RendererSealed for SoftwareRenderer {
         _component: i_slint_core::item_tree::ItemTreeRef,
         items: &mut dyn Iterator<Item = Pin<i_slint_core::items::ItemRef<'_>>>,
     ) -> Result<(), i_slint_core::platform::PlatformError> {
+        #[cfg(feature = "systemfonts")]
+        self.text_layout_cache.component_destroyed(_component);
         self.partial_rendering_state.free_graphics_resources(items);
         Ok(())
     }
@@ -1069,7 +1164,11 @@ impl RendererSealed for SoftwareRenderer {
         &self,
         data: &'static [u8],
     ) -> Result<(), std::boxed::Box<dyn std::error::Error>> {
-        self::fonts::systemfonts::register_font_from_memory(data)
+        let ctx = self.slint_context().ok_or("slint platform not initialized")?;
+        self::fonts::systemfonts::register_font_from_memory(
+            &mut ctx.font_context().borrow_mut().collection,
+            data,
+        )
     }
 
     #[cfg(all(feature = "systemfonts", not(target_arch = "wasm32")))]
@@ -1077,7 +1176,11 @@ impl RendererSealed for SoftwareRenderer {
         &self,
         path: &std::path::Path,
     ) -> Result<(), std::boxed::Box<dyn std::error::Error>> {
-        self::fonts::systemfonts::register_font_from_path(path)
+        let ctx = self.slint_context().ok_or("slint platform not initialized")?;
+        self::fonts::systemfonts::register_font_from_path(
+            &mut ctx.font_context().borrow_mut().collection,
+            path,
+        )
     }
 
     fn default_font_size(&self) -> LogicalLength {
@@ -1086,6 +1189,8 @@ impl RendererSealed for SoftwareRenderer {
 
     fn set_window_adapter(&self, window_adapter: &Rc<dyn WindowAdapter>) {
         *self.maybe_window_adapter.borrow_mut() = Some(Rc::downgrade(window_adapter));
+        #[cfg(feature = "systemfonts")]
+        self.text_layout_cache.clear_all();
         self.partial_rendering_state.clear_cache();
     }
 
@@ -1108,19 +1213,19 @@ impl RendererSealed for SoftwareRenderer {
         let window = window_adapter.window();
         let size = window.size();
 
-        let Some((width, height)) = size.width.try_into().ok().zip(size.height.try_into().ok())
-        else {
+        if size.width == 0 || size.height == 0 {
             // Nothing to render
             return Err("take_snapshot() called on window with invalid size".into());
         };
 
         let mut target_buffer =
-            SharedPixelBuffer::<i_slint_core::graphics::Rgb8Pixel>::new(width, height);
+            SharedPixelBuffer::<i_slint_core::graphics::Rgb8Pixel>::new(size.width, size.height);
 
+        let old_repaint_buffer_type = self.repaint_buffer_type();
+        // ensure that caches are clear
         self.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
-        self.render(target_buffer.make_mut_slice(), width as usize);
-        // ensure that caches are clear for the next call
-        self.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
+        self.render(target_buffer.make_mut_slice(), size.width as usize);
+        self.set_repaint_buffer_type(old_repaint_buffer_type);
 
         let mut target_buffer_with_alpha =
             SharedPixelBuffer::<Rgba8Pixel>::new(target_buffer.width(), target_buffer.height());
@@ -1292,6 +1397,8 @@ fn prepare_scene(
         window,
         PrepareScene::default(),
         software_renderer.rotation.get(),
+        #[cfg(feature = "systemfonts")]
+        &software_renderer.text_layout_cache,
     );
     let mut renderer =
         software_renderer.partial_rendering_state.create_partial_renderer(prepare_scene);
@@ -1301,22 +1408,31 @@ fn prepare_scene(
     window.draw_contents(|components| {
         let logical_size = (size.cast() / factor).cast();
 
-        let dirty_region_of_existing_buffer = match software_renderer.repaint_buffer_type.get() {
-            RepaintBufferType::NewBuffer => Some(LogicalRect::from_size(logical_size).into()),
-            RepaintBufferType::ReusedBuffer => None,
-            RepaintBufferType::SwappedBuffers => Some(software_renderer.prev_frame_dirty.take()),
-        };
-
-        let dirty_region_for_this_frame =
-            software_renderer.partial_rendering_state.apply_dirty_region(
-                &mut renderer,
-                components,
-                logical_size,
-                dirty_region_of_existing_buffer,
-            );
-
-        if software_renderer.repaint_buffer_type.get() == RepaintBufferType::SwappedBuffers {
-            software_renderer.prev_frame_dirty.set(dirty_region_for_this_frame);
+        match software_renderer.repaint_buffer_type.get() {
+            RepaintBufferType::NewBuffer => {
+                // NewBuffer always redraws the full screen, so skip dirty region
+                // tracking to avoid unbounded growth of the partial rendering cache.
+                renderer.dirty_region = LogicalRect::from_size(logical_size).into();
+                software_renderer.partial_rendering_state.clear_cache();
+            }
+            RepaintBufferType::ReusedBuffer => {
+                software_renderer.partial_rendering_state.apply_dirty_region(
+                    &mut renderer,
+                    components,
+                    logical_size,
+                    None,
+                );
+            }
+            RepaintBufferType::SwappedBuffers => {
+                let dirty_region_for_this_frame =
+                    software_renderer.partial_rendering_state.apply_dirty_region(
+                        &mut renderer,
+                        components,
+                        logical_size,
+                        Some(software_renderer.prev_frame_dirty.take()),
+                    );
+                software_renderer.prev_frame_dirty.set(dirty_region_for_this_frame);
+            }
         }
 
         let rotation =
@@ -1337,11 +1453,12 @@ fn prepare_scene(
         };
         drop(i);
 
+        let partial = software_renderer.repaint_buffer_type.get() != RepaintBufferType::NewBuffer;
         for (component, origin) in components {
             if let Some(component) = ItemTreeWeak::upgrade(component) {
                 i_slint_core::item_rendering::render_component_items(
                     &component,
-                    &mut renderer,
+                    if partial { &mut renderer } else { &mut renderer.actual_renderer },
                     *origin,
                     &window_adapter,
                 );
@@ -1600,12 +1717,11 @@ fn process_rectangle_impl(
         return;
     }
 
-    if color.alpha > 0 {
-        if let Some(r) =
+    if color.alpha > 0
+        && let Some(r) =
             geom.round().cast().inflate(-border.get(), -border.get()).intersection(clip)
-        {
-            processor.process_simple_rectangle(r, color);
-        }
+    {
+        processor.process_simple_rectangle(r, color);
     }
 
     if border_color.alpha > 0 {
@@ -1635,24 +1751,6 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> RenderToBuffer<'_, B> {
         geometry: &PhysicalRect,
         mut f: impl FnMut(i16, &mut [B::TargetPixel], i16, i16),
     ) {
-        self.foreach_region(geometry, |buffer, rect, extra_left_clip, extra_right_clip| {
-            for l in rect.y_range() {
-                f(
-                    l,
-                    &mut buffer.line_slice(l as usize)
-                        [rect.min_x() as usize..rect.max_x() as usize],
-                    extra_left_clip,
-                    extra_right_clip,
-                );
-            }
-        });
-    }
-
-    fn foreach_region(
-        &mut self,
-        geometry: &PhysicalRect,
-        mut f: impl FnMut(&mut B, PhysicalRect, i16, i16),
-    ) {
         let mut line = geometry.min_y();
         while let Some(mut next) =
             region_line_ranges(&self.dirty_region, line, &mut self.dirty_range_cache)
@@ -1675,7 +1773,15 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> RenderToBuffer<'_, B> {
                     size: PhysicalSize::new(end - begin, next - line),
                 };
 
-                f(&mut self.buffer, region, extra_left_clip, extra_right_clip);
+                for l in region.y_range() {
+                    f(
+                        l,
+                        &mut self.buffer.line_slice(l as usize)
+                            [region.min_x() as usize..region.max_x() as usize],
+                        extra_left_clip,
+                        extra_right_clip,
+                    );
+                }
             }
             if next == geometry.max_y() {
                 break;
@@ -1982,6 +2088,8 @@ struct SceneBuilder<'a, T> {
     scale_factor: ScaleFactor,
     window: &'a WindowInner,
     rotation: RotationInfo,
+    #[cfg(feature = "systemfonts")]
+    text_layout_cache: &'a sharedparley::TextLayoutCache,
 }
 
 impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
@@ -1991,6 +2099,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         window: &'a WindowInner,
         processor: T,
         orientation: RenderingRotation,
+        #[cfg(feature = "systemfonts")] text_layout_cache: &'a sharedparley::TextLayoutCache,
     ) -> Self {
         Self {
             processor,
@@ -2006,6 +2115,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             scale_factor,
             window,
             rotation: RotationInfo { orientation, screen_size },
+            #[cfg(feature = "systemfonts")]
+            text_layout_cache,
         }
     }
 
@@ -2211,6 +2322,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             + i_slint_core::textlayout::TextShaper<Length = PhysicalLength>
             + GlyphRenderer,
     {
+        let slint_context = self.window.context();
         paragraph
             .layout_lines::<()>(
                 |glyphs, line_x, line_y, _, sel| {
@@ -2234,8 +2346,10 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                     }
                     let scale_delta = paragraph.layout.font.scale_delta();
                     for positioned_glyph in glyphs {
-                        let Some(glyph) =
-                            paragraph.layout.font.render_glyph(positioned_glyph.glyph_id)
+                        let Some(glyph) = paragraph
+                            .layout
+                            .font
+                            .render_glyph(positioned_glyph.glyph_id, slint_context)
                         else {
                             continue;
                         };
@@ -2554,11 +2668,19 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
     ) {
         let font_request = text.font_request(self_rc);
 
-        let font = fonts::match_font(&font_request, self.scale_factor);
+        #[cfg(feature = "systemfonts")]
+        let mut font_ctx = self.window.context().font_context().borrow_mut();
+        let font = fonts::match_font(
+            &font_request,
+            self.scale_factor,
+            #[cfg(feature = "systemfonts")]
+            &mut font_ctx,
+        );
 
         #[cfg(feature = "systemfonts")]
         if matches!(font, fonts::Font::VectorFont(_)) && !parley_disabled() {
-            sharedparley::draw_text(self, text, Some(self_rc), size);
+            drop(font_ctx);
+            sharedparley::draw_text(self, text, Some(self_rc), size, Some(self.text_layout_cache));
             return;
         }
 
@@ -2639,11 +2761,19 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         size: LogicalSize,
     ) {
         let font_request = text_input.font_request(self_rc);
-        let font = fonts::match_font(&font_request, self.scale_factor);
+        #[cfg(feature = "systemfonts")]
+        let mut font_ctx = self.window.context().font_context().borrow_mut();
+        let font = fonts::match_font(
+            &font_request,
+            self.scale_factor,
+            #[cfg(feature = "systemfonts")]
+            &mut font_ctx,
+        );
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
+                drop(font_ctx);
                 sharedparley::draw_text_input(self, text_input, self_rc, size, None);
             }
             #[cfg(feature = "systemfonts")]
@@ -2828,7 +2958,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         // Path rendering is disabled without the path feature
     }
 
-    #[cfg(all(feature = "std", feature = "path"))]
+    #[cfg(feature = "path")]
     fn draw_path(
         &mut self,
         path: Pin<&i_slint_core::items::Path>,
@@ -3010,17 +3140,26 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
 
     fn draw_string(&mut self, string: &str, color: Color) {
         let font_request = Default::default();
-        let font = fonts::match_font(&font_request, self.scale_factor);
+        #[cfg(feature = "systemfonts")]
+        let mut font_ctx = self.window.context().font_context().borrow_mut();
+        let font = fonts::match_font(
+            &font_request,
+            self.scale_factor,
+            #[cfg(feature = "systemfonts")]
+            &mut font_ctx,
+        );
         let clip = self.current_state.clip.cast() * self.scale_factor;
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
+                drop(font_ctx);
                 sharedparley::draw_text(
                     self,
                     std::pin::pin!((i_slint_core::SharedString::from(string), Brush::from(color))),
                     None,
                     self.current_state.clip.size.cast(),
+                    None,
                 );
             }
             #[cfg(feature = "systemfonts")]
@@ -3132,13 +3271,14 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
         y_offset: sharedparley::PhysicalLength,
         glyphs_it: &mut dyn Iterator<Item = sharedparley::parley::layout::Glyph>,
     ) {
-        let fontdue_font = fonts::systemfonts::get_or_create_fontdue_font_from_blob_and_index(
-            &font.data, font.index,
-        );
+        let slint_context = self.window.context();
+        let (swash_key, swash_offset) =
+            fonts::systemfonts::get_swash_font_info(&font.data, font.index);
         let font = fonts::vectorfont::VectorFont::new_from_blob_and_index(
             font.data.clone(),
             font.index,
-            fontdue_font,
+            swash_key,
+            swash_offset,
             font_size.cast(),
         );
 
@@ -3147,7 +3287,7 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
 
         for positioned_glyph in glyphs_it {
             let Some(glyph) = std::num::NonZero::new(positioned_glyph.id as u16)
-                .and_then(|id| font.render_vector_glyph(id))
+                .and_then(|id| font.render_vector_glyph(id, slint_context))
             else {
                 continue;
             };
@@ -3164,7 +3304,7 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
                     + global_offset
                     + glyph_offset)
                     .cast()
-                    + euclid::vec2(glyph.bounds.xmin, 0.0),
+                    + euclid::vec2(glyph.glyph_origin_x, 0.0),
                 glyph.size().cast(),
             )
             .cast()

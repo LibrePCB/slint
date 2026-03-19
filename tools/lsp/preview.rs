@@ -56,8 +56,7 @@ pub fn run(config: &crate::LivePreview) -> std::result::Result<(), slint::Platfo
     let to_lsp: Rc<dyn common::PreviewToLsp> =
         Rc::new(connector::RemoteControlledPreviewToLsp::new());
 
-    let experimental = std::env::var_os("SLINT_ENABLE_EXPERIMENTAL_FEATURES").is_some();
-    let ui = ui::create_ui(&to_lsp, &"", experimental)?;
+    let ui = ui::create_ui(&to_lsp, "")?;
 
     to_lsp
         .send_telemetry(&mut [(
@@ -67,6 +66,7 @@ pub fn run(config: &crate::LivePreview) -> std::result::Result<(), slint::Platfo
         .unwrap();
     ui.window().set_fullscreen(config.fullscreen);
 
+    tracing::debug!("Preview: requesting state from LSP");
     to_lsp.send(&common::PreviewToLspMessage::RequestState { unused: true }).unwrap();
 
     let ui_clone = PREVIEW_STATE.with(move |preview_state| {
@@ -76,7 +76,9 @@ pub fn run(config: &crate::LivePreview) -> std::result::Result<(), slint::Platfo
         ui
     });
 
+    tracing::debug!("Preview: starting event loop (run)");
     ui_clone.run()?;
+    tracing::debug!("Preview: event loop exited");
 
     Ok(())
 }
@@ -120,6 +122,7 @@ type SourceCodeCache = HashMap<Url, SourceCodeCacheEntry>;
 pub struct PreviewState {
     pub ui: Option<ui::PreviewUi>,
     property_range_declarations: Option<ui::PropertyDeclarations>,
+    /// The handle to the previewed component instance
     handle: Rc<RefCell<Option<slint_interpreter::ComponentInstance>>>,
     document_cache: Rc<RefCell<Option<Rc<common::DocumentCache>>>>,
     selected: Option<element_selection::ElementSelection>,
@@ -156,10 +159,11 @@ impl PreviewState {
     }
 
     pub fn rename_current_component(&mut self, url: &Url, old_name: &str, new_name: &str) {
-        if let Some(pc) = &mut self.current_previewed_component {
-            if pc.url == *url && pc.component.as_deref() == Some(old_name) {
-                pc.component = Some(new_name.to_string());
-            }
+        if let Some(pc) = &mut self.current_previewed_component
+            && pc.url == *url
+            && pc.component.as_deref() == Some(old_name)
+        {
+            pc.component = Some(new_name.to_string());
         }
     }
 
@@ -169,15 +173,29 @@ impl PreviewState {
 }
 thread_local! {pub static PREVIEW_STATE: std::cell::RefCell<PreviewState> = Default::default();}
 
-// Just mark the cache as "read from disk" by setting the version to None.
-// Do not reset the code: We can check once the LSP has re-read it from disk
-// whether we need to refresh the preview or not.
 fn invalidate_contents(url: &lsp_types::Url) {
-    PREVIEW_STATE.with_borrow_mut(|preview_state| {
+    let needs_reload = PREVIEW_STATE.with_borrow_mut(|preview_state| {
         if let Some(cache_entry) = preview_state.source_code.get_mut(url) {
+            // A source file was invalidated that is not currently open in the LSP.
+            //
+            // Just mark the cache as "read from disk" by setting the version to None.
+            // Do not reset the code: We can check once the LSP has re-read it from disk
+            // whether we need to refresh the preview or not.
+            //
+            // We should get an updated version of the file from the LSP when it recompiles, so
+            // no reload needed at the moment.
             cache_entry.version = None;
         }
-    })
+        // If a resource file was invalidated - we need to reload the preview
+        //
+        // This is a rather heavy-handed operation, but currently the best we can do.
+        // Ideally, this should just reload that specific resource.
+        preview_state.resources.contains(url)
+    });
+
+    if needs_reload {
+        reload_preview();
+    }
 }
 
 fn delete_document(url: &lsp_types::Url) {
@@ -189,11 +207,11 @@ fn delete_document(url: &lsp_types::Url) {
         )
     });
 
-    if let Some(current) = current {
-        if &current.url == url || url_is_used {
-            // Trigger a compile error now!
-            load_preview(current, LoadBehavior::Reload);
-        }
+    if let Some(current) = current
+        && (&current.url == url || url_is_used)
+    {
+        // Trigger a compile error now!
+        load_preview(current, LoadBehavior::Reload);
     }
 }
 
@@ -447,14 +465,12 @@ fn rename_component(
         PREVIEW_STATE.with_borrow_mut(|preview_state| {
             preview_state.rename_current_component(&old_url, &old_name, &new_name);
 
-            if let Some(current) = &mut preview_state.current_component() {
-                if current.url == old_url {
-                    if let Some(component) = &current.component {
-                        if component == &old_name {
-                            current.component = Some(new_name.clone());
-                        }
-                    }
-                }
+            if let Some(current) = &mut preview_state.current_component()
+                && current.url == old_url
+                && let Some(component) = &current.component
+                && component == &old_name
+            {
+                current.component = Some(new_name.clone());
             }
         });
         // Update which component to show after refresh from the editor.
@@ -1030,15 +1046,15 @@ fn extract_resources(
     dependencies: &HashSet<Url>,
     component_instance: &ComponentInstance,
 ) -> HashSet<Url> {
-    let tl = component_instance.definition().type_loader();
+    let type_loader = component_instance.definition().type_loader();
 
     let mut result: HashSet<Url> = Default::default();
 
-    for d in dependencies {
-        let Ok(path) = d.to_file_path() else {
+    for dependency in dependencies {
+        let Ok(path) = dependency.to_file_path() else {
             continue;
         };
-        let Some(doc) = tl.get_document(&path) else {
+        let Some(doc) = type_loader.get_document(&path) else {
             continue;
         };
 
@@ -1253,6 +1269,7 @@ async fn reload_timer_function() {
         match reload_preview_impl(preview_component, behavior, style, config).await {
             Ok(()) => {}
             Err(e) => {
+                tracing::debug!("Preview reload failed: {}", e);
                 PREVIEW_STATE.with_borrow_mut(|preview_state| {
                     preview_state.loading_state = PreviewFutureState::Pending;
                 });
@@ -1286,38 +1303,38 @@ async fn reload_timer_function() {
             SelectionNotification::Never,
         );
 
-        if notify_editor {
-            if let Some(component_instance) = component_instance() {
-                if let Some((element, debug_index)) = component_instance
-                    .element_node_at_source_code_position(&se.path, se.offset.into())
-                    .first()
-                {
-                    let Some(element_node) = ElementRcNode::new(element.clone(), *debug_index)
-                    else {
-                        return;
-                    };
-                    let format = PREVIEW_STATE.with_borrow(|ps| ps.format());
-                    let (path, pos) = element_node.with_element_node(|node| {
-                        let sf = &node.source_file;
-                        (
-                            sf.path().to_owned(),
-                            util::text_size_to_lsp_position(sf, se.offset, format),
-                        )
-                    });
-                    let lsp = PREVIEW_STATE.with_borrow(|ps| ps.to_lsp.borrow().clone().unwrap());
-                    lsp.ask_editor_to_show_document(
-                        &path.to_string_lossy(),
-                        lsp_types::Range::new(pos, pos),
-                        false,
-                    )
-                    .unwrap();
-                }
-            }
+        if notify_editor
+            && let Some(component_instance) = component_instance()
+            && let Some((element, debug_index)) = component_instance
+                .element_node_at_source_code_position(&se.path, se.offset.into())
+                .first()
+        {
+            let Some(element_node) = ElementRcNode::new(element.clone(), *debug_index) else {
+                return;
+            };
+            let format = PREVIEW_STATE.with_borrow(|ps| ps.format());
+            let (path, pos) = element_node.with_element_node(|node| {
+                let sf = &node.source_file;
+                (sf.path().to_owned(), util::text_size_to_lsp_position(sf, se.offset, format))
+            });
+            let lsp = PREVIEW_STATE.with_borrow(|ps| ps.to_lsp.borrow().clone().unwrap());
+            lsp.ask_editor_to_show_document(
+                &path.to_string_lossy(),
+                lsp_types::Range::new(pos, pos),
+                false,
+            )
+            .unwrap();
         }
     }
 }
 
 pub fn load_preview(preview_component: PreviewComponent, behavior: LoadBehavior) {
+    tracing::debug!(
+        "Preview: load url={}, component={:?}, behavior={:?}",
+        preview_component.url,
+        preview_component.component,
+        behavior
+    );
     PREVIEW_STATE.with_borrow_mut(|preview_state| {
         match behavior {
             LoadBehavior::Reload => {}
@@ -1360,8 +1377,7 @@ pub fn load_preview(preview_component: PreviewComponent, behavior: LoadBehavior)
 }
 
 async fn parse_source(
-    include_paths: Vec<PathBuf>,
-    library_paths: HashMap<String, PathBuf>,
+    config: common::PreviewConfig,
     path: PathBuf,
     version: common::SourceFileVersion,
     source_code: String,
@@ -1379,7 +1395,7 @@ async fn parse_source(
 ) -> (
     Vec<diagnostics::Diagnostic>,
     Option<ComponentDefinition>,
-    Option<common::document_cache::OpenImportFallback>,
+    Option<common::document_cache::OpenImportCallback>,
     Rc<RefCell<common::document_cache::SourceFileVersionMap>>,
 ) {
     let mut builder = slint_interpreter::Compiler::default();
@@ -1399,8 +1415,9 @@ async fn parse_source(
     if !style.is_empty() {
         cc.style = Some(style);
     }
-    cc.include_paths = include_paths;
-    cc.library_paths = library_paths;
+    cc.include_paths = config.include_paths;
+    cc.library_paths = config.library_paths;
+    cc.enable_experimental |= config.enable_experimental;
 
     let (open_file_fallback, source_file_versions) =
         common::document_cache::document_cache_parts_setup(
@@ -1436,9 +1453,15 @@ async fn reload_preview_impl(
     let path = component.url.to_file_path().unwrap_or(PathBuf::from(&component.url.to_string()));
     let (version, source) = get_url_from_cache(&component.url);
 
-    let (diagnostics, compiled, open_import_fallback, source_file_versions) = parse_source(
-        config.include_paths,
-        config.library_paths,
+    if source.is_empty() {
+        tracing::debug!("Preview: source is empty for {}", component.url);
+    }
+
+    let format =
+        if config.format_utf8 { common::ByteFormat::Utf8 } else { common::ByteFormat::Utf16 };
+
+    let (diagnostics, compiled, open_import_callback, source_file_versions) = parse_source(
+        config,
         path,
         version,
         source,
@@ -1457,8 +1480,15 @@ async fn reload_preview_impl(
     .await;
 
     let success = compiled.is_some();
-
     let loaded_component_name = compiled.as_ref().map(|c| c.name().to_string());
+
+    tracing::debug!(
+        "Preview: compiled url={}, component={:?}, success={}, diagnostics={}",
+        component.url,
+        loaded_component_name,
+        success,
+        diagnostics.len()
+    );
 
     let lsp = PREVIEW_STATE.with_borrow_mut(|preview_state| {
         if let Some(ui) = &preview_state.ui {
@@ -1473,9 +1503,7 @@ async fn reload_preview_impl(
     let diags = convert_diagnostics(&diagnostics, &source_file_versions.borrow());
     lsp.notify_diagnostics(diags).unwrap();
 
-    let format =
-        if config.format_utf8 { common::ByteFormat::Utf8 } else { common::ByteFormat::Utf16 };
-    update_preview_area(compiled, behavior, open_import_fallback, source_file_versions, format)?;
+    update_preview_area(compiled, behavior, open_import_callback, source_file_versions, format)?;
 
     finish_parsing(&component.url, loaded_component_name, success);
     Ok(())
@@ -1551,10 +1579,11 @@ pub fn highlight(url: Option<Url>, offset: TextSize) {
 
     let selected = selected_element();
 
-    if let Some(selected) = &selected {
-        if selected.path == path && selected.offset == offset {
-            return;
-        }
+    if let Some(selected) = &selected
+        && selected.path == path
+        && selected.offset == offset
+    {
+        return;
     }
 
     let contains_dependency = PREVIEW_STATE.with_borrow(|preview_state| {
@@ -1700,8 +1729,8 @@ fn set_selected_element(
                 is_resizable: !is_in_layout && !is_layout,
             });
 
-            if let Some(document_cache) = document_cache_from(preview_state) {
-                if let Some((uri, version, selection)) = selection
+            if let Some(document_cache) = document_cache_from(preview_state)
+                && let Some((uri, version, selection)) = selection
                     .clone()
                     .or_else(|| {
                         let current = preview_state.current_component()?;
@@ -1730,24 +1759,22 @@ fn set_selected_element(
                             document_cache.element_at_offset(&url, selection.offset)?,
                         ))
                     })
-                {
-                    let win =
-                        i_slint_core::window::WindowInner::from_pub(ui.window()).window_adapter();
-                    let palettes = ui::palette::collect_palette(&document_cache, &uri, &win);
-                    ui::palette::set_palette(ui, palettes);
+            {
+                let win = i_slint_core::window::WindowInner::from_pub(ui.window()).window_adapter();
+                let palettes = ui::palette::collect_palette(&document_cache, &uri, &win);
+                ui::palette::set_palette(ui, palettes);
 
-                    let in_layout = match parent_layout_kind {
-                        ui::LayoutKind::None => properties::LayoutKind::None,
-                        ui::LayoutKind::Horizontal => properties::LayoutKind::HorizontalBox,
-                        ui::LayoutKind::Vertical => properties::LayoutKind::VerticalBox,
-                        ui::LayoutKind::Grid => properties::LayoutKind::GridLayout,
-                    };
-                    preview_state.property_range_declarations = Some(ui::ui_set_properties(
-                        ui,
-                        &document_cache,
-                        properties::query_properties(&uri, version, &selection, in_layout).ok(),
-                    ));
-                }
+                let in_layout = match parent_layout_kind {
+                    ui::LayoutKind::None => properties::LayoutKind::None,
+                    ui::LayoutKind::Horizontal => properties::LayoutKind::HorizontalBox,
+                    ui::LayoutKind::Vertical => properties::LayoutKind::VerticalBox,
+                    ui::LayoutKind::Grid => properties::LayoutKind::GridLayout,
+                };
+                preview_state.property_range_declarations = Some(ui::ui_set_properties(
+                    ui,
+                    &document_cache,
+                    properties::query_properties(&uri, version, &selection, in_layout).ok(),
+                ));
             }
         }
 
@@ -1758,22 +1785,22 @@ fn set_selected_element(
         (preview_state.to_lsp.borrow().clone().unwrap(), preview_state.format())
     });
 
-    if editor_notification == SelectionNotification::Now {
-        if let Some(element_node) = element_node {
-            let (path, pos) = element_node.with_element_node(|node| {
-                let sf = &node.source_file;
-                (
-                    sf.path().to_owned(),
-                    util::text_size_to_lsp_position(sf, node.text_range().start(), format),
-                )
-            });
-            lsp.ask_editor_to_show_document(
-                &path.to_string_lossy(),
-                lsp_types::Range::new(pos, pos),
-                false,
+    if editor_notification == SelectionNotification::Now
+        && let Some(element_node) = element_node
+    {
+        let (path, pos) = element_node.with_element_node(|node| {
+            let sf = &node.source_file;
+            (
+                sf.path().to_owned(),
+                util::text_size_to_lsp_position(sf, node.text_range().start(), format),
             )
-            .unwrap();
-        }
+        });
+        lsp.ask_editor_to_show_document(
+            &path.to_string_lossy(),
+            lsp_types::Range::new(pos, pos),
+            false,
+        )
+        .unwrap();
     }
 }
 
@@ -1844,7 +1871,7 @@ fn set_status_text(text: &str) {
 fn update_preview_area(
     compiled: Option<ComponentDefinition>,
     behavior: LoadBehavior,
-    open_import_fallback: Option<common::document_cache::OpenImportFallback>,
+    open_import_callback: Option<common::document_cache::OpenImportCallback>,
     source_file_versions: Rc<RefCell<common::document_cache::SourceFileVersionMap>>,
     format: common::ByteFormat,
 ) -> Result<(), PlatformError> {
@@ -1868,7 +1895,7 @@ fn update_preview_area(
                         shared_document_cache.replace(Some(Rc::new(
                             common::DocumentCache::new_from_raw_parts(
                                 rtl,
-                                open_import_fallback.clone(),
+                                open_import_callback.clone(),
                                 source_file_versions.clone(),
                                 format,
                             ),
@@ -1926,8 +1953,7 @@ pub mod test {
         let path = main_test_file_name();
         let source_code = code.get(&path).unwrap().clone();
         let (diagnostics, component_definition, _, _) = spin_on::spin_on(super::parse_source(
-            Vec::new(),
-            std::collections::HashMap::new(),
+            Default::default(),
             path,
             Some(24),
             source_code.to_string(),

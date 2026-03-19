@@ -41,10 +41,10 @@ pub const RESERVED_LAYOUT_PROPERTIES: &[(&str, Type)] = &[
 ];
 
 pub const RESERVED_GRIDLAYOUT_PROPERTIES: &[(&str, Type)] = &[
-    ("col", Type::Float32),
-    ("row", Type::Float32),
-    ("colspan", Type::Float32),
-    ("rowspan", Type::Float32),
+    ("col", Type::Int32),
+    ("row", Type::Int32),
+    ("colspan", Type::Int32),
+    ("rowspan", Type::Int32),
 ];
 
 macro_rules! declare_enums {
@@ -83,11 +83,12 @@ pub struct BuiltinTypes {
     pub noarg_callback_type: Type,
     pub strarg_callback_type: Type,
     pub logical_point_type: Rc<Struct>,
+    pub logical_size_type: Rc<Struct>,
     pub font_metrics_type: Type,
     pub layout_info_type: Rc<Struct>,
     pub gridlayout_input_data_type: Type,
     pub path_element_type: Type,
-    pub box_layout_cell_data_type: Type,
+    pub layout_item_info_type: Type,
 }
 
 impl BuiltinTypes {
@@ -114,6 +115,14 @@ impl BuiltinTypes {
                 .collect(),
                 name: BuiltinPublicStruct::LogicalPosition.into(),
             }),
+            logical_size_type: Rc::new(Struct {
+                fields: IntoIterator::into_iter([
+                    (SmolStr::new_static("width"), Type::LogicalLength),
+                    (SmolStr::new_static("height"), Type::LogicalLength),
+                ])
+                .collect(),
+                name: BuiltinPublicStruct::LogicalSize.into(),
+            }),
             font_metrics_type: Type::Struct(Rc::new(Struct {
                 fields: IntoIterator::into_iter([
                     (SmolStr::new_static("ascent"), Type::LogicalLength),
@@ -139,7 +148,7 @@ impl BuiltinTypes {
                 fields: Default::default(),
                 name: BuiltinPrivateStruct::PathElement.into(),
             })),
-            box_layout_cell_data_type: Type::Struct(Rc::new(Struct {
+            layout_item_info_type: Type::Struct(Rc::new(Struct {
                 fields: IntoIterator::into_iter([("constraint".into(), layout_info_type.into())])
                     .collect(),
                 name: BuiltinPrivateStruct::LayoutItemInfo.into(),
@@ -405,7 +414,9 @@ impl TypeRegister {
         register.insert_type(Type::Brush);
         register.insert_type(Type::Rem);
         register.insert_type(Type::StyledText);
+        register.insert_type(Type::KeyboardShortcutType);
         register.types.insert("Point".into(), logical_point_type().into());
+        register.types.insert("Size".into(), logical_size_type().into());
 
         BUILTIN.with(|e| e.enums.fill_register(&mut register));
 
@@ -417,25 +428,6 @@ impl TypeRegister {
         register.supported_property_animation_types.insert(Type::Brush.to_string());
         register.supported_property_animation_types.insert(Type::Angle.to_string());
 
-        #[rustfmt::skip]
-        macro_rules! map_type {
-            ($pub_type:ident, bool) => { Type::Bool };
-            ($pub_type:ident, i32) => { Type::Int32 };
-            ($pub_type:ident, f32) => { Type::Float32 };
-            ($pub_type:ident, SharedString) => { Type::String };
-            ($pub_type:ident, Image) => { Type::Image };
-            ($pub_type:ident, Coord) => { Type::LogicalLength };
-            ($pub_type:ident, LogicalPosition) => { Type::Struct(logical_point_type()) };
-            ($pub_type:ident, KeyboardModifiers) => { $pub_type.clone() };
-            ($pub_type:ident, $_:ident) => {
-                BUILTIN.with(|e| Type::Enumeration(e.enums.$pub_type.clone()))
-            };
-        }
-        #[rustfmt::skip]
-        macro_rules! maybe_clone {
-            ($pub_type:ident, KeyboardModifiers) => { $pub_type.clone() };
-            ($pub_type:ident, $_:ident) => { $pub_type };
-        }
         macro_rules! register_builtin_structs {
             ($(
                 $(#[$attr:meta])*
@@ -449,14 +441,7 @@ impl TypeRegister {
                     }
                 }
             )*) => { $(
-                #[allow(non_snake_case)]
-                let $Name = Type::Struct(Rc::new(Struct{
-                    fields: BTreeMap::from([
-                        $((stringify!($pub_field).replace_smolstr("_", "-"), map_type!($pub_type, $pub_type))),*
-                    ]),
-                    name: $inner_name.into(),
-                }));
-                register.insert_type_with_name(maybe_clone!($Name, $Name), SmolStr::new(stringify!($Name)));
+                register.insert_type_with_name(Type::Struct(builtin_structs::$Name()), SmolStr::new(stringify!($Name)));
             )* };
         }
         i_slint_common::for_each_builtin_structs!(register_builtin_structs);
@@ -596,7 +581,16 @@ impl TypeRegister {
         register.elements.remove("DropArea").unwrap();
         register.types.remove("DropEvent").unwrap(); // Also removed in xtask/src/slintdocs.rs
 
-        register.elements.remove("StyledText").unwrap();
+        match register.elements.get_mut("Window").unwrap() {
+            ElementType::Builtin(b) => {
+                Rc::get_mut(b)
+                    .expect("Should not be shared at this point")
+                    .properties
+                    .remove("hide")
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
 
         Rc::new(RefCell::new(register))
     }
@@ -729,8 +723,95 @@ impl TypeRegister {
     }
 }
 
+/// Type definitions for each builtin struct
+pub mod builtin_structs {
+    use super::*;
+
+    thread_local! {
+        pub static BUILTIN_STRUCTS: BuiltinStructs = BuiltinStructs::new();
+    }
+
+    #[rustfmt::skip]
+    macro_rules! map_type {
+        ($pub_type:ident, bool) => { Type::Bool };
+        ($pub_type:ident, i32) => { Type::Int32 };
+        ($pub_type:ident, f32) => { Type::Float32 };
+        ($pub_type:ident, SharedString) => { Type::String };
+        ($pub_type:ident, Image) => { Type::Image };
+        ($pub_type:ident, Coord) => { Type::LogicalLength };
+        ($pub_type:ident, LogicalPosition) => { Type::Struct(logical_point_type()) };
+        ($pub_type:ident, LogicalSize) => { Type::Struct(logical_size_type()) };
+        // builtin structs
+        ($pub_type:ident, KeyboardModifiers) => {
+            // Note, this references the local variable in the BuiltinStructs constructor
+            Type::Struct($pub_type.clone())
+        };
+        // builtin enums
+        ($pub_type:ident, $_:ident) => {
+            BUILTIN.with(|e| Type::Enumeration(e.enums.$pub_type.clone()))
+        };
+    }
+
+    macro_rules! declare_builtin_structs {
+        ($(
+            $(#[$attr:meta])*
+            struct $Name:ident {
+                @name = $inner_name:expr,
+                export {
+                    $( $(#[$pub_attr:meta])* $pub_field:ident : $pub_type:ident, )*
+                }
+                private {
+                    $( $(#[$pri_attr:meta])* $pri_field:ident : $pri_type:ty, )*
+                }
+            }
+        )*) => {
+            pub struct BuiltinStructs {
+                $(
+                #[allow(non_snake_case)]
+                $Name: Rc<Struct>
+                ),*
+            }
+            impl BuiltinStructs {
+                pub fn new() -> Self {
+                    $(
+                    #[allow(non_snake_case)]
+                    let $Name = Rc::new(Struct{
+                        fields: BTreeMap::from([
+                            $((stringify!($pub_field).replace_smolstr("_", "-"), map_type!($pub_type, $pub_type))),*
+                        ]),
+                        name: $inner_name.into(),
+                    });
+                    )*
+
+                    Self {
+                        $($Name),*
+                    }
+                }
+            }
+
+            impl Default for BuiltinStructs {
+                fn default() -> Self {
+                    Self::new()
+                }
+            }
+
+            $(
+            #[allow(non_snake_case)]
+            pub fn $Name() -> Rc<Struct> {
+                BUILTIN_STRUCTS.with(|types| types.$Name.clone())
+            }
+            )*
+        };
+    }
+    i_slint_common::for_each_builtin_structs!(declare_builtin_structs);
+}
+
 pub fn logical_point_type() -> Rc<Struct> {
     BUILTIN.with(|types| types.logical_point_type.clone())
+}
+
+pub fn logical_size_type() -> Rc<Struct> {
+    BUILTIN.with(|types| types.logical_size_type.clone())
 }
 
 pub fn font_metrics_type() -> Type {
@@ -748,6 +829,6 @@ pub fn path_element_type() -> Type {
 }
 
 /// The [`Type`] for a runtime LayoutItemInfo structure
-pub fn box_layout_cell_data_type() -> Type {
-    BUILTIN.with(|types| types.box_layout_cell_data_type.clone())
+pub fn layout_item_info_type() -> Type {
+    BUILTIN.with(|types| types.layout_item_info_type.clone())
 }

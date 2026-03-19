@@ -3,17 +3,25 @@
 
 use i_slint_core::api::PhysicalSize;
 use i_slint_core::graphics::euclid::{Point2D, Size2D};
-use i_slint_core::item_rendering::PlainOrStyledText;
 use i_slint_core::lengths::{LogicalLength, LogicalPoint, LogicalRect, LogicalSize};
 use i_slint_core::platform::PlatformError;
 use i_slint_core::renderer::{Renderer, RendererSealed};
+use i_slint_core::textlayout::sharedparley;
 use i_slint_core::window::{InputMethodRequest, WindowAdapter, WindowAdapterInternal, WindowInner};
 
+use i_slint_core::SharedString;
 use i_slint_core::items::TextWrap;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Mutex;
+
+const FIXED_TEST_FONT: &str = "FixedTestFont";
+
+fn is_fixed_test_font(family: &Option<SharedString>) -> bool {
+    family.as_ref().is_some_and(|f| f == FIXED_TEST_FONT)
+}
 
 #[derive(Default)]
 pub struct TestingBackendOptions {
@@ -46,6 +54,7 @@ impl i_slint_core::platform::Platform for TestingBackend {
             size: Default::default(),
             ime_requests: Default::default(),
             mouse_cursor: Default::default(),
+            all_item_trees: Default::default(),
         }))
     }
 
@@ -104,11 +113,34 @@ impl i_slint_core::platform::Platform for TestingBackend {
     }
 }
 
+#[derive(Default)]
+struct CheckAllItemTreesUnregistered(RefCell<HashMap<*const u8, SharedString>>);
+
+impl Drop for CheckAllItemTreesUnregistered {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            assert!(
+                self.0.borrow().is_empty(),
+                "Some item trees were not unregistered: {:?}",
+                self.0.borrow().values()
+            );
+        }
+    }
+}
+
 pub struct TestingWindow {
     window: i_slint_core::api::Window,
     size: Cell<PhysicalSize>,
     pub ime_requests: RefCell<Vec<InputMethodRequest>>,
-    pub mouse_cursor: Cell<i_slint_core::items::MouseCursor>,
+    mouse_cursor: Cell<i_slint_core::items::MouseCursor>,
+    all_item_trees: CheckAllItemTreesUnregistered,
+}
+
+impl TestingWindow {
+    #[allow(dead_code)] // Used by various tests
+    pub fn mouse_cursor(&self) -> i_slint_core::items::MouseCursor {
+        self.mouse_cursor.get()
+    }
 }
 
 impl WindowAdapterInternal for TestingWindow {
@@ -118,6 +150,24 @@ impl WindowAdapterInternal for TestingWindow {
 
     fn set_mouse_cursor(&self, cursor: i_slint_core::items::MouseCursor) {
         self.mouse_cursor.set(cursor);
+    }
+
+    fn register_item_tree(&self, item_tree: i_slint_core::item_tree::ItemTreeRefPin) {
+        let mut debug = SharedString::new();
+        item_tree.as_ref().item_element_infos(0, &mut debug);
+        assert_eq!(
+            self.all_item_trees.0.borrow_mut().insert(item_tree.as_ptr(), debug.clone()),
+            None,
+            "Item tree already registered {debug:?}"
+        );
+    }
+
+    fn unregister_item_tree(
+        &self,
+        item_tree: i_slint_core::item_tree::ItemTreeRef,
+        _items: &mut dyn Iterator<Item = Pin<i_slint_core::items::ItemRef<'_>>>,
+    ) {
+        self.all_item_trees.0.borrow_mut().remove(&item_tree.as_ptr());
     }
 }
 
@@ -157,87 +207,147 @@ impl RendererSealed for TestingWindow {
     fn text_size(
         &self,
         text_item: Pin<&dyn i_slint_core::item_rendering::RenderString>,
-        _item_rc: &i_slint_core::item_tree::ItemRc,
-        _max_width: Option<LogicalLength>,
-        _text_wrap: TextWrap,
+        item_rc: &i_slint_core::item_tree::ItemRc,
+        max_width: Option<LogicalLength>,
+        text_wrap: TextWrap,
     ) -> LogicalSize {
-        if let PlainOrStyledText::Plain(text) = text_item.text() {
-            LogicalSize::new(text.len() as f32 * 10., 10.)
+        let font_request = text_item.font_request(item_rc);
+        if is_fixed_test_font(&font_request.family) {
+            let pixel_size = font_request.pixel_size.map_or(10., |s| s.get());
+            let text: String = match text_item.text() {
+                i_slint_core::item_rendering::PlainOrStyledText::Plain(s) => s.to_string(),
+                i_slint_core::item_rendering::PlainOrStyledText::Styled(s) => {
+                    i_slint_core::styled_text::get_raw_text(&s).into_owned()
+                }
+            };
+            let max_line_len = text.lines().map(|l: &str| l.len()).max().unwrap_or(0);
+            let num_lines = text.lines().count().max(1);
+            let width = max_line_len as f32 * pixel_size;
+            let height = num_lines as f32 * pixel_size;
+            LogicalSize::new(width, height)
         } else {
-            Default::default()
+            sharedparley::text_size(self, text_item, item_rc, max_width, text_wrap, None)
+                .unwrap_or_default()
         }
     }
 
     fn char_size(
         &self,
-        _text_item: Pin<&dyn i_slint_core::item_rendering::HasFont>,
-        _item_rc: &i_slint_core::item_tree::ItemRc,
-        _ch: char,
+        text_item: Pin<&dyn i_slint_core::item_rendering::HasFont>,
+        item_rc: &i_slint_core::item_tree::ItemRc,
+        ch: char,
     ) -> LogicalSize {
-        LogicalSize::new(10., 10.)
+        let font_request = text_item.font_request(item_rc);
+        if is_fixed_test_font(&font_request.family) {
+            let pixel_size = font_request.pixel_size.map_or(10., |s| s.get());
+            LogicalSize::new(pixel_size, pixel_size)
+        } else {
+            let Some(ctx) = self.slint_context() else {
+                return LogicalSize::default();
+            };
+            let mut font_ctx = ctx.font_context().borrow_mut();
+            sharedparley::char_size(&mut font_ctx, text_item, item_rc, ch).unwrap_or_default()
+        }
     }
 
     fn font_metrics(
         &self,
         font_request: i_slint_core::graphics::FontRequest,
     ) -> i_slint_core::items::FontMetrics {
-        let pixel_size = font_request.pixel_size.unwrap_or(LogicalLength::new(10.));
-        i_slint_core::items::FontMetrics {
-            ascent: pixel_size.get() * 0.7,
-            descent: -pixel_size.get() * 0.3,
-            x_height: 3.,
-            cap_height: 7.,
+        if is_fixed_test_font(&font_request.family) {
+            let pixel_size = font_request.pixel_size.map_or(10., |s| s.get());
+            i_slint_core::items::FontMetrics {
+                ascent: pixel_size * 0.7,
+                descent: -pixel_size * 0.3,
+                x_height: 3.,
+                cap_height: 7.,
+            }
+        } else {
+            let Some(ctx) = self.slint_context() else {
+                return Default::default();
+            };
+            let mut font_ctx = ctx.font_context().borrow_mut();
+            sharedparley::font_metrics(&mut font_ctx, font_request)
         }
     }
 
     fn text_input_byte_offset_for_position(
         &self,
         text_input: Pin<&i_slint_core::items::TextInput>,
-        _item_rc: &i_slint_core::item_tree::ItemRc,
+        item_rc: &i_slint_core::item_tree::ItemRc,
         pos: LogicalPoint,
     ) -> usize {
-        let text = text_input.text();
-        if pos.y < 0. {
-            return 0;
+        let font_request = text_input.font_request(item_rc);
+        if is_fixed_test_font(&font_request.family) {
+            let pixel_size = font_request.pixel_size.map_or(10., |s| s.get());
+            let text = text_input.text();
+            if pos.y < 0. {
+                return 0;
+            }
+            let line = (pos.y / pixel_size) as usize;
+            let offset = if line >= 1 {
+                text.split('\n').take(line - 1).map(|l| l.len() + 1).sum()
+            } else {
+                0
+            };
+            let Some(line) = text.split('\n').nth(line) else {
+                return text.len();
+            };
+            let column = ((pos.x / pixel_size).max(0.) as usize).min(line.len());
+            offset + column
+        } else {
+            sharedparley::text_input_byte_offset_for_position(self, text_input, item_rc, pos)
         }
-        let line = (pos.y / 10.) as usize;
-        let offset =
-            if line >= 1 { text.split('\n').take(line - 1).map(|l| l.len() + 1).sum() } else { 0 };
-        let Some(line) = text.split('\n').nth(line) else {
-            return text.len();
-        };
-        let column = ((pos.x / 10.).max(0.) as usize).min(line.len());
-        offset + column
     }
 
     fn text_input_cursor_rect_for_byte_offset(
         &self,
         text_input: Pin<&i_slint_core::items::TextInput>,
-        _item_rc: &i_slint_core::item_tree::ItemRc,
+        item_rc: &i_slint_core::item_tree::ItemRc,
         byte_offset: usize,
     ) -> LogicalRect {
-        let text = text_input.text();
-        let line = text[..byte_offset].chars().filter(|c| *c == '\n').count();
-        let column = text[..byte_offset].split('\n').nth(line).unwrap_or("").len();
-        LogicalRect::new(Point2D::new(column as f32 * 10., line as f32 * 10.), Size2D::new(1., 10.))
+        let font_request = text_input.font_request(item_rc);
+        if is_fixed_test_font(&font_request.family) {
+            let pixel_size = font_request.pixel_size.map_or(10., |s| s.get());
+            let text = text_input.text();
+            let line = text[..byte_offset].chars().filter(|c| *c == '\n').count();
+            let column = text[..byte_offset].split('\n').nth(line).unwrap_or("").len();
+            LogicalRect::new(
+                Point2D::new(column as f32 * pixel_size, line as f32 * pixel_size),
+                Size2D::new(1., pixel_size),
+            )
+        } else {
+            sharedparley::text_input_cursor_rect_for_byte_offset(
+                self,
+                text_input,
+                item_rc,
+                byte_offset,
+            )
+        }
     }
 
     fn register_font_from_memory(
         &self,
-        _data: &'static [u8],
+        data: &'static [u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = self.slint_context().ok_or("slint platform not initialized")?;
+        ctx.font_context().borrow_mut().collection.register_fonts(data.to_vec().into(), None);
         Ok(())
     }
 
     fn register_font_from_path(
         &self,
-        _path: &std::path::Path,
+        path: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let requested_path = path.canonicalize().unwrap_or_else(|_| path.into());
+        let contents = std::fs::read(requested_path)?;
+        let ctx = self.slint_context().ok_or("slint platform not initialized")?;
+        ctx.font_context().borrow_mut().collection.register_fonts(contents.into(), None);
         Ok(())
     }
 
     fn default_font_size(&self) -> LogicalLength {
-        LogicalLength::new(10.)
+        sharedparley::DEFAULT_FONT_SIZE
     }
 
     fn set_window_adapter(&self, _window_adapter: &Rc<dyn WindowAdapter>) {

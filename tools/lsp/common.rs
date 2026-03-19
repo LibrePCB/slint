@@ -302,7 +302,7 @@ impl ElementRcNode {
             let component = self.element.borrow().enclosing_component.upgrade().unwrap();
             let current_root = component.root_element.clone();
             let root_element = if std::rc::Rc::ptr_eq(&current_root, &self.element) {
-                component.parent_element.upgrade().map_or(current_root, |parent| {
+                component.parent_element().map_or(current_root, |parent| {
                     parent.borrow().enclosing_component.upgrade().unwrap().root_element.clone()
                 })
             } else {
@@ -539,6 +539,7 @@ pub struct PreviewConfig {
     pub include_paths: Vec<PathBuf>,
     pub library_paths: HashMap<String, PathBuf>,
     pub format_utf8: bool,
+    pub enable_experimental: bool,
 }
 
 /// The Component to preview
@@ -561,6 +562,7 @@ pub enum LspToPreviewMessage {
     SetConfiguration { config: PreviewConfig },
     ShowPreview(PreviewComponent),
     HighlightFromEditor { url: Option<Url>, offset: u32 },
+    Quit,
 }
 
 impl lsp_types::notification::Notification for LspToPreviewMessage {

@@ -2,16 +2,24 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use super::{
-    GlobalIdx, GridLayoutRepeatedElement, LocalMemberIndex, LocalMemberReference, MemberReference,
-    RepeatedElementIdx, SubComponentIdx, SubComponentInstanceIdx,
+    GlobalIdx, GridLayoutRepeatedElement, LayoutRepeatedElement, LocalMemberIndex,
+    LocalMemberReference, MemberReference, RepeatedElementIdx, SubComponentIdx,
+    SubComponentInstanceIdx,
 };
 use crate::expression_tree::{BuiltinFunction, MinMaxOp, OperatorClass};
-use crate::langtype::Type;
+use crate::langtype::{KeyboardShortcut, Type};
 use crate::layout::Orientation;
 use itertools::Either;
 use smol_str::SmolStr;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+
+#[derive(Debug, Clone)]
+pub enum ArrayOutput {
+    Slice,
+    Model,
+    Vector,
+}
 
 #[derive(Debug, Clone)]
 pub enum Expression {
@@ -21,6 +29,9 @@ pub enum Expression {
     NumberLiteral(f64),
     /// Bool
     BoolLiteral(bool),
+
+    // KeyboardShortcut
+    KeyboardShortcutLiteral(KeyboardShortcut),
 
     /// Reference to a property (which can also be a callback) or an element (property name is empty then).
     PropertyReference(MemberReference),
@@ -109,6 +120,14 @@ pub enum Expression {
         index: Box<Expression>,
         value: Box<Expression>,
     },
+    /// An assignment to a mutable slice element: `slice[idx] = value`
+    /// Unlike ArrayIndexAssignment, this writes directly to the slice without model semantics
+    SliceIndexAssignment {
+        /// Name of the slice variable (e.g., "result")
+        slice_name: SmolStr,
+        index: usize,
+        value: Box<Expression>,
+    },
 
     BinaryExpression {
         lhs: Box<Expression>,
@@ -137,8 +156,8 @@ pub enum Expression {
     Array {
         element_ty: Type,
         values: Vec<Expression>,
-        /// When true, this should be converted to a model. When false, this should stay as a slice
-        as_model: bool,
+        /// Choose what will be generated: a slice, a model, or a vector
+        output: ArrayOutput,
     },
     Struct {
         ty: Rc<crate::langtype::Struct>,
@@ -167,11 +186,23 @@ pub enum Expression {
 
     EnumerationValue(crate::langtype::EnumerationValue),
 
+    /// Standard cache access (box layouts and static grid cells).
     /// See LayoutCacheAccess in expression_tree.rs
     LayoutCacheAccess {
         layout_cache_prop: MemberReference,
         index: usize,
         repeater_index: Option<Box<Expression>>,
+        entries_per_item: usize,
+    },
+    /// Two-level indirection cache access for grid layouts with repeaters.
+    /// See GridRepeaterCacheAccess in expression_tree.rs
+    GridRepeaterCacheAccess {
+        layout_cache_prop: MemberReference,
+        index: usize,
+        repeater_index: Box<Expression>,
+        stride: Box<Expression>,
+        child_offset: usize,
+        inner_repeater_index: Option<Box<Expression>>,
         entries_per_item: usize,
     },
     /// Will call the sub_expression, with the cells variable set to the
@@ -180,10 +211,25 @@ pub enum Expression {
         /// The local variable (as read with [`Self::ReadLocalVariable`]) that contains the cells
         cells_variable: String,
         /// The name for the local variable that contains the repeater indices
-        repeater_indices: Option<SmolStr>,
-        /// Either an expression of type LayoutItemInfo, or an index to the repeater
-        elements: Vec<Either<Expression, RepeatedElementIdx>>,
+        repeater_indices_var_name: Option<SmolStr>,
+        /// The name for the local variable that contains the repeater steps
+        repeater_steps_var_name: Option<SmolStr>,
+        /// Either an expression of type LayoutItemInfo, or information about the repeater
+        elements: Vec<Either<Expression, LayoutRepeatedElement>>,
         orientation: Orientation,
+        sub_expression: Box<Expression>,
+    },
+    /// Will call the sub_expression, with two cells variables (horizontal and vertical)
+    /// set to the arrays of LayoutItemInfo from the elements for FlexBoxLayout
+    WithFlexBoxLayoutItemInfo {
+        /// The local variable for horizontal cells
+        cells_h_variable: String,
+        /// The local variable for vertical cells
+        cells_v_variable: String,
+        /// The name for the local variable that contains the repeater indices
+        repeater_indices_var_name: Option<SmolStr>,
+        /// Either an expression pair of type (LayoutItemInfo, LayoutItemInfo), or information about the repeater
+        elements: Vec<Either<(Expression, Expression), LayoutRepeatedElement>>,
         sub_expression: Box<Expression>,
     },
     /// Will call the sub_expression, with the cells variable set to the
@@ -192,7 +238,9 @@ pub enum Expression {
         /// The local variable (as read with [`Self::ReadLocalVariable`]) that contains the cells
         cells_variable: String,
         /// The name for the local variable that contains the repeater indices
-        repeater_indices: Option<SmolStr>,
+        repeater_indices_var_name: SmolStr,
+        /// The name for the local variable that contains the repeater steps
+        repeater_steps_var_name: SmolStr,
         /// Either an expression of type GridLayoutInputData, or information about the repeated element
         elements: Vec<Either<Expression, GridLayoutRepeatedElement>>,
         sub_expression: Box<Expression>,
@@ -252,7 +300,7 @@ impl Expression {
             Type::Array(element_ty) => Expression::Array {
                 element_ty: (**element_ty).clone(),
                 values: Vec::new(),
-                as_model: true,
+                output: ArrayOutput::Model,
             },
             Type::Struct(s) => Expression::Struct {
                 ty: s.clone(),
@@ -269,6 +317,9 @@ impl Expression {
             },
             Type::Enumeration(enumeration) => {
                 Expression::EnumerationValue(enumeration.clone().default_value())
+            }
+            Type::KeyboardShortcutType => {
+                Expression::KeyboardShortcutLiteral(KeyboardShortcut::default())
             }
             Type::ComponentFactory => Expression::EmptyComponentFactory,
             Type::StyledText => return None,
@@ -308,6 +359,7 @@ impl Expression {
             Self::PropertyAssignment { .. } => Type::Void,
             Self::ModelDataAssignment { .. } => Type::Void,
             Self::ArrayIndexAssignment { .. } => Type::Void,
+            Self::SliceIndexAssignment { .. } => Type::Void,
             Self::BinaryExpression { lhs, rhs: _, op } => {
                 if crate::expression_tree::operator_class(*op) != OperatorClass::ArithmeticOp {
                     Type::Bool
@@ -325,8 +377,11 @@ impl Expression {
             Self::RadialGradient { .. } => Type::Brush,
             Self::ConicGradient { .. } => Type::Brush,
             Self::EnumerationValue(e) => Type::Enumeration(e.enumeration.clone()),
+            Self::KeyboardShortcutLiteral(_) => Type::KeyboardShortcutType,
             Self::LayoutCacheAccess { .. } => Type::LogicalLength,
+            Self::GridRepeaterCacheAccess { .. } => Type::LogicalLength,
             Self::WithLayoutItemInfo { sub_expression, .. } => sub_expression.ty(ctx),
+            Self::WithFlexBoxLayoutItemInfo { sub_expression, .. } => sub_expression.ty(ctx),
             Self::WithGridInputData { sub_expression, .. } => sub_expression.ty(ctx),
             Self::MinMax { ty, .. } => ty.clone(),
             Self::EmptyComponentFactory => Type::ComponentFactory,
@@ -366,6 +421,9 @@ macro_rules! visit_impl {
                 $visitor(index);
                 $visitor(value);
             }
+            Expression::SliceIndexAssignment { value, .. } => {
+                $visitor(value);
+            }
             Expression::BinaryExpression { lhs, rhs, .. } => {
                 $visitor(lhs);
                 $visitor(rhs);
@@ -403,14 +461,34 @@ macro_rules! visit_impl {
                 }
             }
             Expression::EnumerationValue(_) => {}
+            Expression::KeyboardShortcutLiteral(_) => {}
             Expression::LayoutCacheAccess { repeater_index, .. } => {
                 if let Some(repeater_index) = repeater_index {
                     $visitor(repeater_index);
                 }
             }
+            Expression::GridRepeaterCacheAccess {
+                repeater_index,
+                stride,
+                inner_repeater_index,
+                ..
+            } => {
+                $visitor(repeater_index);
+                $visitor(stride);
+                if let Some(inner_repeater_index) = inner_repeater_index {
+                    $visitor(inner_repeater_index);
+                }
+            }
             Expression::WithLayoutItemInfo { elements, sub_expression, .. } => {
                 $visitor(sub_expression);
                 elements.$iter().filter_map(|x| x.$as_ref().left()).for_each($visitor);
+            }
+            Expression::WithFlexBoxLayoutItemInfo { elements, sub_expression, .. } => {
+                $visitor(sub_expression);
+                elements.$iter().filter_map(|x| x.$as_ref().left()).for_each(|(h, v)| {
+                    $visitor(h);
+                    $visitor(v);
+                });
             }
             Expression::WithGridInputData { elements, sub_expression, .. } => {
                 $visitor(sub_expression);
@@ -473,6 +551,7 @@ impl Expression {
                 // FIXME  (should be fine anyway because we mark these as not optimizable)
                 Expression::ModelDataAssignment { .. } => return,
                 Expression::LayoutCacheAccess { layout_cache_prop, .. } => layout_cache_prop,
+                Expression::GridRepeaterCacheAccess { layout_cache_prop, .. } => layout_cache_prop,
                 _ => return,
             };
             visitor(p, ctx)
@@ -737,7 +816,10 @@ impl<'a, T> EvaluationContext<'a, T> {
                     // The `Path::elements` property is not in the NativeClass
                     return &Type::PathData;
                 }
-                sc.items[*item_index].ty.lookup_property(prop_name).unwrap()
+                let item = &sc.items[*item_index];
+                item.ty.lookup_property(prop_name).unwrap_or_else(|| {
+                    panic!("Failed to lookup property {prop_name} for {}", item.name)
+                })
             }
         }
     }
@@ -843,7 +925,8 @@ impl ContextMap {
             Expression::PropertyReference(p)
             | Expression::CallBackCall { callback: p, .. }
             | Expression::PropertyAssignment { property: p, .. }
-            | Expression::LayoutCacheAccess { layout_cache_prop: p, .. } => {
+            | Expression::LayoutCacheAccess { layout_cache_prop: p, .. }
+            | Expression::GridRepeaterCacheAccess { layout_cache_prop: p, .. } => {
                 *p = self.map_property_reference(p);
             }
             _ => (),

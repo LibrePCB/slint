@@ -12,7 +12,10 @@
 //!
 //! Meaning that there must an error with that error message spanning the characters on the line above between the `>` and `<` characters.
 //! The `>` and `<` indicators may also appear individually, if the diagnostic spans multiple lines.
+//!
 //! A `^` character means that the diagnostic must only span that single character.
+//! A `|` character means that the diagnostic must return a length of 0 and not span any
+//! characters (although most LSP clients will render it as spanning at least 1 character).
 //!
 //! If there are additional `^` characters: `> <^error{expected_message}`  then it means the comment refers to a diagnostic two lines above, instead of one, and so on with more carets.
 //!
@@ -20,7 +23,7 @@
 //! should be an additional character to the left, which is useful if the diagnostic starts or ends
 //! in the first or second column, where otherwise the `//` is located.
 //!
-//! `> <warning{expected_message}` is also supported.
+//! Warnings with `> <warning{expected_message}` are also supported.
 //!
 //! The newlines are replaced by `↵` in the error message. Also the manifest dir (CARGO_MANIFEST_DIR) is replaced by `📂`.
 //!
@@ -61,15 +64,11 @@ fn syntax_tests() -> std::io::Result<()> {
             for test_entry in path.read_dir()? {
                 let test_entry = test_entry?;
                 let path = test_entry.path();
-                if let Some(ext) = path.extension() {
-                    if (ext == "60" || ext == "slint")
-                        && pattern
-                            .as_ref()
-                            .map(|p| p.is_match(&path.to_string_lossy()))
-                            .unwrap_or(true)
-                    {
-                        test_entries.push(path);
-                    }
+                if let Some(ext) = path.extension()
+                    && (ext == "60" || ext == "slint")
+                    && pattern.as_ref().map(|p| p.is_match(&path.to_string_lossy())).unwrap_or(true)
+                {
+                    test_entries.push(path);
                 }
             }
         }
@@ -121,21 +120,25 @@ fn extract_expected_diags(source: &str) -> Vec<ExpectedDiagnostic> {
     // carets refers to the number of lines to go back. This is useful when one line of code produces multiple
     // errors or warnings.
     let re = regex::Regex::new(
-        r"\n *//[^\n\^<>]*((\^)|((>)?( *<)?))(\^*)(<*)(error|warning)\{([^\n]*)\}",
+        r"\n *//[^\n\^\|<>]*((\^)|(\|)|((>)?( *<)?))(\^*)(<*)(error|warning|note)\{([^\n]*)\}",
     )
     .unwrap();
-    //      regex::Regex::new(r"\n *//[^\n\^<>]*(\^|>|<)(\^*)(error|warning)\{([^\n]*)\}").unwrap();
+
     for m in re.captures_iter(source) {
         let line_begin_offset = m.get(0).unwrap().start();
         let start_column = m.get(1).unwrap().start()
             - line_begin_offset
             // Allow shifting columns with <
-            - m.get(7).map(|group| group.as_str().len()).unwrap_or_default();
+            - m.get(8).map(|group| group.as_str().len()).unwrap_or_default();
 
-        let lines_to_source = m.get(6).map(|group| group.as_str().len()).unwrap_or_default() + 1;
-        let warning_or_error = m.get(8).unwrap().as_str();
-        let expected_message =
-            m.get(9).unwrap().as_str().replace('↵', "\n").replace('📂', env!("CARGO_MANIFEST_DIR"));
+        let lines_to_source = m.get(7).map(|group| group.as_str().len()).unwrap_or_default() + 1;
+        let warning_or_error = m.get(9).unwrap().as_str();
+        let expected_message = m
+            .get(10)
+            .unwrap()
+            .as_str()
+            .replace('↵', "\n")
+            .replace('📂', env!("CARGO_MANIFEST_DIR"));
         let comment_range = m.get(0).unwrap().range();
 
         let mut line_counter = 0;
@@ -158,29 +161,34 @@ fn extract_expected_diags(source: &str) -> Vec<ExpectedDiagnostic> {
             // ^warning{...}
             start = Some(offset);
             end = Some(offset);
+        } else if m.get(3).is_some() {
+            // |warning{...}
+            start = Some(offset);
+            end = Some(offset - 1);
         } else {
             // >
-            if m.get(4).is_some() {
+            if m.get(5).is_some() {
                 start = Some(offset);
                 offset += 1;
             }
             // < (including spaces before)
-            if let Some(range_length) = m.get(5).map(|group| group.as_str().len()) {
+            if let Some(range_length) = m.get(6).map(|group| group.as_str().len()) {
                 end = Some(offset + range_length - 1);
             }
         }
 
         // Windows edge-case, if the end falls on a newline, it should span the entire
         // newline character, which is two characters, not one.
-        if let Some(end_offset) = end {
-            if source.get(end_offset..=(end_offset + 1)) == Some("\r\n") {
-                end = Some(end_offset + 1)
-            };
+        if let Some(end_offset) = end
+            && source.get(end_offset..=(end_offset + 1)) == Some("\r\n")
+        {
+            end = Some(end_offset + 1);
         }
 
         let expected_diag_level = match warning_or_error {
             "warning" => DiagnosticLevel::Warning,
             "error" => DiagnosticLevel::Error,
+            "note" => DiagnosticLevel::Note,
             _ => panic!("Unsupported diagnostic level {warning_or_error}"),
         };
 
@@ -344,20 +352,24 @@ fn update(
         let mut insert_range_at = |range: &str, l, c: usize| {
             let column_adjust = if c < 3 { "<".repeat(3 - c) } else { "".to_string() };
             let byte_offset = lines[l - 1] + 1;
+            let level = match d.level() {
+                DiagnosticLevel::Error => "error",
+                DiagnosticLevel::Warning => "warning",
+                DiagnosticLevel::Note => "note",
+                _ => todo!(),
+            };
             let to_insert = format!(
-                "//{indent}{range}{adjust}{column_adjust}{error_or_warning}{{{message}}}\n",
+                "//{indent}{range}{adjust}{column_adjust}{level}{{{message}}}\n",
                 indent = " ".repeat(c.max(3) - 3),
                 adjust = "^".repeat(last_line_adjust[l - 1]),
-                error_or_warning =
-                    if d.level() == DiagnosticLevel::Error { "error" } else { "warning" },
                 message = d.message().replace('\n', "↵").replace(env!("CARGO_MANIFEST_DIR"), "📂")
             );
             if byte_offset > source.len() {
                 source.push('\n');
             }
             source.insert_str(byte_offset, &to_insert);
-            for line in (l - 1)..lines.len() {
-                lines[line] += to_insert.len();
+            for line_offset in lines.iter_mut().skip(l - 1) {
+                *line_offset += to_insert.len();
             }
             last_line_adjust[l - 1] += 1;
         };
@@ -370,8 +382,9 @@ fn update(
 
         // The end column is exclusive, therefore use - 1 here
         let range = if d.length() <= 1 {
-            // Single-character diagnostic, use "^" for the marker
-            "^".to_owned()
+            // Single-character diagnostic, use "^" for the marker for 1-character diagnostics,
+            // use "|" for 0-character diagnostics
+            if d.length() == 0 { "|" } else { "^" }.to_owned()
         } else {
             let end = if line_start == line_end {
                 // Same line, we can insert the closing "<"

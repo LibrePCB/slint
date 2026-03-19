@@ -74,22 +74,21 @@ impl WinitSkiaRenderer {
         }))
     }
 
-    #[cfg(feature = "unstable-wgpu-26")]
-    pub fn new_wgpu_26_suspended(
-        shared_backend_data: &Rc<crate::SharedBackendData>,
-    ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
-        Ok(Box::new(Self {
-            renderer: SkiaRenderer::default_wgpu_26(&shared_backend_data.skia_context),
-            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
-        }))
-    }
-
     #[cfg(feature = "unstable-wgpu-27")]
     pub fn new_wgpu_27_suspended(
         shared_backend_data: &Rc<crate::SharedBackendData>,
     ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
         Ok(Box::new(Self {
             renderer: SkiaRenderer::default_wgpu_27(&shared_backend_data.skia_context),
+            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+        }))
+    }
+    #[cfg(feature = "unstable-wgpu-28")]
+    pub fn new_wgpu_28_suspended(
+        shared_backend_data: &Rc<crate::SharedBackendData>,
+    ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
+        Ok(Box::new(Self {
+            renderer: SkiaRenderer::default_wgpu_28(&shared_backend_data.skia_context),
             requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
         }))
     }
@@ -118,34 +117,32 @@ impl WinitSkiaRenderer {
                         #[cfg(target_vendor = "apple")]
                         return Ok(Self::new_metal_suspended);
                         #[cfg(not(target_vendor = "apple"))]
-                        return Err(format!("Metal rendering requested but this is only supported on Apple platforms").into());
+                        return Err("Metal rendering requested but this is only supported on Apple platforms".to_string().into());
                     }
                     RequestedGraphicsAPI::Vulkan => {
                         #[cfg(feature = "renderer-skia-vulkan")]
                         return Ok(Self::new_vulkan_suspended);
                         #[cfg(not(feature = "renderer-skia-vulkan"))]
-                        return Err(format!(
+                        return Err(
                             "Vulkan rendering requested but renderer-skia-vulkan is not enabled"
-                        )
-                        .into());
+                                .to_string()
+                                .into(),
+                        );
                     }
                     RequestedGraphicsAPI::Direct3D => {
                         #[cfg(target_family = "windows")]
                         return Ok(Self::new_direct3d_suspended);
                         #[cfg(not(target_family = "windows"))]
-                        return Err(format!(
+                        return Err(
                             "Direct3D rendering requested but this is only supported on Windows"
-                        )
-                        .into());
-                    }
-                    #[cfg(feature = "unstable-wgpu-26")]
-                    RequestedGraphicsAPI::WGPU26(..) => {
-                        return Ok(Self::new_wgpu_26_suspended);
+                                .to_string()
+                                .into(),
+                        );
                     }
                     #[cfg(feature = "unstable-wgpu-27")]
-                    RequestedGraphicsAPI::WGPU27(..) => {
-                        return Ok(Self::new_wgpu_27_suspended);
-                    }
+                    RequestedGraphicsAPI::WGPU27(..) => Ok(Self::new_wgpu_27_suspended),
+                    #[cfg(feature = "unstable-wgpu-28")]
+                    RequestedGraphicsAPI::WGPU28(..) => Ok(Self::new_wgpu_28_suspended),
                 }
             }
             None => Ok(Self::new_suspended),

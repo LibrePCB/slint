@@ -326,6 +326,7 @@ module.exports = grammar({
     expression: ($) =>
       prec.right(
         choice(
+          $.keys,
           $.parens_op,
           $.index_op,
           $.tr,
@@ -374,6 +375,23 @@ module.exports = grammar({
           "arguments",
           optional(seq(",", commaSep1($.expression), optional(","))),
         ),
+        ")",
+      ),
+
+    // @keys(...)
+    _keys_entry: ($) => choice(seq($.simple_identifier, optional("?")), $.string_value),
+    keys: ($) =>
+      seq(
+        "@keys",
+        "(",
+        optional(
+          seq(
+            $._keys_entry,
+            repeat(seq(
+              "+",
+              $._keys_entry
+            ))
+          )),
         ")",
       ),
 
@@ -503,7 +521,7 @@ module.exports = grammar({
       seq(
         field("name", choice($.function_call, $.simple_identifier)),
         "=>",
-        field("action", $.imperative_block),
+        field("action", $._binding),
       ),
 
     changed_callback: ($) =>
@@ -511,7 +529,7 @@ module.exports = grammar({
         "changed",
         field("name", $.simple_identifier),
         "=>",
-        field("action", $.imperative_block),
+        field("action", $._binding),
       ),
 
     function_call: ($) =>
@@ -553,9 +571,23 @@ module.exports = grammar({
           ),
           ")",
         ),
+        seq(
+          field("name", $.conic_gradient_identifier),
+          "(",
+          field(
+            "arguments",
+            seq(
+              optional(seq("from", field("from_angle", $.angle_value), ",")),
+              field("colors", commaSep2($.conic_gradient_color)),
+              optional(","),
+            ),
+          ),
+          ")",
+        ),
       ),
 
     gradient_color: ($) => seq($.argument, optional($.percent_value)),
+    conic_gradient_color: ($) => seq($.argument, $.angle_value),
 
     image_call: ($) =>
       seq(
@@ -712,6 +744,8 @@ module.exports = grammar({
     radial_gradient_identifier: (_) =>
       choice("@radial-gradient", "@radial_gradient"),
     radial_gradient_kind: (_) => choice("circle"),
+    conic_gradient_identifier: (_) =>
+      choice("@conic-gradient", "@conic_gradient"),
 
     reference_identifier: (_) => choice("parent", "root", "self"),
 

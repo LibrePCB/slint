@@ -4,6 +4,9 @@
 ci_config: &ci_config
  - '.github/**'
  - '.mise/**'
+ # We count changes to Cargo.lock as a "CI config" level change, as we need to ensure that all CI jobs will work correctly with the updated lock file.
+ # Otherwise, later job runs may run into issues that have nothing to do with their changes.
+ - 'Cargo.lock'
 
 files_in_root: &files_in_root
  - '*!(/)' # changes in the root, such as cspell.json or pnpm-lock.yaml
@@ -47,7 +50,6 @@ figma_inspector:
 
 material_components:
  - 'ui-libraries/material/**'
- - *ci_config
 
 internal: &internal
  # The API specific tests don't depends on renderer or backend, but they do depend on the Qt widgets and the testing backend
@@ -115,4 +117,14 @@ updater_test:
 
 servo_example:
  - 'examples/servo/**'
+ - *ci_config
+
+bevy_examples:
+ - 'examples/bevy/**'
+ - *ci_config
+
+rust_files:
+ - '**/*.rs'
+ - '**/Cargo.toml'
+ - 'Cargo.lock'
  - *ci_config

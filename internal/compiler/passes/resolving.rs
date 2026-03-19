@@ -10,15 +10,18 @@
 
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::*;
-use crate::langtype::{ElementType, Struct, StructName, Type};
+use crate::langtype;
+use crate::langtype::{ElementType, KeyboardModifiers, Struct, StructName, Type};
 use crate::lookup::{LookupCtx, LookupObject, LookupResult, LookupResultCallable};
 use crate::object_tree::*;
 use crate::parser::{NodeOrToken, SyntaxKind, SyntaxNode, identifier_text, syntax_nodes};
 use crate::typeregister::TypeRegister;
 use core::num::IntErrorKind;
+use i_slint_common::for_each_keys;
 use smol_str::{SmolStr, ToSmolStr};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
+use unicode_segmentation::UnicodeSegmentation;
 
 mod remove_noop;
 
@@ -85,13 +88,16 @@ fn resolve_expression(
                 );
                 Expression::Invalid
             }
+            SyntaxKind::AtKeys => {
+                Expression::from_at_keys_node(node.clone().into(), &mut lookup_ctx)
+            }
             _ => {
                 debug_assert!(diag.has_errors());
                 Expression::Invalid
             }
         };
         match expr {
-            Expression::DebugHook { expression, .. } => *expression = Box::new(new_expr),
+            Expression::DebugHook { expression, .. } => **expression = new_expr,
             _ => *expr = new_expr,
         }
     }
@@ -344,7 +350,11 @@ impl Expression {
             .ArgumentDeclaration()
             .map(|x| identifier_text(&x.DeclaredIdentifier()).unwrap_or_default())
             .collect();
-        Self::from_codeblock_node(node.CodeBlock(), ctx).maybe_convert_to(
+        let Some(code_block) = node.CodeBlock() else {
+            debug_assert!(ctx.diag.has_errors());
+            return Expression::Invalid;
+        };
+        Self::from_codeblock_node(code_block, ctx).maybe_convert_to(
             ctx.return_type().clone(),
             &node,
             ctx.diag,
@@ -360,6 +370,7 @@ impl Expression {
                     SyntaxKind::AtGradient => Some(Self::from_at_gradient(node.into(), ctx)),
                     SyntaxKind::AtTr => Some(Self::from_at_tr(node.into(), ctx)),
                     SyntaxKind::AtMarkdown => Some(Self::from_at_markdown(node.into(), ctx)),
+                    SyntaxKind::AtKeys => Some(Self::from_at_keys_node(node.into(), ctx)),
                     SyntaxKind::QualifiedName => Some(Self::from_qualified_name_node(
                         node.clone().into(),
                         ctx,
@@ -753,140 +764,38 @@ impl Expression {
             return Expression::Invalid;
         };
 
-        let subs = node.Expression().map(|n| {
-            Expression::from_expression_node(n.clone(), ctx).maybe_convert_to(
-                Type::String,
-                &n,
-                ctx.diag,
-            )
-        });
-        let values = subs.collect::<Vec<_>>();
-
-        let mut expr = None;
-
-        // check format string
-        {
-            let mut arg_idx = 0;
-            let mut pos_max = 0;
-            let mut pos = 0;
-            let mut literal_start_pos = 0;
-            while let Some(mut p) = string[pos..].find(['{', '}']) {
-                if string.len() - pos < p + 1 {
-                    ctx.diag.push_error(
-                        "Unescaped trailing '{' in format string. Escape '{' with '{{'".into(),
-                        &node,
-                    );
-                    break;
-                }
-                p += pos;
-
-                // Skip escaped }
-                if string.get(p..=p) == Some("}") {
-                    if string.get(p + 1..=p + 1) == Some("}") {
-                        pos = p + 2;
-                        continue;
-                    } else {
-                        ctx.diag.push_error(
-                            "Unescaped '}' in format string. Escape '}' with '}}'".into(),
-                            &node,
-                        );
-                        break;
+        let values: Vec<Expression> = node
+            .Expression()
+            .map(|node| {
+                let expr = Expression::from_expression_node(node.clone(), ctx);
+                if expr.ty() == Type::StyledText {
+                    expr
+                } else {
+                    Expression::FunctionCall {
+                        function: BuiltinFunction::StringToStyledText.into(),
+                        arguments: vec![expr.maybe_convert_to(Type::String, &node, ctx.diag)],
+                        source_location: Some(node.to_source_location()),
                     }
                 }
+            })
+            .collect();
 
-                // Skip escaped {
-                if string.get(p + 1..=p + 1) == Some("{") {
-                    pos = p + 2;
-                    continue;
-                }
+        let dummy_value =
+            i_slint_common::styled_text::StyledText::from_plain_text("dummy value".into());
 
-                // Find the argument
-                let end = if let Some(end) = string[p..].find('}') {
-                    end + p
-                } else {
-                    ctx.diag.push_error(
-                        "Unterminated placeholder in format string. '{' must be escaped with '{{'"
-                            .into(),
-                        &node,
-                    );
-                    break;
-                };
-                let argument = &string[p + 1..end];
-                let argument_index = if argument.is_empty() {
-                    let argument_index = arg_idx;
-                    arg_idx += 1;
-                    argument_index
-                } else if let Ok(n) = argument.parse::<u16>() {
-                    pos_max = pos_max.max(n as usize + 1);
-                    n as usize
-                } else {
-                    ctx.diag
-                        .push_error("Invalid '{...}' placeholder in format string. The placeholder must be a number, or braces must be escaped with '{{' and '}}'".into(), &node);
-                    break;
-                };
-
-                let value = if let Some(value) = values.get(argument_index).cloned() {
-                    value
-                } else {
-                    // Will result in a `Format string contains {num} placeholders, but only {} extra arguments were given` error later
-                    break;
-                };
-
-                let add = Expression::BinaryExpression {
-                    lhs: Box::new(Expression::StringLiteral(
-                        (&string[literal_start_pos..p]).into(),
-                    )),
-                    op: '+',
-                    rhs: Box::new(Expression::FunctionCall {
-                        function: BuiltinFunction::EscapeMarkdown.into(),
-                        arguments: vec![value],
-                        source_location: Some(node.to_source_location()),
-                    }),
-                };
-                expr = Some(match expr {
-                    None => add,
-                    Some(expr) => Expression::BinaryExpression {
-                        lhs: Box::new(expr),
-                        op: '+',
-                        rhs: Box::new(add),
-                    },
-                });
-                pos = end + 1;
-                literal_start_pos = pos;
-            }
-            let trailing = &string[literal_start_pos..];
-            if !trailing.is_empty() {
-                let trailing = Expression::StringLiteral(trailing.into());
-                expr = Some(match expr {
-                    None => trailing,
-                    Some(expr) => Expression::BinaryExpression {
-                        lhs: Box::new(expr),
-                        op: '+',
-                        rhs: Box::new(trailing),
-                    },
-                });
-            }
-            if arg_idx > 0 && pos_max > 0 {
-                ctx.diag.push_error(
-                    "Cannot mix positional and non-positional placeholder in format string".into(),
-                    &node,
-                );
-            } else if (pos_max == 0 && arg_idx != values.len()) || pos_max > values.len() {
-                let num = arg_idx.max(pos_max);
-                ctx.diag.push_error(
-                    format!(
-                        "Format string contains {num} placeholders, but {} values were given",
-                        values.len()
-                    ),
-                    &node,
-                );
-            }
+        // Validate the markdown format string with dummy values
+        if let Err(e) = i_slint_common::styled_text::StyledText::parse_interpolated(
+            &string,
+            &vec![&dummy_value; values.len()],
+        ) {
+            ctx.diag.push_error(e.to_string(), &node);
         }
 
         Expression::FunctionCall {
             function: BuiltinFunction::ParseMarkdown.into(),
             arguments: vec![
-                expr.unwrap_or_else(|| Expression::default_value_for_type(&Type::String)),
+                Expression::StringLiteral(string),
+                Expression::Array { element_ty: Type::StyledText, values },
             ],
             source_location: Some(node.to_source_location()),
         }
@@ -1055,6 +964,148 @@ impl Expression {
             ],
             source_location: Some(node.to_source_location()),
         }
+    }
+
+    pub fn from_at_keys_node(node: syntax_nodes::AtKeys, ctx: &mut LookupCtx) -> Self {
+        let mut shortcut = langtype::KeyboardShortcut::default();
+
+        let mut key_code: Option<(SmolStr, ShiftBehavior, NodeOrToken)> = None;
+
+        let idents_and_questions: Vec<_> = node
+            .children_with_tokens()
+            .filter(|n| matches!(n.kind(), SyntaxKind::Identifier | SyntaxKind::Question))
+            // The first identifier is always `keys`
+            .skip(1)
+            .collect();
+
+        for (index, ident_or_question) in idents_and_questions.iter().enumerate() {
+            if ident_or_question.kind() == SyntaxKind::Question {
+                continue;
+            }
+            let identifier = ident_or_question;
+
+            let is_question = || -> bool {
+                matches!(
+                    idents_and_questions.get(index + 1).map(NodeOrToken::kind),
+                    Some(SyntaxKind::Question)
+                )
+            };
+
+            match identifier.as_token().unwrap().text() {
+                "Alt" => {
+                    if is_question() {
+                        shortcut.ignore_alt = true;
+                    } else {
+                        shortcut.modifiers.alt = true;
+                    }
+                }
+                "Control" => shortcut.modifiers.control = true,
+                "Meta" => shortcut.modifiers.meta = true,
+                "Shift" => {
+                    if is_question() {
+                        shortcut.ignore_shift = true;
+                    } else {
+                        shortcut.modifiers.shift = true;
+                    }
+                }
+                key_name => {
+                    if let Some((key, shiftbehavior)) = lookup_key(key_name) {
+                        key_code = Some((
+                            SmolStr::from_iter(core::iter::once(key)),
+                            shiftbehavior,
+                            identifier.clone(),
+                        ))
+                    } else {
+                        // TODO: This should suggest more kinds of close matches
+                        let uppercased = key_name.to_uppercase();
+                        let hint = if lookup_key(&uppercased).is_some() {
+                            // common case: @keys(Control+a) instead of @keys(Control+A)
+                            format!("Use uppercase {uppercased} instead")
+                        } else {
+                            format!("Consider using \"{key_name}\"")
+                        };
+                        ctx.diag.push_error(
+                            format!("{key_name} not defined in the Keys namespace\n({hint})"),
+                            identifier,
+                        );
+                        shortcut.modifiers = KeyboardModifiers::default();
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Handle localization issues regarding shift per-keycode
+        // This only applies to keys that are in the Key namespace
+        if let Some((key_code, shift_behavior, node)) = key_code {
+            match shift_behavior {
+                ShiftBehavior::LocalizedShiftable { shifted_hint } => {
+                    if shortcut.ignore_shift {
+                        ctx.diag.push_warning(
+                            format!(
+                                "{name} already implies Shift? (remove Shift?)",
+                                name = node.as_token().unwrap().text()
+                            ),
+                            &node,
+                        );
+                    }
+                    shortcut.ignore_shift = true;
+                    if shortcut.modifiers.shift {
+                        ctx.diag.push_error(
+                                        format!(
+                                            "Shortcuts involving {name} ignore Shift to support different keyboard layouts\n\
+                                            Remove Shift and consider using e.g. {shifted_hint} (for U.S. Keyboard layout)",
+                                            name = node.as_token().unwrap().text()
+                                        ),
+                                        &node,
+                                    );
+                    }
+                }
+                // Unshiftable keys ignore the shift state in their key_code
+                // No special action needed
+                ShiftBehavior::Unshiftable => {}
+            }
+            shortcut.key = key_code;
+        }
+
+        // If there is a string literal, use it as the key
+        if let Some(token) = node.child_token(SyntaxKind::StringLiteral)
+            && let Some(key) = crate::literals::unescape_string(token.text())
+        {
+            // NFC-normalize the key string for consistent matching
+            let normalizer = icu_normalizer::ComposingNormalizer::new_nfc();
+            let key: SmolStr = normalizer.normalize(&key).into();
+
+            // Validate that the string literal contains exactly one grapheme cluster
+            let grapheme_count = key.graphemes(true).count();
+            if grapheme_count == 0 {
+                ctx.diag.push_error(
+                    "Keyboard shortcut string literal must not be empty".to_string(),
+                    &token,
+                );
+            } else if grapheme_count > 1 {
+                ctx.diag.push_error(
+                    format!(
+                        "Keyboard shortcut string literal must contain exactly one grapheme cluster, found {grapheme_count}",
+                    ),
+                    &token,
+                );
+            }
+
+            shortcut.key = key;
+
+            let lowercase: SmolStr = shortcut.key.to_lowercase().into();
+            if lowercase != shortcut.key {
+                ctx.diag.push_error(
+                    format!(
+                        "Keyboard shortcut literals must currently be lowercase, use \"{lowercase}\" instead",
+                    ),
+                    &token,
+                );
+            }
+        }
+
+        Expression::KeyboardShortcut(shortcut)
     }
 
     /// Perform the lookup
@@ -1583,6 +1634,52 @@ impl Expression {
             }
         })
     }
+}
+
+/// Shift Behavior relevant for the @keys macro
+#[derive(Clone, Debug)]
+enum ShiftBehavior {
+    // Keys that change their key code when Shift is pressed, but the shifted value is layout-dependent
+    LocalizedShiftable { shifted_hint: &'static str },
+    // Unshiftable keys have the same key code regardless of the shift state
+    //
+    // (This also currently applies to the letter keys, as we match everything with lowercase)
+    Unshiftable,
+}
+
+/// Look up the given key in the Keys namespace, including its shift behavior
+fn lookup_key(keycode: &str) -> Option<(char, ShiftBehavior)> {
+    macro_rules! key_shift_behavior {
+        ($keycode:literal # $ident:ident # $shifted:ident) => {
+            (
+                stringify!($ident),
+                (
+                    $keycode,
+                    ShiftBehavior::LocalizedShiftable { shifted_hint: stringify!($shifted) },
+                ),
+            )
+        };
+        ($keycode:literal # $ident:ident # ) => {
+            (stringify!($ident), ($keycode, ShiftBehavior::Unshiftable))
+        };
+    }
+    macro_rules! generate_key_map {
+        [ $($char:literal # $name:ident # $($shifted_char:literal)?$($shifted_ident:ident)? $(=> $($qt:ident)|* # $($winit:ident $(($_pos:ident))?)|* # $($_xkb:ident)|*)?;)* ] => {
+            {
+                [
+                    $(
+                        key_shift_behavior!($char # $name # $($shifted_char)?$($shifted_ident)?)
+                    ),*
+                ]
+            }
+        }
+    }
+    thread_local! {
+        pub static KEY_MAP: HashMap<&'static str, (char, ShiftBehavior)> =
+            for_each_keys!(generate_key_map).into_iter().collect();
+    }
+
+    KEY_MAP.with(|map| map.get(keycode).cloned())
 }
 
 /// Return the type that merge two times when they are used in two branch of a condition

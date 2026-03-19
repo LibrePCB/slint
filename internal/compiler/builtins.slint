@@ -176,6 +176,15 @@ export component FocusScope {
     callback focus_lost(reason: FocusReason);
     //-default_size_binding:expands_to_parent_geometry
     //-accepts_focus
+
+    Shortcut { }
+}
+
+component Shortcut {
+    in property <bool> enabled: true;
+    in property <keyboard-shortcut> keys;
+    callback activated();
+    //-is_non_item_type
 }
 
 export component Flickable inherits Empty {
@@ -216,6 +225,23 @@ export component SwipeGestureHandler {
     // clears state, invokes swipe-cancelled()
     function cancel() {
     }
+
+    //-default_size_binding:expands_to_parent_geometry
+}
+
+export component PinchGestureHandler {
+    in property <bool> enabled: true;
+
+    out property <bool> active;
+    out property <float> scale;       // Cumulative factor: 1.0 = no change
+    out property <angle> rotation;    // Cumulative rotation: 0deg = no change
+    out property <Point> center;
+
+    callback started();
+    callback updated();
+    callback ended();
+    callback cancelled();
+    callback smart-magnify();
 
     //-default_size_binding:expands_to_parent_geometry
 }
@@ -309,14 +335,9 @@ export component ContextMenuArea inherits Empty {
 component WindowItem {
     in-out property <length> width;
     in-out property <length> height;
-    out property <length> safe-area-inset-top;
-    out property <length> safe-area-inset-bottom;
-    out property <length> safe-area-inset-left;
-    out property <length> safe-area-inset-right;
-    out property <length> virtual-keyboard-x;
-    out property <length> virtual-keyboard-y;
-    out property <length> virtual-keyboard-width;
-    out property <length> virtual-keyboard-height;
+    out property <Edges> safe-area-insets;
+    out property <Point> virtual-keyboard-position;
+    out property <Size> virtual-keyboard-size;
     in property <brush> background; // StyleMetrics.background  set in apply_default_properties_from_style
     in property <brush> color <=> background;
     in property <string> title: "Slint Window";
@@ -328,6 +349,8 @@ component WindowItem {
     in property <length> default-font-size;
     in property <int> default-font-weight;
     in property <image> icon;
+    function hide() {
+    }
 }
 
 export component Window inherits WindowItem {
@@ -440,6 +463,17 @@ export component HorizontalLayout {
     in property <LayoutAlignment> alignment;
 }
 
+export component FlexBoxLayout {
+    in property <length> spacing-horizontal;
+    in property <length> spacing-vertical;
+    in property <length> spacing;
+    in property <LayoutAlignment> alignment: LayoutAlignment.start;  // CSS default is flex-start
+    in property <FlexDirection> flex-direction;
+    in property <FlexAlignContent> align-content;
+    in property <FlexAlignItems> align-items;
+    in property <FlexWrap> flex-wrap;
+}
+
 component MoveTo {
     in property <float> x;
     in property <float> y;
@@ -508,6 +542,7 @@ export component Path {
     in property <float> viewbox-y;
     in property <float> viewbox-width;
     in property <float> viewbox-height;
+    in property <ImageFit> fit-style: contain;
     in property <bool> clip;
     in property <bool> anti-alias: true;
 

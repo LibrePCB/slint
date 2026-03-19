@@ -94,6 +94,8 @@ pub fn remove_unused(root: &mut CompilationUnit) {
         ) {
             match scope {
                 EvaluationScope::SubComponent(sub_component_idx, _) => {
+                    // Debugging hint: if this unwrap fails, check if count_property_use() didn't
+                    // forget to visit something, leading to the property being removed
                     *p = self.sc_mappings[*sub_component_idx].prop_mapping[*p].unwrap();
                 }
                 EvaluationScope::Global(global_idx) => {
@@ -296,8 +298,11 @@ mod visitor {
             layout_info_v,
             child_of_layout: _,
             grid_layout_input_for_repeated,
+            is_repeated_row: _,
+            grid_layout_children,
             accessible_prop,
             element_infos: _,
+            row_child_templates: _,
             prop_analysis,
         }: &mut SubComponent,
         state: &VisitorState,
@@ -381,6 +386,10 @@ mod visitor {
         visit_expression(layout_info_v.get_mut(), &scope, state, visitor);
         if let Some(e) = grid_layout_input_for_repeated {
             visit_expression(e.get_mut(), &scope, state, visitor);
+        }
+        for child in grid_layout_children {
+            visit_expression(child.layout_info_h.get_mut(), &scope, state, visitor);
+            visit_expression(child.layout_info_v.get_mut(), &scope, state, visitor);
         }
 
         for a in accessible_prop.values_mut() {
@@ -487,6 +496,7 @@ mod visitor {
                 Expression::CallBackCall { callback, .. } => callback,
                 Expression::PropertyAssignment { property, .. } => property,
                 Expression::LayoutCacheAccess { layout_cache_prop, .. } => layout_cache_prop,
+                Expression::GridRepeaterCacheAccess { layout_cache_prop, .. } => layout_cache_prop,
                 _ => return,
             };
             visit_member_reference(p, scope, state, visitor);
@@ -501,9 +511,8 @@ mod visitor {
     ) {
         visit_expression(expression.get_mut(), scope, state, visitor);
         match animation {
-            Some(Animation::Static(anim)) => visit_expression(anim, scope, state, visitor),
-            Some(Animation::Transition(anim)) => {
-                visit_expression(anim, scope, state, visitor);
+            Some(Animation::Static(anim) | Animation::Transition(anim)) => {
+                visit_expression(anim, scope, state, visitor)
             }
             None => (),
         }

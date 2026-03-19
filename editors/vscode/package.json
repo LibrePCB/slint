@@ -11,7 +11,7 @@
     "live preview",
     "drag-and-drop editor"
   ],
-  "version": "1.15.0",
+  "version": "1.16.0",
   "publisher": "Slint",
   "icon": "extension-logo.png",
   "license": "GPL-3.0",
@@ -238,17 +238,17 @@
   },
   "dependencies": {
     "fs-extra": "11.3.3",
-    "simple-git": "3.30.0",
+    "simple-git": "3.32.3",
     "vscode-languageclient": "9.0.1",
-    "vscode-languageserver": "9.0.1"
+    "vscode-languageserver": "9.0.1",
+    "vscode-languageserver-types": "3.17.5"
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
-    "@rauschma/env-var": "1.0.1",
     "@types/fs-extra": "11.0.4",
     "@types/node": "catalog:",
     "@types/vscode": "1.82.0",
-    "esbuild": "0.27.2",
+    "esbuild": "0.27.3",
     "shx": "0.4.0",
     "typescript": "catalog:",
     "vscode-tmgrammar-test": "0.1.3"

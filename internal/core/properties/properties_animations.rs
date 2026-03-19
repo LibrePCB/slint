@@ -3,9 +3,11 @@
 
 use super::*;
 use crate::{
+    animations::physics_simulation,
     items::{AnimationDirection, PropertyAnimation},
     lengths::LogicalLength,
 };
+use euclid::Length;
 #[cfg(not(feature = "std"))]
 use num_traits::Float;
 
@@ -19,6 +21,43 @@ enum AnimationState {
     Done {
         iteration_count: u64,
     },
+}
+
+pub(super) struct PropertyPhysicsAnimationData<S> {
+    simulation: S,
+    state: AnimationState,
+}
+
+impl<S> PropertyPhysicsAnimationData<S>
+where
+    S: physics_simulation::Simulation,
+{
+    pub fn new(simulation: S) -> PropertyPhysicsAnimationData<S> {
+        PropertyPhysicsAnimationData { simulation, state: AnimationState::Delaying }
+    }
+
+    /// Single iteration of the animation
+    pub fn compute_interpolated_value(&mut self) -> (crate::Coord, bool) {
+        match self.state {
+            AnimationState::Delaying => {
+                // Decide on next state:
+                self.state = AnimationState::Animating { current_iteration: 0 };
+                self.compute_interpolated_value()
+            }
+            AnimationState::Animating { current_iteration: _ } => {
+                let (val, finished) = self.simulation.step(crate::animations::current_tick());
+                if finished {
+                    self.state = AnimationState::Done { iteration_count: 0 };
+                    self.compute_interpolated_value()
+                } else {
+                    (val as crate::Coord, false)
+                }
+            }
+            AnimationState::Done { iteration_count: _ } => {
+                (self.simulation.curr_value() as crate::Coord, true)
+            }
+        }
+    }
 }
 
 pub(super) struct PropertyValueAnimationData<T> {
@@ -41,6 +80,7 @@ impl<T: InterpolatedPropertyValue + Clone> PropertyValueAnimationData<T> {
         let new_tick = crate::animations::current_tick();
         let mut time_progress = new_tick.duration_since(self.start_time).as_millis() as u64;
         let reversed = |iteration: u64| -> bool {
+            #[allow(clippy::manual_is_multiple_of)] // keep symmetry
             match self.details.direction {
                 AnimationDirection::Normal => false,
                 AnimationDirection::Reverse => true,
@@ -140,7 +180,7 @@ pub(super) struct AnimatedBindingCallable<T, A> {
     pub(super) compute_animation_details: A,
 }
 
-pub(super) type AnimationDetail = Option<(PropertyAnimation, crate::animations::Instant)>;
+pub(super) type AnimationDetail = (PropertyAnimation, Option<crate::animations::Instant>);
 
 unsafe impl<T: InterpolatedPropertyValue + Clone, A: Fn() -> AnimationDetail> BindingCallable<T>
     for AnimatedBindingCallable<T, A>
@@ -171,12 +211,14 @@ unsafe impl<T: InterpolatedPropertyValue + Clone, A: Fn() -> AnimationDetail> Bi
                 let mut animation_data = self.animation_data.borrow_mut();
                 // animation_data.details.iteration_count = 1.;
                 animation_data.from_value = value.clone();
+                let (details, start_time) = (self.compute_animation_details)();
+                if let Some(start_time) = start_time {
+                    animation_data.start_time = start_time;
+                }
+                animation_data.details = details;
+
                 // Safety: `animation_data.to_value` is a valid mutable reference
                 unsafe { self.original_binding.update((&mut animation_data.to_value) as *mut T) };
-                if let Some((details, start_time)) = (self.compute_animation_details)() {
-                    animation_data.start_time = start_time;
-                    animation_data.details = details;
-                }
                 let (val, finished) = animation_data.compute_interpolated_value();
                 *value = val;
                 if finished {
@@ -281,52 +323,12 @@ impl<T: Clone + InterpolatedPropertyValue + 'static> Property<T> {
         );
     }
 
-    /// Set a binding to this property.
-    ///
+    /// Set a binding to this property, providing a callback for the animation and an optional
+    /// start_time (relevant for state transitions).
     pub fn set_animated_binding(
         &self,
         binding: impl Binding<T> + 'static,
-        animation_data: PropertyAnimation,
-    ) {
-        let binding_callable = properties_animations::AnimatedBindingCallable::<T, _> {
-            original_binding: PropertyHandle {
-                handle: Cell::new(
-                    (alloc_binding_holder(move |val: &mut T| {
-                        *val = binding.evaluate(val);
-                        BindingResult::KeepBinding
-                    }) as usize)
-                        | 0b10,
-                ),
-            },
-            state: Cell::new(properties_animations::AnimatedBindingState::NotAnimating),
-            animation_data: RefCell::new(properties_animations::PropertyValueAnimationData::new(
-                T::default(),
-                T::default(),
-                animation_data,
-            )),
-            compute_animation_details: || -> properties_animations::AnimationDetail { None },
-        };
-
-        // Safety: the `AnimatedBindingCallable`'s type match the property type
-        unsafe {
-            self.handle.set_binding(
-                binding_callable,
-                #[cfg(slint_debug_property)]
-                self.debug_name.borrow().as_str(),
-            )
-        };
-        self.handle.mark_dirty(
-            #[cfg(slint_debug_property)]
-            self.debug_name.borrow().as_str(),
-        );
-    }
-
-    /// Set a binding to this property, providing a callback for the transition animation
-    ///
-    pub fn set_animated_binding_for_transition(
-        &self,
-        binding: impl Binding<T> + 'static,
-        compute_animation_details: impl Fn() -> (PropertyAnimation, crate::animations::Instant)
+        compute_animation_details: impl Fn() -> (PropertyAnimation, Option<crate::animations::Instant>)
         + 'static,
     ) {
         let binding_callable = properties_animations::AnimatedBindingCallable::<T, _> {
@@ -345,7 +347,7 @@ impl<T: Clone + InterpolatedPropertyValue + 'static> Property<T> {
                 T::default(),
                 PropertyAnimation::default(),
             )),
-            compute_animation_details: move || Some(compute_animation_details()),
+            compute_animation_details,
         };
 
         // Safety: the `AnimatedBindingCallable`'s type match the property type
@@ -356,6 +358,44 @@ impl<T: Clone + InterpolatedPropertyValue + 'static> Property<T> {
                 self.debug_name.borrow().as_str(),
             )
         };
+        self.handle.mark_dirty(
+            #[cfg(slint_debug_property)]
+            self.debug_name.borrow().as_str(),
+        );
+    }
+}
+
+impl<T> Property<Length<crate::Coord, T>> {
+    /// Change the value by using a physics animation
+    pub fn set_physic_animation_value<
+        S: physics_simulation::Simulation + 'static,
+        AD: physics_simulation::Parameter<Output = S>,
+    >(
+        &self,
+        value: Length<crate::Coord, T>,
+        simulation_data: AD,
+    ) {
+        let d = RefCell::new(PropertyPhysicsAnimationData::new(
+            simulation_data.simulation(self.get_internal().0 as f32, value.0 as f32),
+        ));
+        // Safety: the BindingCallable will cast its argument to T
+        unsafe {
+            self.handle.set_binding(
+                move |val: &mut Length<crate::Coord, T>| {
+                    let (value, finished) = d.borrow_mut().compute_interpolated_value();
+                    *val = Length::new(value);
+                    if finished {
+                        BindingResult::RemoveBinding
+                    } else {
+                        crate::animations::CURRENT_ANIMATION_DRIVER
+                            .with(|driver| driver.set_has_active_animations());
+                        BindingResult::KeepBinding
+                    }
+                },
+                #[cfg(slint_debug_property)]
+                self.debug_name.borrow().as_str(),
+            );
+        }
         self.handle.mark_dirty(
             #[cfg(slint_debug_property)]
             self.debug_name.borrow().as_str(),
@@ -835,7 +875,7 @@ mod animation_tests {
                 let compo = w.upgrade().unwrap();
                 get_prop_value(&compo.feed_property)
             },
-            animation_details,
+            move || (animation_details.clone(), None),
         );
 
         compo.feed_property.set(100);
@@ -876,7 +916,7 @@ mod animation_tests {
                 let compo = w.upgrade().unwrap();
                 get_prop_value(&compo.feed_property)
             },
-            animation_details,
+            move || (animation_details.clone(), None),
         );
 
         compo.feed_property.set(100);
@@ -973,7 +1013,7 @@ mod animation_tests {
                 let compo = w.upgrade().unwrap();
                 get_prop_value(&compo.feed_property)
             },
-            animation_details,
+            move || (animation_details.clone(), None),
         );
 
         compo.feed_property.set(100);

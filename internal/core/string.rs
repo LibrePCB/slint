@@ -153,7 +153,7 @@ impl<'de> serde::Deserialize<'de> for SharedString {
     where
         D: serde::Deserializer<'de>,
     {
-        let string = String::deserialize(deserializer)?;
+        let string: &str = serde::Deserialize::deserialize(deserializer)?;
         Ok(SharedString::from(string))
     }
 }
@@ -431,7 +431,7 @@ pub(crate) mod ffi {
     /// The returned value is owned by the string, and should not be used after any
     /// mutable function have been called on the string, and must not be freed.
     pub extern "C" fn slint_shared_string_bytes(ss: &SharedString) -> *const c_char {
-        if ss.is_empty() { "\0".as_ptr() } else { ss.as_ptr() }
+        if ss.is_empty() { c"".as_ptr().cast() } else { ss.as_ptr() }
     }
 
     #[unsafe(no_mangle)]
@@ -697,12 +697,12 @@ fn test_serialize_deserialize_sharedstring() {
 #[test]
 fn test_extend_from_chars() {
     let mut s = SharedString::from("x");
-    s.extend(core::iter::repeat('a').take(4).chain(core::iter::once('🍌')));
+    s.extend(core::iter::repeat_n('a', 4).chain(core::iter::once('🍌')));
     assert_eq!(s.as_str(), "xaaaa🍌");
 }
 
 #[test]
 fn test_collect_from_chars() {
-    let s: SharedString = core::iter::repeat('a').take(4).chain(core::iter::once('🍌')).collect();
+    let s: SharedString = core::iter::repeat_n('a', 4).chain(core::iter::once('🍌')).collect();
     assert_eq!(s.as_str(), "aaaa🍌");
 }

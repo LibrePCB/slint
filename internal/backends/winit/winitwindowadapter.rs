@@ -15,7 +15,7 @@ use euclid::approxeq::ApproxEq;
 
 #[cfg(muda)]
 use i_slint_core::api::LogicalPosition;
-use i_slint_core::lengths::{LogicalInset, PhysicalPx, ScaleFactor};
+use i_slint_core::lengths::{PhysicalPx, ScaleFactor};
 use winit::event_loop::ActiveEventLoop;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::WindowExtWebSys;
@@ -28,7 +28,7 @@ use crate::renderer::WinitCompatibleRenderer;
 
 use corelib::item_tree::ItemTreeRc;
 #[cfg(enable_accesskit)]
-use corelib::item_tree::ItemTreeRef;
+use corelib::item_tree::{ItemTreeRef, ItemTreeRefPin};
 use corelib::items::{ColorScheme, MouseCursor};
 #[cfg(enable_accesskit)]
 use corelib::items::{ItemRc, ItemRef};
@@ -119,9 +119,7 @@ fn icon_to_winit(
 ) -> Option<winit::window::Icon> {
     let image_inner: &ImageInner = (&icon).into();
 
-    let Some(pixel_buffer) = image_inner.render_to_buffer(Some(size.cast())) else {
-        return None;
-    };
+    let pixel_buffer = image_inner.render_to_buffer(Some(size.cast()))?;
 
     // This could become a method in SharedPixelBuffer...
     let rgba_pixels: Vec<u8> = match &pixel_buffer {
@@ -162,6 +160,7 @@ fn window_is_resizable(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum WinitWindowOrNone {
     HasWindow {
         window: Arc<winit::window::Window>,
@@ -776,10 +775,8 @@ impl WinitWindowAdapter {
             let size = physical_size.to_logical(scale_factor);
             self.window().try_dispatch_event(WindowEvent::Resized { size })?;
 
-            self.window().try_dispatch_event(WindowEvent::SafeAreaChanged {
-                inset: self.safe_area_inset().to_logical(scale_factor),
-                token: corelib::InternalToken,
-            })?;
+            WindowInner::from_pub(self.window())
+                .set_window_item_safe_area(self.safe_area_inset().to_logical(scale_factor));
 
             // Workaround fox winit not sync'ing CSS size of the canvas (the size shown on the browser)
             // with the width/height attribute (the size of the viewport/GL surface)
@@ -1008,13 +1005,13 @@ impl WinitWindowAdapter {
 
             // Make sure the dark color scheme property is up-to-date, as it may have been queried earlier when
             // the window wasn't mapped yet.
-            if let Some(color_scheme_prop) = self.color_scheme.get() {
-                if let Some(theme) = winit_window.theme() {
-                    color_scheme_prop.as_ref().set(match theme {
-                        winit::window::Theme::Dark => ColorScheme::Dark,
-                        winit::window::Theme::Light => ColorScheme::Light,
-                    })
-                }
+            if let Some(color_scheme_prop) = self.color_scheme.get()
+                && let Some(theme) = winit_window.theme()
+            {
+                color_scheme_prop.as_ref().set(match theme {
+                    winit::window::Theme::Dark => ColorScheme::Dark,
+                    winit::window::Theme::Light => ColorScheme::Light,
+                })
             }
 
             // In wasm a request_redraw() issued before show() results in a draw() even when the window
@@ -1063,10 +1060,9 @@ impl WinitWindowAdapter {
     ) -> Result<Arc<winit::window::Window>, PlatformError> {
         std::future::poll_fn(move |context| {
             let Some(self_) = self_weak.upgrade() else {
-                return std::task::Poll::Ready(Err(format!(
-                    "Unable to obtain winit window from destroyed window"
-                )
-                .into()));
+                return std::task::Poll::Ready(Err(
+                    "Unable to obtain winit window from destroyed window".to_string().into(),
+                ));
             };
             match self_.winit_window() {
                 Some(window) => std::task::Poll::Ready(Ok(window)),
@@ -1233,17 +1229,8 @@ impl WindowAdapter for WinitWindowAdapter {
                     size: i_slint_core::api::LogicalSize::new(width, height),
                 })
                 .unwrap();
-            self.window()
-                .try_dispatch_event(WindowEvent::SafeAreaChanged {
-                    inset: LogicalInset::new(
-                        window_item.safe_area_inset_top().get(),
-                        window_item.safe_area_inset_bottom().get(),
-                        window_item.safe_area_inset_left().get(),
-                        window_item.safe_area_inset_right().get(),
-                    ),
-                    token: corelib::InternalToken,
-                })
-                .unwrap();
+            WindowInner::from_pub(self.window())
+                .set_window_item_safe_area(window_item.safe_area_insets());
         }
 
         let m = properties.is_fullscreen();
@@ -1495,7 +1482,7 @@ impl WindowAdapterInternal for WinitWindowAdapter {
     }
 
     #[cfg(enable_accesskit)]
-    fn register_item_tree(&self) {
+    fn register_item_tree(&self, _: ItemTreeRefPin) {
         let Some(accesskit_adapter_cell) = self.accesskit_adapter() else { return };
         // If the accesskit_adapter is already borrowed, this means the new items were created when the tree was built and there is no need to re-visit them
         if let Ok(mut a) = accesskit_adapter_cell.try_borrow_mut() {
@@ -1519,20 +1506,22 @@ impl WindowAdapterInternal for WinitWindowAdapter {
     fn window_handle_06_rc(
         &self,
     ) -> Result<Arc<dyn raw_window_handle::HasWindowHandle>, raw_window_handle::HandleError> {
-        self.winit_window_or_none
+        Ok(self
+            .winit_window_or_none
             .borrow()
             .as_window()
-            .map_or(Err(raw_window_handle::HandleError::Unavailable), |window| Ok(window))
+            .ok_or(raw_window_handle::HandleError::Unavailable)?)
     }
 
     #[cfg(feature = "raw-window-handle-06")]
     fn display_handle_06_rc(
         &self,
     ) -> Result<Arc<dyn raw_window_handle::HasDisplayHandle>, raw_window_handle::HandleError> {
-        self.winit_window_or_none
+        Ok(self
+            .winit_window_or_none
             .borrow()
             .as_window()
-            .map_or(Err(raw_window_handle::HandleError::Unavailable), |window| Ok(window))
+            .ok_or(raw_window_handle::HandleError::Unavailable)?)
     }
 
     fn bring_to_front(&self) -> Result<(), PlatformError> {
@@ -1544,7 +1533,7 @@ impl WindowAdapterInternal for WinitWindowAdapter {
     }
 
     #[cfg(target_os = "ios")]
-    fn safe_area_inset(&self) -> i_slint_core::lengths::PhysicalInset {
+    fn safe_area_inset(&self) -> i_slint_core::lengths::PhysicalEdges {
         self.winit_window_or_none
             .borrow()
             .as_window()
@@ -1553,7 +1542,7 @@ impl WindowAdapterInternal for WinitWindowAdapter {
                 let inner_position = window.inner_position().ok()?;
                 let outer_size = window.outer_size();
                 let inner_size = window.inner_size();
-                Some(i_slint_core::lengths::PhysicalInset::new(
+                Some(i_slint_core::lengths::PhysicalEdges::new(
                     inner_position.y - outer_position.y,
                     outer_size.height as i32
                         - (inner_size.height as i32)

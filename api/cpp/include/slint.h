@@ -18,6 +18,8 @@
 #ifndef SLINT_FEATURE_FREESTANDING
 #    include <mutex>
 #    include <condition_variable>
+#    include <cstdint>
+#    include <memory>
 #endif
 
 /// \rst
@@ -125,12 +127,15 @@ inline SharedVector<float> solve_box_layout(const cbindgen_private::BoxLayoutDat
 
 inline SharedVector<uint16_t>
 organize_grid_layout(cbindgen_private::Slice<cbindgen_private::GridLayoutInputData> input_data,
-                     cbindgen_private::Slice<int> repeater_indices)
+                     cbindgen_private::Slice<int> repeater_indices,
+                     cbindgen_private::Slice<int> repeater_steps)
 {
     SharedVector<uint16_t> result;
     cbindgen_private::Slice<uint32_t> ri =
             make_slice(reinterpret_cast<uint32_t *>(repeater_indices.ptr), repeater_indices.len);
-    cbindgen_private::slint_organize_grid_layout(input_data, ri, &result);
+    cbindgen_private::Slice<uint32_t> rs =
+            make_slice(reinterpret_cast<uint32_t *>(repeater_steps.ptr), repeater_steps.len);
+    cbindgen_private::slint_organize_grid_layout(input_data, ri, rs, &result);
     return result;
 }
 
@@ -147,25 +152,31 @@ inline SharedVector<float>
 solve_grid_layout(const cbindgen_private::GridLayoutData &data,
                   cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> constraints,
                   cbindgen_private::Orientation orientation,
-                  cbindgen_private::Slice<int> repeater_indices)
+                  cbindgen_private::Slice<int> repeater_indices,
+                  cbindgen_private::Slice<int> repeater_steps)
 {
     SharedVector<float> result;
     cbindgen_private::Slice<uint32_t> ri =
             make_slice(reinterpret_cast<uint32_t *>(repeater_indices.ptr), repeater_indices.len);
-    cbindgen_private::slint_solve_grid_layout(&data, constraints, orientation, ri, &result);
+    cbindgen_private::Slice<uint32_t> rs =
+            make_slice(reinterpret_cast<uint32_t *>(repeater_steps.ptr), repeater_steps.len);
+    cbindgen_private::slint_solve_grid_layout(&data, constraints, orientation, ri, rs, &result);
     return result;
 }
 
 inline cbindgen_private::LayoutInfo
 grid_layout_info(const cbindgen_private::GridLayoutOrganizedData &organized_data,
                  cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> constraints,
-                 cbindgen_private::Slice<int> repeater_indices, float spacing,
+                 cbindgen_private::Slice<int> repeater_indices,
+                 cbindgen_private::Slice<int> repeater_steps, float spacing,
                  const cbindgen_private::Padding &padding,
                  cbindgen_private::Orientation orientation)
 {
     cbindgen_private::Slice<uint32_t> ri =
             make_slice(reinterpret_cast<uint32_t *>(repeater_indices.ptr), repeater_indices.len);
-    return cbindgen_private::slint_grid_layout_info(&organized_data, constraints, ri, spacing,
+    cbindgen_private::Slice<uint32_t> rs =
+            make_slice(reinterpret_cast<uint32_t *>(repeater_steps.ptr), repeater_steps.len);
+    return cbindgen_private::slint_grid_layout_info(&organized_data, constraints, ri, rs, spacing,
                                                     &padding, orientation);
 }
 
@@ -184,13 +195,49 @@ box_layout_info_ortho(cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> 
     return cbindgen_private::slint_box_layout_info_ortho(cells, &padding);
 }
 
-/// Access the layout cache of an item within a repeater
+inline SharedVector<float> solve_flexbox_layout(const cbindgen_private::FlexBoxLayoutData &data,
+                                                cbindgen_private::Slice<int> repeater_indices)
+{
+    SharedVector<float> result;
+    cbindgen_private::Slice<uint32_t> ri =
+            make_slice(reinterpret_cast<uint32_t *>(repeater_indices.ptr), repeater_indices.len);
+    cbindgen_private::slint_solve_flexbox_layout(&data, ri, &result);
+    return result;
+}
+
+inline cbindgen_private::LayoutInfo
+flexbox_layout_info(cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> cells_h,
+                    cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> cells_v,
+                    float spacing_h, float spacing_v, const cbindgen_private::Padding &padding_h,
+                    const cbindgen_private::Padding &padding_v,
+                    cbindgen_private::Orientation orientation,
+                    cbindgen_private::FlexDirection direction, float constraint_size,
+                    cbindgen_private::FlexWrap flex_wrap)
+{
+    return cbindgen_private::slint_flexbox_layout_info(cells_h, cells_v, spacing_h, spacing_v,
+                                                       &padding_h, &padding_v, orientation,
+                                                       direction, constraint_size, flex_wrap);
+}
+
+/// Access the layout cache of an item within a repeater (standard cache)
 template<typename T>
 inline T layout_cache_access(const SharedVector<T> &cache, int offset, int repeater_index,
                              int entries_per_item)
 {
     size_t idx = size_t(cache[offset]) + repeater_index * entries_per_item;
     return idx < cache.size() ? cache[idx] : 0;
+}
+
+/// Access the layout cache of an item within a grid repeater (two-level indirection cache)
+/// Formula: cache[cache[jump_index] + repeater_index * stride + child_offset]
+template<typename T>
+inline T layout_cache_grid_repeater_access(const SharedVector<T> &cache, size_t jump_index,
+                                           size_t repeater_index, size_t stride,
+                                           size_t child_offset)
+{
+    size_t base = jump_index < cache.size() ? size_t(cache[jump_index]) : 0;
+    size_t data_idx = base + repeater_index * stride + child_offset;
+    return data_idx < cache.size() ? cache[data_idx] : 0;
 }
 
 template<typename VT, typename ItemType>
@@ -262,17 +309,18 @@ inline SharedString translate(const SharedString &original, const SharedString &
     return result;
 }
 
-inline SharedString escape_markdown(const SharedString &text)
+inline StyledText parse_markdown(const SharedString &format_string,
+                                 cbindgen_private::Slice<StyledText> args)
 {
-    SharedString result = text;
-    cbindgen_private::slint_escape_markdown(&result);
+    StyledText result;
+    cbindgen_private::slint_parse_markdown(&format_string, args, &result);
     return result;
 }
 
-inline StyledText parse_markdown(const SharedString &text)
+inline StyledText string_to_styled_text(SharedString text)
 {
     StyledText result;
-    cbindgen_private::slint_parse_markdown(&text, &result);
+    cbindgen_private::slint_string_to_styled_text(text, &result);
     return result;
 }
 
@@ -304,6 +352,13 @@ translate_from_bundle_with_plural(std::span<const char8_t *const> strs,
     return result;
 }
 
+inline SharedString keyboard_shortcut_to_string(const cbindgen_private::KeyboardShortcut &shortcut)
+{
+    SharedString result;
+    cbindgen_private::slint_keyboard_shortcut_to_string(&shortcut, &result);
+    return result;
+}
+
 template<typename Component>
 inline float get_resolved_default_font_size(const Component &component)
 {
@@ -313,12 +368,112 @@ inline float get_resolved_default_font_size(const Component &component)
 
 } // namespace private_api
 
-#ifdef SLINT_FEATURE_GETTEXT
-/// Forces all the strings that are translated with `@tr(...)` to be re-evaluated.
-/// This is useful if the language is changed at runtime.
-/// The function is only available when Slint is compiled with `SLINT_FEATURE_GETTEXT`.
+// Translator API is currently considered experimental due to discussions
+// about the returned string type (SharedString vs. Cow<str> etc.). Also it
+// is not available with no_std due to the tr crate.
+// See dicussion in https://github.com/slint-ui/slint/pull/10979.
+#if defined(SLINT_FEATURE_EXPERIMENTAL) && !defined(SLINT_FEATURE_FREESTANDING)
+/// Interface for an external translator.
+struct Translator
+{
+    /// Destroys the translator.
+    virtual ~Translator() { }
+    /// Translate a singular string. Arguments are passed as UTF-8 strings.
+    /// Slint will call this method from the thread which runs the event loop.
+    virtual SharedString translate(std::string_view string, std::string_view context) const = 0;
+    /// Translate a plural string. Arguments are passed as UTF-8 strings.
+    /// Slint will call this method from the thread which runs the event loop.
+    virtual SharedString ntranslate(uint64_t n, std::string_view singular, std::string_view plural,
+                                    std::string_view context) const = 0;
+};
+
+namespace private_api {
+
+/// Helper to dispatch calls from the Rust translator to the C++ translator.
+struct TranslatorDispatcher
+{
+    static void drop(const void *obj) { delete cast(obj); }
+
+    static void translate(const void *obj, private_api::Slice<uint8_t> string,
+                          private_api::Slice<uint8_t> context, slint::SharedString *out)
+    {
+        *out = cast(obj)->translate(private_api::slice_to_string_view(string),
+                                    private_api::slice_to_string_view(context));
+    }
+
+    static void ntranslate(const void *obj, uint64_t n, private_api::Slice<uint8_t> singular,
+                           private_api::Slice<uint8_t> plural, private_api::Slice<uint8_t> context,
+                           slint::SharedString *out)
+    {
+        *out = cast(obj)->ntranslate(n, private_api::slice_to_string_view(singular),
+                                     private_api::slice_to_string_view(plural),
+                                     private_api::slice_to_string_view(context));
+    }
+
+private:
+    static const Translator *cast(const void *obj) { return static_cast<const Translator *>(obj); }
+};
+
+} // namespace private_api
+
+/// Register a custom translator.
 ///
-/// Example
+/// Allows using a custom translation framework by implementing the
+/// `slint::Translator` interface. Passing `nullptr` will unregister any
+/// previously registered translator.
+///
+/// Returns `true` on success, `false` if no platform is available.
+///
+/// Safety & Ownership:
+/// * The ownership of the translator object is passed to Slint. It will be
+///   destroyed automatically when the program quits or when
+///   `set_external_translator()` is called the next time.
+/// * The methods on the translator object will be called from the thread
+///   which the Slint event loop is running.
+///
+/// The function is only available when Slint is compiled with
+/// `SLINT_FEATURE_EXPERIMENTAL` and without `SLINT_FEATURE_FREESTANDING`.
+///
+/// Note that this function has no effect if the `.slint` file was compiled
+/// with bundled translations.
+///
+/// Example:
+/// \code
+///     struct MyTranslator : public slint::Translator {
+///       slint::SharedString translate(std::string_view string,
+///                                     std::string_view context) const override {
+///         return slint::SharedString("Singular String");
+///       }
+///
+///       slint::SharedString ntranslate(uint64_t n,
+///                                      std::string_view singular,
+///                                      std::string_view plural,
+///                                      std::string_view context) const override {
+///         return slint::SharedString("Plural String");
+///       }
+///     };
+///
+///     slint::set_external_translator(std::make_unique<MyTranslator>());
+/// \endcode
+inline bool set_translator(std::unique_ptr<Translator> obj)
+{
+    const bool success = cbindgen_private::slint_translate_set_translator(
+            obj.get(), &private_api::TranslatorDispatcher::drop,
+            &private_api::TranslatorDispatcher::translate,
+            &private_api::TranslatorDispatcher::ntranslate);
+    if (success) {
+        obj.release(); // Ownership is moved to Rust.
+    }
+    return success;
+}
+#endif
+
+/// Forces all the strings that are translated with `@tr(...)` to be re-evaluated.
+/// Call this function after changing the language at run-time and when translating
+/// with either gettext or a custom translator. For bundled translations, there is no need
+/// to call this function.
+///
+/// Example (assuming usage of gettext):
 /// ```cpp
 ///     my_ui->global<LanguageSettings>().on_french_selected([] {
 ///        setenv("LANGUAGE", langs[l], true);
@@ -329,7 +484,6 @@ inline void update_all_translations()
 {
     cbindgen_private::slint_translations_mark_dirty();
 }
-#endif
 
 /// Select the current translation language when using bundled translations.
 /// This function requires that the application's `.slint` file was compiled with bundled
@@ -354,6 +508,15 @@ cbindgen_private::Flickable::Flickable()
 cbindgen_private::Flickable::~Flickable()
 {
     slint_flickable_data_free(&data);
+}
+
+cbindgen_private::FocusScope::FocusScope()
+{
+    slint_maybe_shortcut_list_init(&shortcuts);
+}
+cbindgen_private::FocusScope::~FocusScope()
+{
+    slint_maybe_shortcut_list_free(&shortcuts);
 }
 
 cbindgen_private::NativeStyleMetrics::NativeStyleMetrics(void *)

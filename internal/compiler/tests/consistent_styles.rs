@@ -7,7 +7,6 @@ use i_slint_compiler::expression_tree::Expression;
 use i_slint_compiler::langtype::{Function, Type};
 use i_slint_compiler::object_tree::PropertyVisibility;
 use i_slint_compiler::typeloader::TypeLoader;
-use i_slint_compiler::typeregister::TypeRegister;
 use smol_str::{SmolStr, ToSmolStr};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -24,10 +23,10 @@ struct PropertyInfo {
 impl Display for PropertyInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}{:?}", self.ty, if self.pure { "pure-" } else { "" }, self.vis)?;
-        if let Type::Callback(cb) = &self.ty {
-            if !cb.arg_names.is_empty() {
-                write!(f, "{:?}", cb.arg_names)?
-            }
+        if let Type::Callback(cb) = &self.ty
+            && !cb.arg_names.is_empty()
+        {
+            write!(f, "{:?}", cb.arg_names)?
         }
         Ok(())
     }
@@ -66,19 +65,19 @@ fn load_component(component: &Rc<i_slint_compiler::object_tree::Component>) -> C
                 }),
         );
 
-        if result.accessible_role.is_none() {
-            if let Some(role) = elem.borrow().bindings.get("accessible-role") {
-                match &role.borrow().expression {
-                    Expression::Invalid => (),
-                    Expression::EnumerationValue(e) => {
-                        result.accessible_role = Some(e.enumeration.values[e.value].to_string())
-                    }
-                    e => panic!(
-                        "accessible-role not an EnumerationValue : {e:?}    (for {:?})",
-                        role.borrow().span
-                    ),
-                };
-            }
+        if result.accessible_role.is_none()
+            && let Some(role) = elem.borrow().bindings.get("accessible-role")
+        {
+            match &role.borrow().expression {
+                Expression::Invalid => (),
+                Expression::EnumerationValue(e) => {
+                    result.accessible_role = Some(e.enumeration.values[e.value].to_string())
+                }
+                e => panic!(
+                    "accessible-role not an EnumerationValue : {e:?}    (for {:?})",
+                    role.borrow().span
+                ),
+            };
         }
 
         let e = match &elem.borrow().base_type {
@@ -144,7 +143,7 @@ fn load_style(style_name: String) -> Style {
     );
     config.style = Some(style_name);
     let mut diag = i_slint_compiler::diagnostics::BuildDiagnostics::default();
-    let mut loader = TypeLoader::new(TypeRegister::builtin(), config, &mut diag);
+    let mut loader = TypeLoader::new(config, &mut diag);
     // ensure that the style is loaded
     spin_on::spin_on(loader.import_component("std-widgets.slint", "Button", &mut diag));
 

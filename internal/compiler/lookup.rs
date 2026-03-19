@@ -520,7 +520,21 @@ fn expression_from_reference(
     match ty {
         Type::Callback { .. } => Callable::Callback(n).into(),
         Type::InferredCallback => Callable::Callback(n).into(),
-        Type::Function { .. } => Callable::Function(n).into(),
+        Type::Function(function) => {
+            let base_expr = Rc::downgrade(&n.element());
+            let callable = Callable::Function(n);
+            // If the function has a ElementReference type as the first argument, that usually means it is
+            // a member function
+            if matches!(function.args.first(), Some(Type::ElementReference)) {
+                LookupResult::Callable(LookupResultCallable::MemberFunction {
+                    base: Expression::ElementReference(base_expr),
+                    base_node: None,
+                    member: Box::new(LookupResultCallable::Callable(callable)),
+                })
+            } else {
+                callable.into()
+            }
+        }
         _ => LookupResult::Expression { expression: Expression::PropertyReference(n), deprecated },
     }
 }
@@ -635,10 +649,10 @@ impl ColorSpecific {
     }
 }
 
-struct KeysLookup;
+pub struct KeysLookup;
 
 macro_rules! special_keys_lookup {
-    ($($char:literal # $name:ident # $($qt:ident)|* # $($winit:ident $(($_pos:ident))?)|* # $($_xkb:ident)|*;)*) => {
+    ($($char:literal # $name:ident # $($shifted:expr)? $(=> $($qt:ident)|* # $($winit:ident $(($_pos:ident))?)|* # $($_xkb:ident)|*)? ;)*) => {
         impl LookupObject for KeysLookup {
             fn for_each_entry<R>(
                 &self,
@@ -655,7 +669,7 @@ macro_rules! special_keys_lookup {
     };
 }
 
-i_slint_common::for_each_special_keys!(special_keys_lookup);
+i_slint_common::for_each_keys!(special_keys_lookup);
 
 struct EasingSpecific;
 impl LookupObject for EasingSpecific {
@@ -804,7 +818,6 @@ impl LookupObject for SlintInternal {
         .or_else(|| f("date-now", b(BuiltinFunction::DateNow)))
         .or_else(|| f("valid-date", b(BuiltinFunction::ValidDate)))
         .or_else(|| f("parse-date", b(BuiltinFunction::ParseDate)))
-        .or_else(|| f("open-url", b(BuiltinFunction::OpenUrl)))
     }
 }
 
@@ -819,6 +832,7 @@ impl LookupObject for ColorFunctions {
         None.or_else(|| f("rgb", BuiltinMacroFunction::Rgb))
             .or_else(|| f("rgba", BuiltinMacroFunction::Rgb))
             .or_else(|| f("hsv", BuiltinMacroFunction::Hsv))
+            .or_else(|| f("oklch", BuiltinMacroFunction::Oklch))
     }
 }
 
@@ -916,6 +930,9 @@ impl LookupObject for Expression {
                 Type::Float32 | Type::Int32 | Type::Percent => {
                     NumberExpression(self).for_each_entry(ctx, f)
                 }
+                Type::KeyboardShortcutType => {
+                    KeyboardShortcutExpression(self).for_each_entry(ctx, f)
+                }
                 ty if ty.as_unit_product().is_some() => {
                     NumberWithUnitExpression(self).for_each_entry(ctx, f)
                 }
@@ -941,6 +958,7 @@ impl LookupObject for Expression {
                 Type::Float32 | Type::Int32 | Type::Percent => {
                     NumberExpression(self).lookup(ctx, name)
                 }
+                Type::KeyboardShortcutType => KeyboardShortcutExpression(self).lookup(ctx, name),
                 ty if ty.as_unit_product().is_some() => {
                     NumberWithUnitExpression(self).lookup(ctx, name)
                 }
@@ -957,13 +975,7 @@ impl LookupObject for StringExpression<'_> {
         ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
-        let member_function = |f: BuiltinFunction| {
-            LookupResult::Callable(LookupResultCallable::MemberFunction {
-                base: self.0.clone(),
-                base_node: ctx.current_token.clone(), // Note that this is not the base_node, but the function's node
-                member: LookupResultCallable::Callable(Callable::Builtin(f)).into(),
-            })
-        };
+        let member_function = builtin_member_function_generator(self.0, ctx);
         let function_call = |f: BuiltinFunction| {
             LookupResult::from(Expression::FunctionCall {
                 function: Callable::Builtin(f),
@@ -989,7 +1001,10 @@ impl LookupObject for ColorExpression<'_> {
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
         let member_function = |f: BuiltinFunction| {
-            let base = if f == BuiltinFunction::ColorHsvaStruct && self.0.ty() == Type::Brush {
+            let base = if (f == BuiltinFunction::ColorHsvaStruct
+                || f == BuiltinFunction::ColorOklchStruct)
+                && self.0.ty() == Type::Brush
+            {
                 Expression::Cast { from: Box::new(self.0.clone()), to: Type::Color }
             } else {
                 self.0.clone()
@@ -1022,6 +1037,7 @@ impl LookupObject for ColorExpression<'_> {
             .or_else(|| f("blue", field_access("blue")))
             .or_else(|| f("alpha", field_access("alpha")))
             .or_else(|| f("to-hsv", member_function(BuiltinFunction::ColorHsvaStruct)))
+            .or_else(|| f("to-oklch", member_function(BuiltinFunction::ColorOklchStruct)))
             .or_else(|| f("brighter", member_function(BuiltinFunction::ColorBrighter)))
             .or_else(|| f("darker", member_function(BuiltinFunction::ColorDarker)))
             .or_else(|| f("transparentize", member_function(BuiltinFunction::ColorTransparentize)))
@@ -1081,15 +1097,8 @@ impl LookupObject for NumberExpression<'_> {
         ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
-        let member = |f: LookupResultCallable| {
-            LookupResult::Callable(LookupResultCallable::MemberFunction {
-                base: self.0.clone(),
-                base_node: ctx.current_token.clone(), // Note that this is not the base_node, but the function's node
-                member: f.into(),
-            })
-        };
-        let member_function = |f| member(LookupResultCallable::Callable(Callable::Builtin(f)));
-        let member_macro = |f| member(LookupResultCallable::Macro(f));
+        let member_function = builtin_member_function_generator(self.0, ctx);
+        let mut member_macro = member_macro_generator(self.0.clone(), ctx.current_token.clone());
 
         let mut f2 = |s, res| f(&SmolStr::new_static(s), res);
         None.or_else(|| f2("round", member_function(BuiltinFunction::Round)))
@@ -1110,6 +1119,32 @@ impl LookupObject for NumberExpression<'_> {
     }
 }
 
+fn builtin_member_function_generator<'a>(
+    base: &'a Expression,
+    ctx: &'a LookupCtx,
+) -> impl Fn(BuiltinFunction) -> LookupResult {
+    move |func: BuiltinFunction| {
+        LookupResult::Callable(LookupResultCallable::MemberFunction {
+            base: base.clone(),
+            base_node: ctx.current_token.clone(),
+            member: Box::new(LookupResultCallable::Callable(Callable::Builtin(func))),
+        })
+    }
+}
+
+fn member_macro_generator(
+    base: Expression,
+    base_node: Option<NodeOrToken>,
+) -> impl FnMut(BuiltinMacroFunction) -> LookupResult {
+    move |func: BuiltinMacroFunction| {
+        LookupResult::Callable(LookupResultCallable::MemberFunction {
+            base: base.clone(),
+            base_node: base_node.clone(),
+            member: Box::new(LookupResultCallable::Macro(func)),
+        })
+    }
+}
+
 /// An expression of any numerical value with an unit
 struct NumberWithUnitExpression<'a>(&'a Expression);
 impl LookupObject for NumberWithUnitExpression<'_> {
@@ -1118,14 +1153,8 @@ impl LookupObject for NumberWithUnitExpression<'_> {
         ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
-        let member_macro = |f: BuiltinMacroFunction| {
-            LookupResult::Callable(LookupResultCallable::MemberFunction {
-                base: self.0.clone(),
-                base_node: ctx.current_token.clone(), // Note that this is not the base_node, but the function's node
-                member: Box::new(LookupResultCallable::Macro(f)),
-            })
-        };
-
+        let mut member_macro = member_macro_generator(self.0.clone(), ctx.current_token.clone());
+        let member_function = builtin_member_function_generator(self.0, ctx);
         let mut f = |s, res| f(&SmolStr::new_static(s), res);
         None.or_else(|| f("mod", member_macro(BuiltinMacroFunction::Mod)))
             .or_else(|| f("clamp", member_macro(BuiltinMacroFunction::Clamp)))
@@ -1136,16 +1165,27 @@ impl LookupObject for NumberWithUnitExpression<'_> {
                 if self.0.ty() != Type::Angle {
                     return None;
                 }
-                let member_function = |f: BuiltinFunction| {
-                    LookupResult::Callable(LookupResultCallable::MemberFunction {
-                        base: self.0.clone(),
-                        base_node: ctx.current_token.clone(), // Note that this is not the base_node, but the function's node
-                        member: Box::new(LookupResultCallable::Callable(Callable::Builtin(f))),
-                    })
-                };
                 None.or_else(|| f("sin", member_function(BuiltinFunction::Sin)))
                     .or_else(|| f("cos", member_function(BuiltinFunction::Cos)))
                     .or_else(|| f("tan", member_function(BuiltinFunction::Tan)))
             })
+    }
+}
+
+struct KeyboardShortcutExpression<'a>(&'a Expression);
+
+impl LookupObject for KeyboardShortcutExpression<'_> {
+    fn for_each_entry<R>(
+        &self,
+        ctx: &LookupCtx,
+        f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
+    ) -> Option<R> {
+        let member_function = builtin_member_function_generator(self.0, ctx);
+        None.or_else(|| {
+            f(
+                &SmolStr::new_static("matches"),
+                member_function(BuiltinFunction::KeyboardShortcutMatches),
+            )
+        })
     }
 }

@@ -47,9 +47,13 @@ path = [
   ".vscode/**",
   "editors/vscode/tests/grammar/*.slint",
   "Cargo.lock",
+  "flake.nix",
+  "flake.lock",
+  "examples/bevy/Cargo.lock",
   "examples/servo/Cargo.lock",
   "REUSE.toml",
   "biome.json",
+  "knip.json",
   "cspell.json",
   "docs/search/scraper-config.json",
   "internal/core-macros/link-data.json",
@@ -66,6 +70,7 @@ SPDX-License-Identifier = "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR 
 [[annotations]]
 path = [
   ".github/ISSUE_TEMPLATE/4-blank.md",
+  ".github/ISSUE_TEMPLATE/3-tracking-issue.md",
   ".github/pull_request_template.md",
 
   "api/cpp/docs/**/**.css",
@@ -129,6 +134,15 @@ path = [
   "examples/sprite-sheet/images/**.png",
   "examples/speedometer/needle.png",
 
+  "demos/printerdemo/ui/images/action-button-frame.png",
+  "demos/printerdemo/ui/images/mcu/combo-active-background.png",
+  "demos/printerdemo/ui/images/mcu/copy-button.jpg",
+  "demos/printerdemo/ui/images/mcu/place-document.jpg",
+  "demos/printerdemo/ui/images/mcu/popup.jpg",
+  "demos/printerdemo/ui/images/mcu/scan-button.jpg",
+  "demos/printerdemo/ui/images/mcu/sub-action-button.jpg",
+  "demos/printerdemo/ui/images/mcu/switch-active.png",
+
   "helper_crates/**.md",
 
   "ui-libraries/material/**.md",
@@ -162,6 +176,7 @@ path = [
   "editors/**.md",
   "editors/sublime/LSP.sublime-settings",
   "editors/tree-sitter-slint/corpus/**.txt",
+  "editors/tree-sitter-slint/tree-sitter.json",
   "editors/vscode/**.json",
   "editors/vscode/css/**.css",
   "editors/vscode/tests/grammar/**.slint",
@@ -301,3 +316,9 @@ path = ["docs/astro/src/assets/android/**.png"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright © SixtyFPS GmbH <info@slint.dev>"
 SPDX-License-Identifier = "CC-BY-4.0"
+
+[[annotations]]
+path = ["examples/bevy/bevy-hosts-slint/**.gltf"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (c) 2024 e-verse"
+SPDX-License-Identifier = "MIT"

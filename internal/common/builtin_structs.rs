@@ -26,6 +26,7 @@
 /// i_slint_common::for_each_builtin_structs!(print_builtin_structs);
 /// ```
 #[macro_export]
+#[allow(clippy::crate_in_macro_def)] // Intentional: this macro is consumed in crates where `crate::animations::Instant` must resolve in the caller.
 macro_rules! for_each_builtin_structs {
     ($macro:ident) => {
         $macro![
@@ -39,7 +40,7 @@ macro_rules! for_each_builtin_structs {
             /// On Windows, the Windows key is mapped to the meta modifier.
             #[derive(Copy, Eq)]
             struct KeyboardModifiers {
-                @name = BuiltinPrivateStruct::KeyboardModifiers,
+                @name = BuiltinPublicStruct::KeyboardModifiers,
                 export {
                     /// Indicates the Alt key on a keyboard.
                     alt: bool,
@@ -221,6 +222,22 @@ macro_rules! for_each_builtin_structs {
                     has_sub_menu: bool,
                     /// The menu entry is a separator
                     is_separator: bool,
+                }
+                private {}
+            }
+
+            /// A structure representing the four edges of an axis-aligned rectangle
+            struct Edges {
+                @name = BuiltinPrivateStruct::Edges,
+                export {
+                    /// The left edge value
+                    left: Coord,
+                    /// The top edge value
+                    top: Coord,
+                    /// The right edge value
+                    right: Coord,
+                    /// The bottom edge value
+                    bottom: Coord,
                 }
                 private {}
             }

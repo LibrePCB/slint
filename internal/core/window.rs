@@ -12,10 +12,10 @@ use crate::api::{
 };
 use crate::input::{
     ClickState, FocusEvent, FocusReason, InternalKeyboardModifierState, KeyEvent, KeyEventType,
-    MouseEvent, MouseInputState, PointerEventButton, TextCursorBlinker, key_codes,
+    MouseEvent, MouseInputState, PointerEventButton, TextCursorBlinker, TouchPhase, key_codes,
 };
 use crate::item_tree::{
-    ItemRc, ItemTreeRc, ItemTreeRef, ItemTreeVTable, ItemTreeWeak, ItemWeak,
+    ItemRc, ItemTreeRc, ItemTreeRef, ItemTreeRefPin, ItemTreeVTable, ItemTreeWeak, ItemWeak,
     ParentItemTraversalMode,
 };
 use crate::items::{ColorScheme, InputType, ItemRef, MouseCursor, PopupClosePolicy};
@@ -165,7 +165,7 @@ pub trait WindowAdapter {
 #[doc(hidden)]
 pub trait WindowAdapterInternal: core::any::Any {
     /// This function is called by the generated code when a component and therefore its tree of items are created.
-    fn register_item_tree(&self) {}
+    fn register_item_tree(&self, _: ItemTreeRefPin) {}
 
     /// This function is called by the generated code when a component and therefore its tree of items are destroyed. The
     /// implementation typically uses this to free the underlying graphics resources.
@@ -246,7 +246,7 @@ pub trait WindowAdapterInternal: core::any::Any {
 
     /// Return the inset of the safe area of the Window in physical pixels.
     /// This is necessary to avoid overlapping system UI such as notches or system bars.
-    fn safe_area_inset(&self) -> crate::lengths::PhysicalInset {
+    fn safe_area_inset(&self) -> crate::lengths::PhysicalEdges {
         Default::default()
     }
 }
@@ -438,6 +438,1006 @@ struct WindowPinnedFields {
     text_input_focused: Property<bool>,
 }
 
+/// A single active touch point.
+#[derive(Clone, Copy, Default)]
+struct TouchPoint {
+    id: u64,
+    position: LogicalPoint,
+}
+
+/// Fixed-capacity map of touch IDs to touch points.
+///
+/// Touchscreens rarely report more than 5 simultaneous contacts, and gesture
+/// recognition only uses the first two. A linear-scan array avoids the heap
+/// allocation and pointer-chasing overhead of `BTreeMap` for this tiny collection.
+const MAX_TRACKED_TOUCHES: usize = 5;
+
+#[derive(Clone)]
+struct TouchMap {
+    entries: [TouchPoint; MAX_TRACKED_TOUCHES],
+    len: usize,
+}
+
+impl Default for TouchMap {
+    fn default() -> Self {
+        Self { entries: [TouchPoint::default(); MAX_TRACKED_TOUCHES], len: 0 }
+    }
+}
+
+impl TouchMap {
+    fn get(&self, id: u64) -> Option<&TouchPoint> {
+        self.entries[..self.len].iter().find(|tp| tp.id == id)
+    }
+
+    fn get_mut(&mut self, id: u64) -> Option<&mut TouchPoint> {
+        self.entries[..self.len].iter_mut().find(|tp| tp.id == id)
+    }
+
+    fn insert(&mut self, point: TouchPoint) {
+        if let Some(existing) = self.entries[..self.len].iter_mut().find(|tp| tp.id == point.id) {
+            *existing = point;
+        } else if self.len < MAX_TRACKED_TOUCHES {
+            self.entries[self.len] = point;
+            self.len += 1;
+        }
+    }
+
+    fn remove(&mut self, id: u64) {
+        if let Some(idx) = self.entries[..self.len].iter().position(|tp| tp.id == id) {
+            self.len -= 1;
+            self.entries[idx] = self.entries[self.len];
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns the first two distinct IDs, or `None` if fewer than 2 entries.
+    fn first_two_ids(&self) -> Option<(u64, u64)> {
+        if self.len >= 2 { Some((self.entries[0].id, self.entries[1].id)) } else { None }
+    }
+
+    /// Returns the first entry, if any.
+    fn first(&self) -> Option<&TouchPoint> {
+        if self.len > 0 { Some(&self.entries[0]) } else { None }
+    }
+}
+
+/// Fixed-capacity buffer for [`MouseEvent`]s produced by the touch state machine.
+///
+/// No branch in [`TouchState::process`] emits more than 3 events (gesture end
+/// produces PinchEnded + RotationEnded + Pressed/Exit). Capacity 4 provides a
+/// margin without heap allocation.
+const MAX_TOUCH_EVENTS: usize = 4;
+
+#[derive(Clone)]
+struct TouchEventBuffer {
+    events: [Option<MouseEvent>; MAX_TOUCH_EVENTS],
+    len: usize,
+}
+
+impl TouchEventBuffer {
+    fn new() -> Self {
+        Self { events: [None, None, None, None], len: 0 }
+    }
+
+    fn push(&mut self, event: MouseEvent) {
+        debug_assert!(self.len < MAX_TOUCH_EVENTS, "TouchEventBuffer overflow");
+        if self.len < MAX_TOUCH_EVENTS {
+            self.events[self.len] = Some(event);
+            self.len += 1;
+        }
+    }
+
+    fn into_iter(self) -> impl Iterator<Item = MouseEvent> {
+        let len = self.len;
+        self.events.into_iter().take(len).flatten()
+    }
+}
+
+/// State of the multi-touch gesture recognizer.
+#[derive(Default, Debug, Clone, Copy)]
+enum GestureRecognitionState {
+    /// 0-1 fingers; forwarding as mouse events.
+    #[default]
+    Idle,
+    /// 2 fingers down, waiting for movement to exceed threshold.
+    TwoFingersDown { finger_ids: (u64, u64), initial_distance: f32, last_angle: euclid::Angle<f32> },
+    /// Actively synthesizing PinchGesture/RotationGesture events.
+    Pinching {
+        finger_ids: (u64, u64),
+        initial_distance: f32,
+        last_scale: f32,
+        last_angle: euclid::Angle<f32>,
+    },
+}
+
+/// Tracks all active touch points and recognizes pinch/rotation gestures.
+///
+/// When only one finger is down, touch events are forwarded as mouse events.
+/// When two fingers are down and move beyond a threshold, synthesized
+/// `PinchGesture` and `RotationGesture` events are emitted — the same events
+/// that platform gesture recognition (e.g. macOS trackpad) produces.
+struct TouchState {
+    active_touches: TouchMap,
+    /// The finger forwarded as mouse events during single-touch.
+    primary_touch_id: Option<u64>,
+    gesture_state: GestureRecognitionState,
+    /// Last single-finger tap (time + position) for double-tap detection.
+    last_tap: Option<(crate::animations::Instant, LogicalPoint)>,
+}
+
+impl Default for TouchState {
+    fn default() -> Self {
+        Self {
+            active_touches: TouchMap::default(),
+            primary_touch_id: None,
+            gesture_state: GestureRecognitionState::Idle,
+            last_tap: None,
+        }
+    }
+}
+
+impl TouchState {
+    /// Minimum movement (in logical pixels) before two fingers are recognized as a pinch.
+    const PINCH_THRESHOLD: f32 = 8.0;
+
+    /// Minimum angular change (in degrees) before two fingers are recognized as a rotation.
+    const ROTATION_THRESHOLD: f32 = 5.0;
+
+    /// Maximum squared distance (in logical pixels) between two taps for a double-tap.
+    /// 100 px² ≈ 10px radius, matching [`ClickState::check_repeat`](crate::input::ClickState).
+    const DOUBLE_TAP_DISTANCE_SQ: f32 = 100.0;
+
+    /// Returns the finger IDs from the current gesture state, if any.
+    fn gesture_finger_ids(&self) -> Option<(u64, u64)> {
+        match self.gesture_state {
+            GestureRecognitionState::TwoFingersDown { finger_ids, .. }
+            | GestureRecognitionState::Pinching { finger_ids, .. } => Some(finger_ids),
+            GestureRecognitionState::Idle => None,
+        }
+    }
+
+    /// Returns (distance, angle) between two specific touch points.
+    fn geometry_for(&self, (id_a, id_b): (u64, u64)) -> Option<(f32, euclid::Angle<f32>)> {
+        let a = self.active_touches.get(id_a)?;
+        let b = self.active_touches.get(id_b)?;
+        let delta = (b.position - a.position).cast::<f32>();
+        Some((delta.length(), delta.angle_from_x_axis()))
+    }
+
+    /// Returns the positions of the two gesture fingers, or `None` if not available.
+    fn gesture_finger_positions(&self) -> Option<(&TouchPoint, &TouchPoint)> {
+        let (id_a, id_b) = self.gesture_finger_ids()?;
+        let a = self.active_touches.get(id_a)?;
+        let b = self.active_touches.get(id_b)?;
+        Some((a, b))
+    }
+
+    /// Returns the midpoint between the two gesture fingers, or `None`.
+    fn gesture_midpoint(&self) -> Option<LogicalPoint> {
+        let (a, b) = self.gesture_finger_positions()?;
+        let mid = a.position.cast::<f32>().lerp(b.position.cast::<f32>(), 0.5);
+        Some(mid.cast())
+    }
+
+    /// Returns (distance, angle) between the two gesture fingers.
+    fn gesture_geometry(&self) -> Option<(f32, euclid::Angle<f32>)> {
+        let (a, b) = self.gesture_finger_positions()?;
+        let delta = (b.position - a.position).cast::<f32>();
+        Some((delta.length(), delta.angle_from_x_axis()))
+    }
+
+    /// Returns true if the given touch ID is one of the two gesture fingers.
+    fn is_gesture_finger(&self, id: u64) -> bool {
+        self.gesture_finger_ids().is_some_and(|(a, b)| id == a || id == b)
+    }
+
+    /// Run the touch state machine for a single event and return the
+    /// [`MouseEvent`]s to dispatch.
+    ///
+    /// This is intentionally separated from [`WindowInner::process_touch_input`]
+    /// so that the `RefCell` borrow can be dropped *once* before dispatching,
+    /// rather than requiring a manual `drop` at every branch.
+    fn process(
+        &mut self,
+        id: u64,
+        position: LogicalPoint,
+        phase: TouchPhase,
+        click_interval: core::time::Duration,
+    ) -> TouchEventBuffer {
+        let mut events = TouchEventBuffer::new();
+        match phase {
+            TouchPhase::Started => self.process_started(id, position, click_interval, &mut events),
+            TouchPhase::Moved => self.process_moved(id, position, &mut events),
+            TouchPhase::Ended => self.process_ended(id, position, false, &mut events),
+            TouchPhase::Cancelled => self.process_ended(id, position, true, &mut events),
+        }
+        events
+    }
+
+    fn process_started(
+        &mut self,
+        id: u64,
+        position: LogicalPoint,
+        click_interval: core::time::Duration,
+        events: &mut TouchEventBuffer,
+    ) {
+        let is_double_tap = if self.active_touches.len() == 0 {
+            // Check for double-tap before inserting, so a second finger
+            // arriving during the double-tap touch doesn't see a stale entry.
+            if let Some((last_time, last_pos)) = self.last_tap {
+                let now = crate::animations::Instant::now();
+                let elapsed = now - last_time;
+                let dist_sq = (position - last_pos).square_length() as f32;
+                elapsed < click_interval && dist_sq < Self::DOUBLE_TAP_DISTANCE_SQ
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if is_double_tap {
+            // Don't insert into active_touches: the finger-lift will
+            // find nothing to remove and fall through harmlessly.
+            self.last_tap = None;
+            events.push(MouseEvent::DoubleTapGesture { position });
+            return;
+        }
+
+        self.active_touches.insert(TouchPoint { id, position });
+
+        let total = self.active_touches.len();
+        if total == 1 {
+            // First finger: become primary, forward as mouse press.
+            self.primary_touch_id = Some(id);
+            self.gesture_state = GestureRecognitionState::Idle;
+            events.push(MouseEvent::Pressed {
+                position,
+                button: PointerEventButton::Left,
+                click_count: 0,
+                is_touch: true,
+            });
+        } else if total == 2 {
+            // Second finger: transition Idle → TwoFingersDown.
+            let finger_ids = self.active_touches.first_two_ids().unwrap_or((0, 0));
+
+            // Synthesize a Release for the primary finger to clear any
+            // Flickable grab / delay state.
+            let primary_pos = self
+                .primary_touch_id
+                .and_then(|pid| self.active_touches.get(pid))
+                .map(|tp| tp.position)
+                .unwrap_or(position);
+
+            // Compute initial geometry for threshold detection.
+            let (initial_distance, last_angle) =
+                self.geometry_for(finger_ids).unwrap_or((0.0, euclid::Angle::zero()));
+            self.gesture_state = GestureRecognitionState::TwoFingersDown {
+                finger_ids,
+                initial_distance,
+                last_angle,
+            };
+            // Clear double-tap state: a two-finger gesture interrupts the sequence.
+            self.last_tap = None;
+
+            events.push(MouseEvent::Released {
+                position: primary_pos,
+                button: PointerEventButton::Left,
+                click_count: 0,
+                is_touch: true,
+            });
+        }
+        // 3+ fingers: tracked in active_touches but ignored for gesture.
+    }
+
+    fn process_moved(&mut self, id: u64, position: LogicalPoint, events: &mut TouchEventBuffer) {
+        if let Some(tp) = self.active_touches.get_mut(id) {
+            tp.position = position;
+        }
+
+        let is_gesture_finger = self.is_gesture_finger(id);
+
+        match self.gesture_state {
+            GestureRecognitionState::Idle => {
+                if self.primary_touch_id == Some(id) {
+                    // Clear double-tap state if the finger moved too far
+                    // from the last tap, preventing false double-taps
+                    // after drags.
+                    if let Some((_, last_pos)) = self.last_tap
+                        && (position - last_pos).square_length() as f32
+                            >= Self::DOUBLE_TAP_DISTANCE_SQ
+                    {
+                        self.last_tap = None;
+                    }
+                    events.push(MouseEvent::Moved { position, is_touch: true });
+                }
+            }
+            GestureRecognitionState::TwoFingersDown {
+                finger_ids,
+                initial_distance,
+                last_angle,
+            } if is_gesture_finger => {
+                if let Some((dist, angle)) = self.gesture_geometry() {
+                    let delta_dist = (dist - initial_distance).abs();
+                    let delta_angle = (angle - last_angle).signed().to_degrees().abs();
+                    if delta_dist > Self::PINCH_THRESHOLD || delta_angle > Self::ROTATION_THRESHOLD
+                    {
+                        // Re-snapshot so the first gesture event starts from
+                        // the current geometry rather than accumulating the
+                        // threshold movement.
+                        self.gesture_state = GestureRecognitionState::Pinching {
+                            finger_ids,
+                            initial_distance: dist,
+                            last_scale: 1.0,
+                            last_angle: angle,
+                        };
+
+                        let midpoint = self.gesture_midpoint().unwrap_or(position);
+
+                        events.push(MouseEvent::PinchGesture {
+                            position: midpoint,
+                            delta: 0.0,
+                            phase: TouchPhase::Started,
+                        });
+                        events.push(MouseEvent::RotationGesture {
+                            position: midpoint,
+                            delta: 0.0,
+                            phase: TouchPhase::Started,
+                        });
+                    }
+                }
+            }
+            GestureRecognitionState::Pinching {
+                initial_distance, last_scale, last_angle, ..
+            } if is_gesture_finger => {
+                if let Some((dist, angle)) = self.gesture_geometry() {
+                    let midpoint = self.gesture_midpoint().unwrap_or(position);
+
+                    let current_scale =
+                        if initial_distance > 0.0 { dist / initial_distance } else { 1.0 };
+                    let scale_delta = current_scale - last_scale;
+
+                    // `.signed()` wraps to [-pi, pi] so crossing the ±180°
+                    // atan2 boundary doesn't produce a full-revolution jump.
+                    let rotation_delta = (angle - last_angle).signed().to_degrees();
+
+                    // Update the mutable state for next frame.
+                    if let GestureRecognitionState::Pinching {
+                        last_scale: ref mut ls,
+                        last_angle: ref mut la,
+                        ..
+                    } = self.gesture_state
+                    {
+                        *ls = current_scale;
+                        *la = angle;
+                    }
+
+                    events.push(MouseEvent::PinchGesture {
+                        position: midpoint,
+                        delta: scale_delta,
+                        phase: TouchPhase::Moved,
+                    });
+                    events.push(MouseEvent::RotationGesture {
+                        position: midpoint,
+                        delta: rotation_delta,
+                        phase: TouchPhase::Moved,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn process_ended(
+        &mut self,
+        id: u64,
+        position: LogicalPoint,
+        is_cancelled: bool,
+        events: &mut TouchEventBuffer,
+    ) {
+        // Check gesture membership *before* removing from the map.
+        let is_gesture_finger = self.is_gesture_finger(id);
+        self.active_touches.remove(id);
+
+        match self.gesture_state {
+            GestureRecognitionState::Idle => {
+                if self.primary_touch_id == Some(id) {
+                    self.primary_touch_id = None;
+                    if !is_cancelled {
+                        self.last_tap = Some((crate::animations::Instant::now(), position));
+                    }
+                    events.push(MouseEvent::Released {
+                        position,
+                        button: PointerEventButton::Left,
+                        click_count: 0,
+                        is_touch: true,
+                    });
+                    events.push(MouseEvent::Exit);
+                }
+            }
+            GestureRecognitionState::TwoFingersDown { .. } if is_gesture_finger => {
+                self.gesture_state = GestureRecognitionState::Idle;
+                if !is_cancelled {
+                    if let Some(remaining) = self.active_touches.first() {
+                        let remaining_pos = remaining.position;
+                        self.primary_touch_id = Some(remaining.id);
+                        events.push(MouseEvent::Pressed {
+                            position: remaining_pos,
+                            button: PointerEventButton::Left,
+                            click_count: 0,
+                            is_touch: true,
+                        });
+                    } else {
+                        self.primary_touch_id = None;
+                        events.push(MouseEvent::Exit);
+                    }
+                } else {
+                    self.primary_touch_id = None;
+                    events.push(MouseEvent::Exit);
+                }
+            }
+            GestureRecognitionState::Pinching { .. } if is_gesture_finger => {
+                let midpoint = self.gesture_midpoint().unwrap_or(position);
+                self.gesture_state = GestureRecognitionState::Idle;
+
+                let gesture_phase =
+                    if is_cancelled { TouchPhase::Cancelled } else { TouchPhase::Ended };
+
+                let remaining = if !is_cancelled {
+                    self.active_touches.first().map(|tp| (tp.id, tp.position))
+                } else {
+                    None
+                };
+                if let Some((rid, _)) = remaining {
+                    self.primary_touch_id = Some(rid);
+                } else {
+                    self.primary_touch_id = None;
+                }
+
+                events.push(MouseEvent::PinchGesture {
+                    position: midpoint,
+                    delta: 0.0,
+                    phase: gesture_phase,
+                });
+                events.push(MouseEvent::RotationGesture {
+                    position: midpoint,
+                    delta: 0.0,
+                    phase: gesture_phase,
+                });
+
+                if let Some((_, rpos)) = remaining {
+                    events.push(MouseEvent::Pressed {
+                        position: rpos,
+                        button: PointerEventButton::Left,
+                        click_count: 0,
+                        is_touch: true,
+                    });
+                } else {
+                    events.push(MouseEvent::Exit);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod touch_tests {
+    extern crate alloc;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::*;
+    use crate::input::{MouseEvent, TouchPhase};
+    use crate::lengths::LogicalPoint;
+
+    fn pt(x: f32, y: f32) -> LogicalPoint {
+        euclid::point2(x, y)
+    }
+
+    /// Default click interval for tests (500ms, matching platform default).
+    const CLICK_INTERVAL: core::time::Duration = core::time::Duration::from_millis(500);
+
+    // -----------------------------------------------------------------------
+    // TouchMap tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn touch_map_insert_and_get() {
+        let mut map = TouchMap::default();
+        assert_eq!(map.len(), 0);
+        map.insert(TouchPoint { id: 1, position: pt(10.0, 20.0) });
+        assert_eq!(map.len(), 1);
+        assert!(map.get(1).is_some());
+        assert!((map.get(1).unwrap().position.x - 10.0).abs() < f32::EPSILON);
+        assert!(map.get(2).is_none());
+    }
+
+    #[test]
+    fn touch_map_update_existing() {
+        let mut map = TouchMap::default();
+        map.insert(TouchPoint { id: 1, position: pt(10.0, 20.0) });
+        map.insert(TouchPoint { id: 1, position: pt(30.0, 40.0) });
+        assert_eq!(map.len(), 1);
+        assert!((map.get(1).unwrap().position.x - 30.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn touch_map_remove() {
+        let mut map = TouchMap::default();
+        map.insert(TouchPoint { id: 1, position: pt(10.0, 20.0) });
+        map.insert(TouchPoint { id: 2, position: pt(30.0, 40.0) });
+        assert_eq!(map.len(), 2);
+        map.remove(1);
+        assert_eq!(map.len(), 1);
+        assert!(map.get(1).is_none());
+        assert!(map.get(2).is_some());
+    }
+
+    #[test]
+    fn touch_map_remove_nonexistent() {
+        let mut map = TouchMap::default();
+        map.insert(TouchPoint { id: 1, position: pt(10.0, 20.0) });
+        map.remove(99);
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn touch_map_capacity() {
+        let mut map = TouchMap::default();
+        for i in 0..MAX_TRACKED_TOUCHES {
+            map.insert(TouchPoint { id: i as u64, position: pt(i as f32, 0.0) });
+        }
+        assert_eq!(map.len(), MAX_TRACKED_TOUCHES);
+        // Inserting beyond capacity is silently ignored.
+        map.insert(TouchPoint { id: 99, position: pt(99.0, 0.0) });
+        assert_eq!(map.len(), MAX_TRACKED_TOUCHES);
+        assert!(map.get(99).is_none());
+    }
+
+    #[test]
+    fn touch_map_first_two_ids() {
+        let mut map = TouchMap::default();
+        assert!(map.first_two_ids().is_none());
+        map.insert(TouchPoint { id: 5, position: pt(0.0, 0.0) });
+        assert!(map.first_two_ids().is_none());
+        map.insert(TouchPoint { id: 10, position: pt(0.0, 0.0) });
+        assert_eq!(map.first_two_ids(), Some((5, 10)));
+    }
+
+    #[test]
+    fn touch_map_first() {
+        let mut map = TouchMap::default();
+        assert!(map.first().is_none());
+        map.insert(TouchPoint { id: 7, position: pt(1.0, 2.0) });
+        let tp = map.first().unwrap();
+        assert_eq!(tp.id, 7);
+        assert!((tp.position.x - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn touch_map_get_mut() {
+        let mut map = TouchMap::default();
+        map.insert(TouchPoint { id: 1, position: pt(0.0, 0.0) });
+        map.get_mut(1).unwrap().position = pt(5.0, 6.0);
+        assert!((map.get(1).unwrap().position.x - 5.0).abs() < f32::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: extract event types for readable assertions
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug, PartialEq)]
+    enum Ev {
+        Pressed(f32, f32),
+        Released(f32, f32),
+        Moved(f32, f32),
+        Exit,
+        PinchStarted,
+        PinchMoved(f32),
+        PinchEnded,
+        PinchCancelled,
+        RotationStarted,
+        RotationMoved(f32),
+        RotationEnded,
+        RotationCancelled,
+        DoubleTap(f32, f32),
+    }
+
+    fn classify(events: &TouchEventBuffer) -> Vec<Ev> {
+        events
+            .clone()
+            .into_iter()
+            .map(|e| match e {
+                MouseEvent::Pressed { position, .. } => Ev::Pressed(position.x, position.y),
+                MouseEvent::Released { position, .. } => Ev::Released(position.x, position.y),
+                MouseEvent::Moved { position, .. } => Ev::Moved(position.x, position.y),
+                MouseEvent::Exit => Ev::Exit,
+                MouseEvent::PinchGesture { delta, phase, .. } => match phase {
+                    TouchPhase::Started => Ev::PinchStarted,
+                    TouchPhase::Moved => Ev::PinchMoved(delta),
+                    TouchPhase::Ended => Ev::PinchEnded,
+                    TouchPhase::Cancelled => Ev::PinchCancelled,
+                },
+                MouseEvent::RotationGesture { delta, phase, .. } => match phase {
+                    TouchPhase::Started => Ev::RotationStarted,
+                    TouchPhase::Moved => Ev::RotationMoved(delta),
+                    TouchPhase::Ended => Ev::RotationEnded,
+                    TouchPhase::Cancelled => Ev::RotationCancelled,
+                },
+                MouseEvent::DoubleTapGesture { position } => Ev::DoubleTap(position.x, position.y),
+                _ => panic!("unexpected event: {:?}", e),
+            })
+            .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // TouchState: single-finger forwarding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn single_finger_press_move_release() {
+        let mut state = TouchState::default();
+
+        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::Pressed(100.0, 200.0)]);
+
+        let evs = state.process(1, pt(110.0, 200.0), TouchPhase::Moved, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::Moved(110.0, 200.0)]);
+
+        let evs = state.process(1, pt(110.0, 200.0), TouchPhase::Ended, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::Released(110.0, 200.0), Ev::Exit]);
+    }
+
+    #[test]
+    fn single_finger_cancel() {
+        let mut state = TouchState::default();
+
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+
+        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Cancelled, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::Released(100.0, 200.0), Ev::Exit]);
+
+        // Cancelled touch should NOT record tap state for double-tap.
+        assert!(state.last_tap.is_none());
+    }
+
+    #[test]
+    fn non_primary_move_ignored() {
+        let mut state = TouchState::default();
+        // Touch 1 is primary.
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+
+        // Move for a different ID that was never started (edge case).
+        let evs = state.process(99, pt(50.0, 50.0), TouchPhase::Moved, CLICK_INTERVAL);
+        assert!(classify(&evs).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // TouchState: two-finger → gesture transition
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn two_fingers_synthesize_release_then_gesture() {
+        let mut state = TouchState::default();
+
+        // Finger 1 down.
+        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::Pressed(100.0, 200.0)]);
+
+        // Finger 2 down → synthesized release for finger 1.
+        let evs = state.process(2, pt(200.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::Released(100.0, 200.0)]);
+        assert!(matches!(state.gesture_state, GestureRecognitionState::TwoFingersDown { .. }));
+
+        // Move finger 2 far enough to trigger pinch (> 8px threshold).
+        let evs = state.process(2, pt(220.0, 200.0), TouchPhase::Moved, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::PinchStarted, Ev::RotationStarted]);
+        assert!(matches!(state.gesture_state, GestureRecognitionState::Pinching { .. }));
+    }
+
+    #[test]
+    fn two_fingers_below_threshold_no_gesture() {
+        let mut state = TouchState::default();
+
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(200.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+
+        // Small movement within threshold.
+        let evs = state.process(2, pt(202.0, 200.0), TouchPhase::Moved, CLICK_INTERVAL);
+        assert!(classify(&evs).is_empty());
+        assert!(matches!(state.gesture_state, GestureRecognitionState::TwoFingersDown { .. }));
+    }
+
+    #[test]
+    fn pinch_produces_scale_deltas() {
+        let mut state = TouchState::default();
+
+        // Set up: finger 1 at (0, 0), finger 2 at (100, 0) → distance = 100.
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(100.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+
+        // Move finger 2 to (120, 0) to exceed threshold and start pinching.
+        state.process(2, pt(120.0, 0.0), TouchPhase::Moved, CLICK_INTERVAL);
+        assert!(matches!(state.gesture_state, GestureRecognitionState::Pinching { .. }));
+
+        // Now move finger 2 further to (180, 0).
+        // New distance = 180, initial distance (re-snapshotted) = 120.
+        // Scale = 180/120 = 1.5, delta = 1.5 - 1.0 = 0.5.
+        let evs = state.process(2, pt(180.0, 0.0), TouchPhase::Moved, CLICK_INTERVAL);
+        let classified = classify(&evs);
+        assert_eq!(classified.len(), 2);
+        if let Ev::PinchMoved(delta) = classified[0] {
+            assert!((delta - 0.5).abs() < 0.01, "expected ~0.5, got {}", delta);
+        } else {
+            panic!("expected PinchMoved, got {:?}", classified[0]);
+        }
+    }
+
+    #[test]
+    fn rotation_produces_correct_deltas() {
+        let mut state = TouchState::default();
+
+        // Finger 1 at origin, finger 2 on the X axis at (100, 0).
+        // Initial angle = atan2(0, 100) = 0°.
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(100.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+
+        // Move finger 2 far enough to trigger gesture.
+        state.process(2, pt(120.0, 0.0), TouchPhase::Moved, CLICK_INTERVAL);
+        assert!(matches!(state.gesture_state, GestureRecognitionState::Pinching { .. }));
+
+        // Rotate ~45° clockwise: move finger 2 from (120, 0) to roughly
+        // (70.7, 70.7) which is at 45° from origin.
+        // atan2(70.7, 70.7) ≈ 45°. Delta from re-snapshotted 0° = +45°.
+        // Slint convention: positive = clockwise → delta ≈ +45°.
+        let evs = state.process(2, pt(70.7, 70.7), TouchPhase::Moved, CLICK_INTERVAL);
+        let classified = classify(&evs);
+        assert_eq!(classified.len(), 2);
+        if let Ev::RotationMoved(delta) = classified[1] {
+            assert!((delta - 45.0).abs() < 1.0, "expected ~45.0 (clockwise), got {}", delta);
+        } else {
+            panic!("expected RotationMoved, got {:?}", classified[1]);
+        }
+    }
+
+    #[test]
+    fn rotation_across_180_degree_boundary() {
+        let mut state = TouchState::default();
+
+        // Finger 1 at origin, finger 2 at (-100, -10).
+        // angle = atan2(-10, -100) ≈ -174.3°.
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(-100.0, -10.0), TouchPhase::Started, CLICK_INTERVAL);
+
+        // Trigger gesture by moving far enough.
+        state.process(2, pt(-120.0, -10.0), TouchPhase::Moved, CLICK_INTERVAL);
+        assert!(matches!(state.gesture_state, GestureRecognitionState::Pinching { .. }));
+
+        // Rotate across the ±180° boundary: move finger 2 to (-100, 10).
+        // New angle = atan2(10, -100) ≈ 174.3°.
+        // Raw angular change crosses ±180°, but per-frame delta should be
+        // small (~11.4° which is 2 * 5.7°), NOT a ~349° jump.
+        let evs = state.process(2, pt(-100.0, 10.0), TouchPhase::Moved, CLICK_INTERVAL);
+        let classified = classify(&evs);
+        if let Ev::RotationMoved(delta) = classified[1] {
+            assert!(
+                delta.abs() < 20.0,
+                "rotation should be a small delta (~11°), got {} (discontinuity!)",
+                delta
+            );
+        } else {
+            panic!("expected RotationMoved, got {:?}", classified[1]);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // TouchState: gesture end transitions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pinch_end_with_remaining_finger() {
+        let mut state = TouchState::default();
+
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(100.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+        // Trigger pinch.
+        state.process(2, pt(120.0, 0.0), TouchPhase::Moved, CLICK_INTERVAL);
+
+        // Lift finger 2 → gesture ends, finger 1 gets re-pressed.
+        let evs = state.process(2, pt(120.0, 0.0), TouchPhase::Ended, CLICK_INTERVAL);
+        let classified = classify(&evs);
+        assert_eq!(classified, vec![Ev::PinchEnded, Ev::RotationEnded, Ev::Pressed(0.0, 0.0)]);
+        assert!(matches!(state.gesture_state, GestureRecognitionState::Idle));
+        assert_eq!(state.primary_touch_id, Some(1));
+    }
+
+    #[test]
+    fn pinch_cancel_emits_cancelled_and_exit() {
+        let mut state = TouchState::default();
+
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(100.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(120.0, 0.0), TouchPhase::Moved, CLICK_INTERVAL);
+
+        // Cancel finger 2.
+        let evs = state.process(2, pt(120.0, 0.0), TouchPhase::Cancelled, CLICK_INTERVAL);
+        let classified = classify(&evs);
+        assert_eq!(classified, vec![Ev::PinchCancelled, Ev::RotationCancelled, Ev::Exit]);
+        assert!(state.primary_touch_id.is_none());
+    }
+
+    #[test]
+    fn two_fingers_down_lift_before_threshold_returns_to_idle() {
+        let mut state = TouchState::default();
+
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(200.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        assert!(matches!(state.gesture_state, GestureRecognitionState::TwoFingersDown { .. }));
+
+        // Lift finger 2 without exceeding movement threshold.
+        let evs = state.process(2, pt(200.0, 200.0), TouchPhase::Ended, CLICK_INTERVAL);
+        let classified = classify(&evs);
+        // Remaining finger 1 gets re-pressed.
+        assert_eq!(classified, vec![Ev::Pressed(100.0, 200.0)]);
+        assert!(matches!(state.gesture_state, GestureRecognitionState::Idle));
+        assert_eq!(state.primary_touch_id, Some(1));
+    }
+
+    #[test]
+    fn two_fingers_down_cancel_both_emits_exit() {
+        let mut state = TouchState::default();
+
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(200.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+
+        // Cancel finger 2 (gesture finger, no remaining → Exit).
+        let evs = state.process(2, pt(200.0, 200.0), TouchPhase::Cancelled, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::Exit]);
+
+        // Cancel finger 1 (now in Idle, but not primary since cancel cleared it).
+        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Cancelled, CLICK_INTERVAL);
+        assert!(classify(&evs).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // TouchState: double-tap detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn double_tap_within_interval() {
+        let mut state = TouchState::default();
+
+        // First tap.
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(1, pt(100.0, 200.0), TouchPhase::Ended, CLICK_INTERVAL);
+        assert!(state.last_tap.is_some());
+
+        // Second tap at same position, within interval.
+        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::DoubleTap(100.0, 200.0)]);
+
+        // Tap state cleared after double-tap.
+        assert!(state.last_tap.is_none());
+    }
+
+    #[test]
+    fn double_tap_too_far() {
+        let mut state = TouchState::default();
+
+        // First tap.
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(1, pt(100.0, 200.0), TouchPhase::Ended, CLICK_INTERVAL);
+
+        // Second tap too far away (> 10px radius → > 100 sq dist).
+        let evs = state.process(1, pt(200.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        // Should be a regular press, not a double-tap.
+        assert_eq!(classify(&evs), vec![Ev::Pressed(200.0, 200.0)]);
+    }
+
+    #[test]
+    fn double_tap_state_cleared_by_drag() {
+        let mut state = TouchState::default();
+
+        // First tap.
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(1, pt(100.0, 200.0), TouchPhase::Ended, CLICK_INTERVAL);
+        assert!(state.last_tap.is_some());
+
+        // New touch + drag beyond threshold.
+        state.process(2, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(120.0, 200.0), TouchPhase::Moved, CLICK_INTERVAL);
+        // 20px > 10px radius, so tap state should be cleared.
+        assert!(state.last_tap.is_none());
+
+        state.process(2, pt(120.0, 200.0), TouchPhase::Ended, CLICK_INTERVAL);
+
+        // Next tap should be a regular press, not double-tap.
+        let evs = state.process(3, pt(120.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::Pressed(120.0, 200.0)]);
+    }
+
+    #[test]
+    fn double_tap_finger_lift_harmless() {
+        let mut state = TouchState::default();
+
+        // First tap.
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(1, pt(100.0, 200.0), TouchPhase::Ended, CLICK_INTERVAL);
+
+        // Double-tap detected.
+        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Started, CLICK_INTERVAL);
+        assert_eq!(classify(&evs), vec![Ev::DoubleTap(100.0, 200.0)]);
+
+        // The finger was never inserted into active_touches, so lifting it
+        // should produce no events (falls through _ => {} in Idle).
+        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Ended, CLICK_INTERVAL);
+        assert!(classify(&evs).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // TouchState: 3+ fingers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn third_finger_ignored_for_gesture() {
+        let mut state = TouchState::default();
+
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(100.0, 0.0), TouchPhase::Started, CLICK_INTERVAL);
+
+        // Third finger: no additional events.
+        let evs = state.process(3, pt(50.0, 50.0), TouchPhase::Started, CLICK_INTERVAL);
+        assert!(classify(&evs).is_empty());
+        assert_eq!(state.active_touches.len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Angle wrapping via Euclid
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn euclid_angle_signed_wrapping() {
+        use euclid::Angle;
+        let wrap = |deg: f32| Angle::degrees(deg).signed().to_degrees();
+        assert!(wrap(0.0).abs() < f32::EPSILON);
+        assert!((wrap(180.0) - 180.0).abs() < 0.01);
+        assert!((wrap(181.0) - (-179.0)).abs() < 0.01);
+        assert!((wrap(-181.0) - 179.0).abs() < 0.01);
+        assert!(wrap(360.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn zero_distance_fingers_no_division_by_zero() {
+        let mut state = TouchState::default();
+
+        // Two fingers at the exact same position → distance = 0.
+        state.process(1, pt(100.0, 100.0), TouchPhase::Started, CLICK_INTERVAL);
+        state.process(2, pt(100.0, 100.0), TouchPhase::Started, CLICK_INTERVAL);
+        assert!(matches!(state.gesture_state, GestureRecognitionState::TwoFingersDown { .. }));
+
+        // Move one finger far enough to trigger gesture.
+        let evs = state.process(2, pt(120.0, 100.0), TouchPhase::Moved, CLICK_INTERVAL);
+        assert!(matches!(state.gesture_state, GestureRecognitionState::Pinching { .. }));
+        let classified = classify(&evs);
+        assert_eq!(classified.len(), 2);
+        assert_eq!(classified[0], Ev::PinchStarted);
+
+        // Move further — scale should not be inf/NaN despite initial_distance
+        // having been 0 (re-snapshotted to 20.0 at threshold crossing).
+        let evs = state.process(2, pt(140.0, 100.0), TouchPhase::Moved, CLICK_INTERVAL);
+        let classified = classify(&evs);
+        if let Ev::PinchMoved(delta) = classified[0] {
+            assert!(delta.is_finite(), "scale delta should be finite, got {}", delta);
+        } else {
+            panic!("expected PinchMoved, got {:?}", classified[0]);
+        }
+    }
+}
+
 /// Inner datastructure for the [`crate::api::Window`]
 pub struct WindowInner {
     window_adapter_weak: Weak<dyn WindowAdapter>,
@@ -445,6 +1445,7 @@ pub struct WindowInner {
     /// When the window is visible, keep a strong reference
     strong_component_ref: RefCell<Option<ItemTreeRc>>,
     mouse_input_state: Cell<MouseInputState>,
+    touch_state: RefCell<TouchState>,
     pub(crate) modifiers: Cell<InternalKeyboardModifierState>,
 
     /// ItemRC that currently have the focus (possibly an instance of TextInput)
@@ -468,7 +1469,7 @@ pub struct WindowInner {
     had_popup_on_press: Cell<bool>,
     close_requested: Callback<(), CloseRequestResponse>,
     click_state: ClickState,
-    pub(crate) ctx: once_cell::unsync::Lazy<crate::SlintContext>,
+    ctx: core::cell::OnceCell<crate::SlintContext>,
 }
 
 impl Drop for WindowInner {
@@ -505,6 +1506,7 @@ impl WindowInner {
             component: Default::default(),
             strong_component_ref: Default::default(),
             mouse_input_state: Default::default(),
+            touch_state: Default::default(),
             modifiers: Default::default(),
             pinned_fields: Box::pin(WindowPinnedFields {
                 redraw_tracker,
@@ -527,11 +1529,7 @@ impl WindowInner {
             close_requested: Default::default(),
             click_state: ClickState::default(),
             prevent_focus_change: Default::default(),
-            // The ctx is lazy so that a Window can be initialized before the backend.
-            // (for example in test_empty_window)
-            ctx: once_cell::unsync::Lazy::new(|| {
-                crate::context::GLOBAL_CONTEXT.with(|ctx| ctx.get().unwrap().clone())
-            }),
+            ctx: Default::default(),
         }
     }
 
@@ -541,6 +1539,7 @@ impl WindowInner {
         self.close_all_popups();
         self.focus_item.replace(Default::default());
         self.mouse_input_state.replace(Default::default());
+        self.touch_state.replace(Default::default());
         self.modifiers.replace(Default::default());
         self.component.replace(ItemTreeRc::downgrade(component));
         self.pinned_fields.window_properties_tracker.set_dirty(); // component changed, layout constraints for sure must be re-calculated
@@ -552,12 +1551,7 @@ impl WindowInner {
             .internal(crate::InternalToken)
             .map(|internal| internal.safe_area_inset())
             .unwrap_or_default();
-        self.set_window_item_safe_area(
-            inset.top_to_logical(scale_factor),
-            inset.bottom_to_logical(scale_factor),
-            inset.left_to_logical(scale_factor),
-            inset.right_to_logical(scale_factor),
-        );
+        self.set_window_item_safe_area(inset.to_logical(scale_factor));
         window_adapter.request_redraw();
         let weak = Rc::downgrade(&window_adapter);
         crate::timers::Timer::single_shot(Default::default(), move || {
@@ -591,7 +1585,7 @@ impl WindowInner {
         let Some(item_tree) = self.try_component() else { return };
 
         // handle multiple press release
-        event = self.click_state.check_repeat(event, self.ctx.platform().click_interval());
+        event = self.click_state.check_repeat(event, self.context().platform().click_interval());
 
         let window_adapter = self.window_adapter();
         let mut mouse_input_state = self.mouse_input_state.take();
@@ -709,7 +1703,7 @@ impl WindowInner {
             }
 
             let root = match menubar_item {
-                None => item_tree.map(|item_tree| ItemRc::new(item_tree.clone(), 0)),
+                None => item_tree.map(|item_tree| ItemRc::new_root(item_tree.clone())),
                 Some(menubar_item) => {
                     event.translate(
                         menubar_item
@@ -747,7 +1741,13 @@ impl WindowInner {
 
         if last_top_item != mouse_input_state.top_item_including_delayed() {
             self.click_state.reset();
-            self.click_state.check_repeat(event, self.ctx.platform().click_interval());
+            self.click_state.check_repeat(event, self.context().platform().click_interval());
+        }
+
+        if old_cursor != mouse_input_state.cursor
+            && let Some(window_adapter) = window_adapter.internal(crate::InternalToken)
+        {
+            window_adapter.set_mouse_cursor(mouse_input_state.cursor);
         }
 
         if old_cursor != mouse_input_state.cursor
@@ -765,6 +1765,21 @@ impl WindowInner {
         crate::properties::ChangeTracker::run_change_handlers();
     }
 
+    /// Receive a raw touch event from a backend and either forward it as a mouse
+    /// event (single finger) or synthesize `PinchGesture`/`RotationGesture` events
+    /// (two fingers), producing the same events as platform gesture recognition.
+    ///
+    /// `position` must be in **logical coordinates** (i.e., already divided by the
+    /// scale factor). Passing physical coordinates will produce incorrect gesture
+    /// geometry and hit-testing.
+    pub fn process_touch_input(&self, id: u64, position: LogicalPoint, phase: TouchPhase) {
+        let click_interval = self.context().platform().click_interval();
+        let events = self.touch_state.borrow_mut().process(id, position, phase, click_interval);
+        for event in events.into_iter() {
+            self.process_mouse_input(event);
+        }
+    }
+
     /// Called by the input code's internal timer to send an event that was delayed
     pub(crate) fn process_delayed_event(&self) {
         self.mouse_input_state.set(crate::input::process_delayed_event(
@@ -779,6 +1794,21 @@ impl WindowInner {
     /// Arguments:
     /// * `event`: The key event received by the windowing system.
     pub fn process_key_input(&self, mut event: KeyEvent) -> crate::input::KeyEventResult {
+        // NFC-normalize the event text so that shortcut matching works consistently
+        // regardless of the composed/decomposed form the backend provides
+        // (e.g. é as U+00E9 vs e + U+0301).
+        // Note: icu_normalizer is currently only enabled if parley is enabled
+        #[cfg(feature = "shared-parley")]
+        {
+            let normalizer = icu_normalizer::ComposingNormalizer::new_nfc();
+            let normalized = normalizer.normalize(&event.text);
+            // Only replace the event text if normalization actually changed it,
+            // to avoid unnecessary allocations.
+            if let alloc::borrow::Cow::Owned(normalized) = normalized {
+                event.text = normalized.into();
+            }
+        }
+
         if let Some(updated_modifier) = self
             .modifiers
             .get()
@@ -894,7 +1924,11 @@ impl WindowInner {
             new_blinker
         });
 
-        TextCursorBlinker::set_binding(blinker, prop, self.ctx.platform().cursor_flash_cycle());
+        TextCursorBlinker::set_binding(
+            blinker,
+            prop,
+            self.context().platform().cursor_flash_cycle(),
+        );
     }
 
     /// Sets the focus to the item pointed to by item_ptr. This will remove the focus from any
@@ -998,7 +2032,12 @@ impl WindowInner {
         let mut visited = Vec::new();
 
         loop {
-            if (current_item.is_visible() || reason == FocusReason::Programmatic)
+            let can_receive_focus = match reason {
+                FocusReason::Programmatic => true,
+                FocusReason::TabNavigation => current_item.is_visible_or_clipped_by_flickable(),
+                _ => current_item.is_visible(),
+            };
+            if can_receive_focus
                 && self.publish_focus_item(&Some(current_item.clone()), reason)
                     == crate::input::FocusEventResult::FocusAccepted
             {
@@ -1144,7 +2183,7 @@ impl WindowInner {
         if let Some(component) = self.try_component() {
             let was_visible = self.strong_component_ref.replace(Some(component)).is_some();
             if !was_visible {
-                *(self.ctx.0.window_count.borrow_mut()) += 1;
+                *(self.context().0.window_count.borrow_mut()) += 1;
             }
         }
 
@@ -1160,14 +2199,9 @@ impl WindowInner {
             .internal(crate::InternalToken)
             .map(|internal| internal.safe_area_inset())
             .unwrap_or_default();
-        self.set_window_item_safe_area(
-            inset.top_to_logical(scale_factor),
-            inset.bottom_to_logical(scale_factor),
-            inset.left_to_logical(scale_factor),
-            inset.right_to_logical(scale_factor),
-        );
+        self.set_window_item_safe_area(inset.to_logical(scale_factor));
         self.window_adapter().renderer().resize(size).unwrap();
-        if let Some(hook) = self.ctx.0.window_shown_hook.borrow_mut().as_mut() {
+        if let Some(hook) = self.context().0.window_shown_hook.borrow_mut().as_mut() {
             hook(&self.window_adapter());
         }
         Ok(())
@@ -1178,11 +2212,11 @@ impl WindowInner {
         let result = self.window_adapter().set_visible(false);
         let was_visible = self.strong_component_ref.borrow_mut().take().is_some();
         if was_visible {
-            let mut count = self.ctx.0.window_count.borrow_mut();
+            let mut count = self.context().0.window_count.borrow_mut();
             *count -= 1;
             if *count <= 0 {
                 drop(count);
-                let _ = self.ctx.event_loop_proxy().and_then(|p| p.quit_event_loop().ok());
+                let _ = self.context().event_loop_proxy().and_then(|p| p.quit_event_loop().ok());
             }
         }
         result
@@ -1223,7 +2257,8 @@ impl WindowInner {
         let position = parent_item
             .map_to_window(parent_item.geometry().origin + position.to_euclid().to_vector());
         let root_of = |mut item_tree: ItemTreeRc| loop {
-            if ItemRc::new(item_tree.clone(), 0).downcast::<crate::items::WindowItem>().is_some() {
+            if ItemRc::new_root(item_tree.clone()).downcast::<crate::items::WindowItem>().is_some()
+            {
                 return item_tree;
             }
             let mut r = crate::item_tree::ItemWeak::default();
@@ -1464,7 +2499,7 @@ impl WindowInner {
     /// is returned, it's guaranteed to be safe to downcast to `WindowItem`.
     pub fn window_item_rc(&self) -> Option<ItemRc> {
         self.try_component().and_then(|component_rc| {
-            let item_rc = ItemRc::new(component_rc, 0);
+            let item_rc = ItemRc::new_root(component_rc);
             if item_rc.downcast::<crate::items::WindowItem>().is_some() {
                 Some(item_rc)
             } else {
@@ -1476,7 +2511,7 @@ impl WindowInner {
     /// Returns the window item that is the first item in the component.
     pub fn window_item(&self) -> Option<VRcMapped<ItemTreeVTable, crate::items::WindowItem>> {
         self.try_component().and_then(|component_rc| {
-            ItemRc::new(component_rc, 0).downcast::<crate::items::WindowItem>()
+            ItemRc::new_root(component_rc).downcast::<crate::items::WindowItem>()
         })
     }
 
@@ -1494,22 +2529,14 @@ impl WindowInner {
         }
     }
 
-    pub(crate) fn set_window_item_safe_area(
-        &self,
-        top: crate::lengths::LogicalLength,
-        bottom: crate::lengths::LogicalLength,
-        left: crate::lengths::LogicalLength,
-        right: crate::lengths::LogicalLength,
-    ) {
+    /// The safe area of the window has changed.
+    pub fn set_window_item_safe_area(&self, inset: crate::lengths::LogicalEdges) {
         if let Some(component_rc) = self.try_component() {
             let component = ItemTreeRc::borrow_pin(&component_rc);
             let root_item = component.as_ref().get_item_ref(0);
             if let Some(window_item) = ItemRef::downcast_pin::<crate::items::WindowItem>(root_item)
             {
-                window_item.safe_area_inset_top.set(top);
-                window_item.safe_area_inset_bottom.set(bottom);
-                window_item.safe_area_inset_left.set(left);
-                window_item.safe_area_inset_right.set(right);
+                window_item.safe_area_insets.set(inset);
             }
         }
     }
@@ -1527,14 +2554,8 @@ impl WindowInner {
         let Some(window_item) = ItemRef::downcast_pin::<crate::items::WindowItem>(root_item) else {
             return;
         };
-        for (property, value) in [
-            (&window_item.virtual_keyboard_x, origin.x),
-            (&window_item.virtual_keyboard_y, origin.y),
-            (&window_item.virtual_keyboard_width, size.width),
-            (&window_item.virtual_keyboard_height, size.height),
-        ] {
-            property.set(LogicalLength::new(value));
-        }
+        window_item.virtual_keyboard_position.set(origin);
+        window_item.virtual_keyboard_size.set(size);
         if let Some(focus_item) = self.focus_item.borrow().upgrade() {
             focus_item.try_scroll_into_visible();
         }
@@ -1547,16 +2568,7 @@ impl WindowInner {
         let component = ItemTreeRc::borrow_pin(&component_rc);
         let root_item = component.as_ref().get_item_ref(0);
         let window_item = ItemRef::downcast_pin::<crate::items::WindowItem>(root_item)?;
-        Some((
-            crate::lengths::LogicalPoint::from_lengths(
-                window_item.virtual_keyboard_x(),
-                window_item.virtual_keyboard_y(),
-            ),
-            crate::lengths::LogicalSize::from_lengths(
-                window_item.virtual_keyboard_width(),
-                window_item.virtual_keyboard_height(),
-            ),
-        ))
+        Some((window_item.virtual_keyboard_position(), window_item.virtual_keyboard_size()))
     }
 
     /// Sets the close_requested callback. The callback will be run when the user tries to close a window.
@@ -1615,7 +2627,7 @@ impl WindowInner {
 
     /// Returns the (context global) xdg app id for use with wayland and x11.
     pub fn xdg_app_id(&self) -> Option<SharedString> {
-        self.ctx.xdg_app_id()
+        self.context().xdg_app_id()
     }
 
     /// Returns the upgraded window adapter
@@ -1630,7 +2642,14 @@ impl WindowInner {
 
     /// Provides access to the Windows' Slint context.
     pub fn context(&self) -> &crate::SlintContext {
-        &self.ctx
+        self.ctx
+            .get_or_init(|| crate::context::GLOBAL_CONTEXT.with(|ctx| ctx.get().unwrap().clone()))
+    }
+
+    /// Set the SlintContext.
+    /// This needs to be called once before any other functions that would use the context.
+    pub fn set_context(&self, ctx: crate::SlintContext) {
+        self.ctx.set(ctx).map_err(|_| ()).expect("context shouldn't have been set before")
     }
 }
 
@@ -1886,10 +2905,10 @@ pub mod ffi {
                     let cpp_graphics_api = match graphics_api {
                         crate::api::GraphicsAPI::NativeOpenGL { .. } => GraphicsAPI::NativeOpenGL,
                         crate::api::GraphicsAPI::WebGL { .. } => unreachable!(), // We don't support wasm with C++
-                        #[cfg(feature = "unstable-wgpu-26")]
-                        crate::api::GraphicsAPI::WGPU26 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
                         #[cfg(feature = "unstable-wgpu-27")]
                         crate::api::GraphicsAPI::WGPU27 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
+                        #[cfg(feature = "unstable-wgpu-28")]
+                        crate::api::GraphicsAPI::WGPU28 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
                     };
                     (self.callback)(state, cpp_graphics_api, self.user_data)
                 }

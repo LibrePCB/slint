@@ -60,8 +60,10 @@ pub fn binding_analysis(
     compiler_config: &CompilerConfiguration,
     diag: &mut BuildDiagnostics,
 ) -> GlobalAnalysis {
-    let mut global_analysis = GlobalAnalysis::default();
-    global_analysis.const_scale_factor = compiler_config.const_scale_factor;
+    let mut global_analysis = GlobalAnalysis {
+        const_scale_factor: compiler_config.const_scale_factor,
+        ..Default::default()
+    };
     let mut reverse_aliases = Default::default();
     mark_used_base_properties(doc);
     propagate_is_set_on_aliases(doc, &mut reverse_aliases);
@@ -105,7 +107,7 @@ impl PropertyPath {
         let mut elements = self.elements.clone();
         loop {
             let enclosing = element.borrow().enclosing_component.upgrade().unwrap();
-            if enclosing.parent_element.upgrade().is_some()
+            if enclosing.parent_element().is_some()
                 || !Rc::ptr_eq(&element, &enclosing.root_element)
             {
                 break;
@@ -121,6 +123,7 @@ impl PropertyPath {
                     Rc::ptr_eq(c, &enclosing)
                         || enclosing
                             .parent_element
+                            .borrow()
                             .upgrade()
                             .is_some_and(|e| check_that_element_is_in_the_component(&e, c))
                 }
@@ -455,6 +458,7 @@ fn process_property(
     reverse_aliases: &ReverseAliases,
     diag: &mut BuildDiagnostics,
 ) -> DependsOnExternal {
+    #[allow(clippy::match_single_binding)]
     let depends_on_external = match prop
         .prop
         .element()
@@ -520,23 +524,58 @@ fn recurse_expression(
         Expression::LayoutCacheAccess { layout_cache_prop, .. } => {
             vis(&layout_cache_prop.clone().into(), P)
         }
-        Expression::SolveLayout(l, o) | Expression::ComputeLayoutInfo(l, o) => {
+        Expression::GridRepeaterCacheAccess { layout_cache_prop, .. } => {
+            vis(&layout_cache_prop.clone().into(), P)
+        }
+        Expression::SolveBoxLayout(l, o) | Expression::ComputeBoxLayoutInfo(l, o) => {
             // we should only visit the layout geometry for the orientation
-            if matches!(expr, Expression::SolveLayout(..))
-                && let Some(nr) = l.geometry().rect.size_reference(*o)
+            if matches!(expr, Expression::SolveBoxLayout(..))
+                && let Some(nr) = l.geometry.rect.size_reference(*o)
             {
                 vis(&nr.clone().into(), P);
             }
-            match l {
-                crate::layout::Layout::GridLayout(_) => {
-                    panic!("GridLayout should use SolveGridLayout/ComputeGridLayoutInfo")
-                }
-                crate::layout::Layout::BoxLayout(l) => {
-                    visit_layout_items_dependencies(l.elems.iter(), *o, vis)
-                }
-            }
+            visit_layout_items_dependencies(l.elems.iter(), *o, vis);
 
-            let mut g = l.geometry().clone();
+            let mut g = l.geometry.clone();
+            g.rect = Default::default(); // already visited;
+            g.visit_named_references(&mut |nr| vis(&nr.clone().into(), P))
+        }
+        Expression::SolveFlexBoxLayout(layout)
+        | Expression::ComputeFlexBoxLayoutInfo(layout, _) => {
+            if let Some(nr) = layout.direction.as_ref() {
+                vis(&nr.clone().into(), P);
+            }
+            // Visit all layout geometry dependencies
+            if matches!(expr, Expression::SolveFlexBoxLayout(..)) {
+                // FlexBoxLayout needs both width and height
+                if let Some(nr) = layout.geometry.rect.width_reference.as_ref() {
+                    vis(&nr.clone().into(), P);
+                }
+                if let Some(nr) = layout.geometry.rect.height_reference.as_ref() {
+                    vis(&nr.clone().into(), P);
+                }
+            } else if let Expression::ComputeFlexBoxLayoutInfo(_, _orientation) = expr {
+                // Technically, due to wrapping, there's a dependency on width for the vertical orientation (for Rows/RowsReverse)
+                // or a dependency on height for the horizontal orientation (for Columns/ColumnsReverse).
+                // But since the flex direction, which can be changed at runtime, we don't know which one will apply.
+                // And doing both leads to binding loops...
+                // We could detect the case of a constant flex direction (like in lower_layout_expression.rs) but
+                // that still wouldn't fix the case of runtime direction changes...
+                /*if *orientation == Orientation::Vertical
+                    && let Some(nr) = layout.geometry.rect.width_reference.as_ref()
+                {
+                    vis(&nr.clone().into(), P);
+                }
+                if *orientation == Orientation::Horizontal
+                    && let Some(nr) = layout.geometry.rect.height_reference.as_ref()
+                {
+                    vis(&nr.clone().into(), P);
+                }*/
+                // Visit item dependencies for relevant orientations
+                visit_layout_items_dependencies(layout.elems.iter(), Orientation::Horizontal, vis);
+                visit_layout_items_dependencies(layout.elems.iter(), Orientation::Vertical, vis);
+            }
+            let mut g = layout.geometry.clone();
             g.rect = Default::default(); // already visited;
             g.visit_named_references(&mut |nr| vis(&nr.clone().into(), P))
         }

@@ -6,7 +6,6 @@ use crate::{common, preview};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufRead as _, Write as _};
-use std::sync::{Arc, Mutex};
 
 pub fn resource_url_mapper() -> Option<i_slint_compiler::ResourceUrlMapper> {
     None
@@ -15,7 +14,6 @@ pub fn resource_url_mapper() -> Option<i_slint_compiler::ResourceUrlMapper> {
 struct ChildProcessLspToPreviewInner {
     communication_handle: std::thread::JoinHandle<std::result::Result<(), String>>,
     to_child: std::process::ChildStdin,
-    child: Arc<Mutex<std::process::Child>>,
 }
 
 pub struct ChildProcessLspToPreview {
@@ -47,13 +45,12 @@ impl ChildProcessLspToPreview {
         .stdout(std::process::Stdio::piped())
         .spawn()?;
 
+        tracing::debug!("Preview process spawned (PID {:?})", child.id());
+
         let from_child = child.stdout.take().expect("Child has no stdout");
         let to_child = child.stdin.take().expect("Child has no stdin");
 
         let channel = self.preview_to_lsp_channel.clone();
-
-        let child = Arc::new(Mutex::new(child));
-        let child_clone = child.clone();
 
         let preview_to_lsp_channel = self.preview_to_lsp_channel.clone();
 
@@ -65,7 +62,7 @@ impl ChildProcessLspToPreview {
                     channel.send(message).map_err(|e| e.to_string())?;
                 }
             }
-            let mut child = child_clone.lock().expect("This can be waited for...");
+
             let exit_status = child.wait().map_err(|e| e.to_string())?;
 
             if !exit_status.success() {
@@ -85,7 +82,7 @@ impl ChildProcessLspToPreview {
         });
 
         *self.inner.borrow_mut() =
-            Some(ChildProcessLspToPreviewInner { communication_handle, to_child, child });
+            Some(ChildProcessLspToPreviewInner { communication_handle, to_child });
 
         Ok(())
     }
@@ -93,12 +90,9 @@ impl ChildProcessLspToPreview {
 
 impl Drop for ChildProcessLspToPreview {
     fn drop(&mut self) {
-        if let Some(inner) = self.inner.borrow_mut().take() {
-            {
-                let mut child = inner.child.lock().expect("Can lock the child");
-                let _ = child.kill();
-            }
-
+        if let Some(mut inner) = self.inner.borrow_mut().take() {
+            let message = serde_json::to_string(&common::LspToPreviewMessage::Quit).unwrap();
+            let _ = writeln!(inner.to_child, "{message}");
             let _ = inner.communication_handle.join();
         }
     }
@@ -110,11 +104,15 @@ impl common::LspToPreview for ChildProcessLspToPreview {
             let mut inner = self.inner.borrow_mut();
             let inner = inner.as_mut().unwrap();
             let Ok(message) = serde_json::to_string(message) else {
+                tracing::debug!("Failed to serialize message to preview");
                 return;
             };
             let _ = writeln!(inner.to_child, "{message}");
         } else if let common::LspToPreviewMessage::ShowPreview(_) = message {
+            tracing::debug!("Starting preview process");
             self.start_preview().unwrap();
+        } else {
+            tracing::warn!("Preview not running, dropping message: {:?}", message);
         }
     }
 
@@ -172,7 +170,7 @@ impl SwitchableLspToPreview {
 
 impl common::LspToPreview for SwitchableLspToPreview {
     fn send(&self, message: &common::LspToPreviewMessage) {
-        let _ = self.lsp_to_previews.get(&self.current_target.borrow()).unwrap().send(message);
+        self.lsp_to_previews.get(&self.current_target.borrow()).unwrap().send(message);
     }
 
     fn preview_target(&self) -> common::PreviewTarget {
@@ -198,23 +196,34 @@ impl Default for RemoteControlledPreviewToLsp {
 }
 
 impl RemoteControlledPreviewToLsp {
-    /// Creates a RemoteConfrolledPreviewToLsp connector.
+    /// Creates a RemoteControlledPreviewToLsp connector.
     ///
     /// This means the applications lifetime is bound to the lifetime of the
     /// application's STDIN: We quit as soon as that gets fishy or closed.
     ///
     /// It also means we do not need to join the reader thread: The OS will clean
     /// that one up for us anyway.
+    ///
+    /// Note: If the Slint backend has not been set yet, this will set a backend with the
+    /// default Slint BackendSelector.
     pub fn new() -> Self {
         let _ = Self::process_input();
         Self {}
     }
 
     fn process_input() -> std::thread::JoinHandle<std::result::Result<(), String>> {
+        // Ensure the backend is set up before the reader thread starts. This fixes
+        // bug #10274 on macOS where a race condition was causing the reader thread to already
+        // process messages before the event loop was running.
+        //
+        // Use .ok() to ignore any errors, as the backend might already be set by the user and that's fine.
+        slint::BackendSelector::new().select().ok();
+
         std::thread::spawn(move || -> Result<(), String> {
             let reader = std::io::BufReader::new(std::io::stdin().lock());
             for line in reader.lines() {
                 let Ok(line) = line else {
+                    tracing::debug!("Preview: stdin closed, quitting");
                     let _ = slint::quit_event_loop();
                     return Ok(());
                 };
@@ -222,9 +231,14 @@ impl RemoteControlledPreviewToLsp {
                     slint::invoke_from_event_loop(move || {
                         preview::connector::lsp_to_preview(message);
                     })
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|err| {
+                        let err = err.to_string();
+                        tracing::error!("Failed to queue message onto event loop - reader thread will exit: {err}");
+                        err
+                    })?;
                 }
             }
+            tracing::debug!("Preview: stdin EOF, quitting");
             let _ = slint::quit_event_loop();
             Ok(())
         })
@@ -237,18 +251,4 @@ impl common::PreviewToLsp for RemoteControlledPreviewToLsp {
         println!("{message}");
         Ok(())
     }
-}
-
-// This function overrides the default app menu and makes the "Quit" item merely hide the UI,
-// as the life-cycle of this process is determined by the editor. The returned menuitem must
-// be kept alive for the duration of the event loop, as otherwise muda crashes.
-#[cfg(target_vendor = "apple")]
-pub fn init_apple_platform() -> Result<(), i_slint_core::api::PlatformError> {
-    let backend = i_slint_backend_winit::Backend::builder().with_default_menu_bar(false).build()?;
-
-    slint::platform::set_platform(Box::new(backend)).map_err(|set_platform_err| {
-        i_slint_core::api::PlatformError::from(set_platform_err.to_string())
-    })?;
-
-    Ok(())
 }

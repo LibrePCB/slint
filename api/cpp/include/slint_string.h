@@ -223,6 +223,8 @@ private:
     void *inner; // opaque
 };
 
+namespace private_api {
+
 /// Styled text that has been parsed and seperated into paragraphs
 struct StyledText
 {
@@ -257,9 +259,9 @@ public:
     }
 
 private:
-    void *inner;
+    // Ensure that the alignment (8 bytes) is the same as the Rust struct.
+    void *inner alignas(8);
 };
-namespace private_api {
 
 template<typename T>
 inline cbindgen_private::Slice<T> make_slice(const T *ptr, size_t len)
@@ -281,6 +283,11 @@ inline cbindgen_private::Slice<uint8_t> string_to_slice(std::string_view str)
 {
     return make_slice(reinterpret_cast<const uint8_t *>(str.data()), str.size());
 }
+
+inline std::string_view slice_to_string_view(cbindgen_private::Slice<uint8_t> str)
+{
+    return std::string_view(reinterpret_cast<const char *>(str.ptr), str.len);
 }
 
+}
 }

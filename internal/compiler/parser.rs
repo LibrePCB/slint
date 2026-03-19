@@ -333,7 +333,7 @@ declare_syntax! {
     {
         Document -> [ *Component, *ExportsList, *ImportSpecifier, *StructDeclaration, *EnumDeclaration ],
         /// `DeclaredIdentifier := Element { ... }`
-        Component -> [ DeclaredIdentifier, ?UsesSpecifier, Element ],
+        Component -> [ DeclaredIdentifier, ?UsesSpecifier, ?ImplementsSpecifier, Element ],
         /// `id := Element { ... }`
         SubElement -> [ Element ],
         Element -> [ ?QualifiedName, *PropertyDeclaration, *Binding, *CallbackConnection,
@@ -346,7 +346,7 @@ declare_syntax! {
         CallbackDeclaration -> [ DeclaredIdentifier, *CallbackDeclarationParameter, ?ReturnType, ?TwoWayBinding ],
         // `foo: type` or just `type`
         CallbackDeclarationParameter -> [ ?DeclaredIdentifier, Type],
-        Function -> [DeclaredIdentifier, *ArgumentDeclaration, ?ReturnType, CodeBlock ],
+        Function -> [DeclaredIdentifier, *ArgumentDeclaration, ?ReturnType, ?CodeBlock ],
         ArgumentDeclaration -> [DeclaredIdentifier, Type],
         /// `-> type`  (but without the ->)
         ReturnType -> [Type],
@@ -375,8 +375,8 @@ declare_syntax! {
         Expression-> [ ?Expression, ?FunctionCallExpression, ?IndexExpression, ?SelfAssignment,
                        ?ConditionalExpression, ?QualifiedName, ?BinaryExpression, ?Array, ?ObjectLiteral,
                        ?UnaryOpExpression, ?CodeBlock, ?StringTemplate, ?AtImageUrl, ?AtGradient, ?AtTr,
-                       ?MemberAccess ],
-        /// Concatenate the Expressions to make a string (usually expanded from a template string)
+                       ?MemberAccess, ?AtKeys ],
+        /// Concatenate the Expressions to make a string (usually expended from a template string)
         StringTemplate -> [*Expression],
         /// `@image-url("foo.png")`
         AtImageUrl -> [],
@@ -389,6 +389,8 @@ declare_syntax! {
         TrContext -> [],
         /// `| "foo" % n`  in a `AtTr` node
         TrPlural -> [Expression],
+        /// `@keys(...)`
+        AtKeys -> [],
         /// expression()
         FunctionCallExpression -> [*Expression],
         /// `expression[index]`
@@ -444,9 +446,9 @@ declare_syntax! {
         /// `[ type ]`
         ArrayType -> [ Type ],
         /// `struct Foo { ... }`
-        StructDeclaration -> [DeclaredIdentifier, ObjectType, ?AtRustAttr],
+        StructDeclaration -> [DeclaredIdentifier, ObjectType, *AtRustAttr],
         /// `enum Foo { bli, bla, blu }`
-        EnumDeclaration -> [DeclaredIdentifier, *EnumValue, ?AtRustAttr],
+        EnumDeclaration -> [DeclaredIdentifier, *EnumValue, *AtRustAttr],
         /// The value is a Identifier
         EnumValue -> [],
         /// `@rust-attr(...)`
@@ -455,6 +457,8 @@ declare_syntax! {
         UsesSpecifier -> [ *UsesIdentifier ],
         /// `Interface.Foo from bar`
         UsesIdentifier -> [QualifiedName, DeclaredIdentifier],
+        /// `implements Interface.Foo`
+        ImplementsSpecifier -> [ QualifiedName ],
     }
 }
 

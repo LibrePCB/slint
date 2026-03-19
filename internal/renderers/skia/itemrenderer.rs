@@ -41,6 +41,7 @@ pub struct SkiaItemRenderer<'a> {
     image_cache: &'a ItemCache<Option<skia_safe::Image>>,
     layer_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Image)>>,
     path_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Path)>>,
+    text_layout_cache: &'a sharedparley::TextLayoutCache,
     box_shadow_cache: &'a mut SkiaBoxShadowCache,
 }
 
@@ -52,6 +53,7 @@ impl<'a> SkiaItemRenderer<'a> {
         image_cache: &'a ItemCache<Option<skia_safe::Image>>,
         layer_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Image)>>,
         path_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Path)>>,
+        text_layout_cache: &'a sharedparley::TextLayoutCache,
         box_shadow_cache: &'a mut SkiaBoxShadowCache,
     ) -> Self {
         Self {
@@ -64,6 +66,7 @@ impl<'a> SkiaItemRenderer<'a> {
             image_cache,
             layer_cache,
             path_cache,
+            text_layout_cache,
             box_shadow_cache,
         }
     }
@@ -239,7 +242,9 @@ impl<'a> SkiaItemRenderer<'a> {
             // source size.
             return;
         }
-        let fits = if let &i_slint_core::ImageInner::NineSlice(ref nine) = (&source).into() {
+        let fits = if let i_slint_core::ImageInner::NineSlice(nine) =
+            <&i_slint_core::ImageInner>::from(&source)
+        {
             i_slint_core::graphics::fit9slice(
                 source_size.cast(),
                 nine.1,
@@ -260,6 +265,7 @@ impl<'a> SkiaItemRenderer<'a> {
             )]
         };
 
+        let _saved_canvas = self.pixel_align_origin_auto_restore();
         for fit in fits {
             self.canvas.save();
 
@@ -294,7 +300,7 @@ impl<'a> SkiaItemRenderer<'a> {
                             .recording_context()
                             .as_mut()
                             .map(|c| c.as_recorder() as &mut dyn skia_safe::Recorder),
-                        &src,
+                        src,
                         skia_safe::image::RequiredProperties::default(),
                     )
                     .and_then(|i| {
@@ -323,19 +329,20 @@ impl<'a> SkiaItemRenderer<'a> {
     }
 
     fn render_and_blend_layer(&mut self, item_rc: &ItemRc) -> RenderingResult {
+        let window_adapter = self.window().window_adapter();
         let current_clip = self.get_current_clip();
         if let Some((layer_offset, layer_image)) = self.render_layer(item_rc, &|| {
             // We don't need to include the size of the "layer" item itself, since it has no content.
+            // But intersect with the union of the clip with the geometry to make sure we don't
+            // render insanely large surface.
             i_slint_core::properties::evaluate_no_tracking(|| {
-                i_slint_core::item_rendering::item_children_bounding_rect(
-                    item_rc.item_tree(),
-                    item_rc.index() as isize,
-                    &current_clip,
-                )
+                i_slint_core::item_rendering::item_children_bounding_rect(item_rc, &window_adapter)
+                    .intersection(&current_clip.union(&item_rc.geometry()))
+                    .unwrap_or_default()
             })
         }) {
             self.canvas.translate(skia_safe::Vector::from((layer_offset.x, layer_offset.y)));
-            let _saved_canvas = self.pixel_align_origin();
+            let _saved_canvas = self.pixel_align_origin_auto_restore();
             self.canvas.draw_image_with_sampling_options(
                 layer_image,
                 skia_safe::Point::default(),
@@ -373,6 +380,7 @@ impl<'a> SkiaItemRenderer<'a> {
                 self.image_cache,
                 self.layer_cache,
                 self.path_cache,
+                self.text_layout_cache,
                 self.box_shadow_cache,
             );
             sub_renderer.translate(-bounding_rect.origin.to_vector());
@@ -388,11 +396,34 @@ impl<'a> SkiaItemRenderer<'a> {
         })
     }
 
-    fn pixel_align_origin(&self) -> Option<skia_safe::canvas::AutoRestoredCanvas<'_>> {
+    // Same as pixel_align_origin_auto_restore() but can be used across function calls where
+    // `&self` is needed. Returns true if the caller must call `restore()` on `self.canvas`.
+    fn save_canvas_and_pixel_align_origin(&self) -> bool {
         let local_to_device = self.canvas.local_to_device_as_3x3();
+        if !local_to_device.is_translate() || local_to_device.is_identity() {
+            return false;
+        }
         let Some(device_to_local) = local_to_device.invert() else {
-            return None;
+            return false;
         };
+        let mut target_point = local_to_device.map_point(skia_safe::Point::default());
+
+        target_point.x = target_point.x.round();
+        target_point.y = target_point.y.round();
+
+        self.canvas.save();
+
+        self.canvas.translate(device_to_local.map_point(target_point));
+
+        true
+    }
+
+    fn pixel_align_origin_auto_restore(&self) -> Option<skia_safe::canvas::AutoRestoredCanvas<'_>> {
+        let local_to_device = self.canvas.local_to_device_as_3x3();
+        if !local_to_device.is_translate() || local_to_device.is_identity() {
+            return None;
+        }
+        let device_to_local = local_to_device.invert()?;
         let mut target_point = local_to_device.map_point(skia_safe::Point::default());
 
         target_point.x = target_point.x.round();
@@ -466,7 +497,7 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
 
             let rounded_rect = to_skia_rrect(&geometry, &stroke_border_radius);
 
-            (rounded_rect.clone(), rounded_rect)
+            (rounded_rect, rounded_rect)
         } else {
             let background_rect = to_skia_rrect(&geometry, &fill_radius);
 
@@ -493,17 +524,16 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
             self.canvas.draw_rrect(background_rect, &fill_paint);
         }
 
-        if border_width.get() > 0.0 {
-            if let Some(mut border_paint) =
+        if border_width.get() > 0.0
+            && let Some(mut border_paint) =
                 self.brush_to_paint(border_color, geometry.width_length(), geometry.height_length())
-            {
-                border_paint.set_style(skia_safe::PaintStyle::Stroke);
-                border_paint.set_stroke_width(border_width.get());
-                if !border_rect.is_rect() {
-                    border_paint.set_anti_alias(true);
-                }
-                self.canvas.draw_rrect(border_rect, &border_paint);
+        {
+            border_paint.set_style(skia_safe::PaintStyle::Stroke);
+            border_paint.set_stroke_width(border_width.get());
+            if !border_rect.is_rect() {
+                border_paint.set_anti_alias(true);
             }
+            self.canvas.draw_rrect(border_rect, &border_paint);
         }
     }
 
@@ -538,7 +568,11 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         size: LogicalSize,
         _cache: &CachedRenderingData,
     ) {
-        sharedparley::draw_text(self, text, Some(self_rc), size);
+        let restore = self.save_canvas_and_pixel_align_origin();
+        sharedparley::draw_text(self, text, Some(self_rc), size, Some(self.text_layout_cache));
+        if restore {
+            self.canvas.restore();
+        }
     }
 
     fn draw_text_input(
@@ -547,7 +581,11 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         self_rc: &i_slint_core::items::ItemRc,
         size: LogicalSize,
     ) {
+        let restore = self.save_canvas_and_pixel_align_origin();
         sharedparley::draw_text_input(self, text_input, self_rc, size, None);
+        if restore {
+            self.canvas.restore();
+        }
     }
 
     fn draw_path(
@@ -824,7 +862,7 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
             Some(img) => img,
             None => return,
         };
-        let _saved_canvas = self.pixel_align_origin();
+        let _saved_canvas = self.pixel_align_origin_auto_restore();
         self.canvas.draw_image(skia_image, skia_safe::Point::default(), None);
     }
 
@@ -834,6 +872,7 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
             std::pin::pin!((SharedString::from(string), Brush::from(color))),
             None,
             logical_size_from_api(self.window.size().to_logical(self.scale_factor())),
+            None,
         );
     }
 
@@ -935,7 +974,7 @@ impl GlyphRenderer for SkiaItemRenderer<'_> {
             None
         } else {
             let mut paint = self.default_paint().unwrap_or_default();
-            paint.set_shader(skia_safe::shaders::color(to_skia_color(&color)));
+            paint.set_shader(skia_safe::shaders::color(to_skia_color(color)));
             Some(paint)
         }
     }
@@ -977,7 +1016,8 @@ impl GlyphRenderer for SkiaItemRenderer<'_> {
         else {
             return;
         };
-        let font = skia_safe::Font::from_typeface(type_face, font_size.get());
+        let mut font = skia_safe::Font::from_typeface(type_face, font_size.get());
+        font.set_subpixel(true);
 
         let (glyph_ids, glyph_positions): (Vec<_>, Vec<_>) = glyphs_it
             .into_iter()

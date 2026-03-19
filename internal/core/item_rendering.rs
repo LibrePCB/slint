@@ -12,11 +12,10 @@ use crate::lengths::{
     LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, LogicalVector,
 };
 pub use crate::partial_renderer::CachedRenderingData;
-use crate::window::WindowAdapter;
+use crate::window::WindowAdapterRc;
 use crate::{Brush, SharedString};
 #[cfg(feature = "std")]
 use alloc::boxed::Box;
-use alloc::rc::Rc;
 #[cfg(feature = "std")]
 use core::cell::RefCell;
 use core::pin::Pin;
@@ -86,7 +85,10 @@ impl<T: Clone> ItemCache<T> {
             }
         }
     }
+}
 
+#[cfg(feature = "std")]
+impl<T> ItemCache<T> {
     /// Returns the cached value associated with the `item_rc` if it is in the cache
     /// and still valid.
     pub fn with_entry<U>(
@@ -138,6 +140,51 @@ impl<T: Clone> ItemCache<T> {
     pub fn is_empty(&self) -> bool {
         self.map.borrow().is_empty()
     }
+
+    /// Returns a [`RefMut`](std::cell::RefMut) referencing the cached value associated with
+    /// `item_rc`, updating the cache entry first if necessary using `update_fn`.
+    ///
+    /// Unlike [`get_or_update_cache_entry`](Self::get_or_update_cache_entry), this method does
+    /// not require `T: Clone` and returns a mutable reference into the cache, which permits
+    /// in-place modification or temporary extraction of the cached value (e.g., via
+    /// [`std::mem::take`]).
+    pub fn get_or_update_cache_entry_ref(
+        &self,
+        item_rc: &ItemRc,
+        update_fn: impl FnOnce() -> T,
+    ) -> std::cell::RefMut<'_, T> {
+        let component = &(**item_rc.item_tree()) as *const _;
+        let index = item_rc.index();
+
+        {
+            let mut borrowed = self.map.borrow_mut();
+            match borrowed.entry(component).or_default().entry(index) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let mut tracker = entry.get_mut().dependency_tracker.take();
+                    drop(borrowed);
+                    let maybe_new_data = tracker
+                        .get_or_insert_with(|| Box::pin(Default::default()))
+                        .as_ref()
+                        .evaluate_if_dirty(update_fn);
+                    let mut borrowed = self.map.borrow_mut();
+                    let e = borrowed.get_mut(&component).unwrap().get_mut(&index).unwrap();
+                    e.dependency_tracker = tracker;
+                    if let Some(new_data) = maybe_new_data {
+                        e.data = new_data;
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(_) => {
+                    drop(borrowed);
+                    let new_entry = crate::graphics::CachedGraphicsData::new(update_fn);
+                    self.map.borrow_mut().get_mut(&component).unwrap().insert(index, new_entry);
+                }
+            }
+        }
+
+        std::cell::RefMut::map(self.map.borrow_mut(), |map| {
+            &mut map.get_mut(&component).unwrap().get_mut(&index).unwrap().data
+        })
+    }
 }
 
 /// Renders the children of the item with the specified index into the renderer.
@@ -145,7 +192,7 @@ pub fn render_item_children(
     renderer: &mut dyn ItemRenderer,
     component: &ItemTreeRc,
     index: isize,
-    window_adapter: &Rc<dyn WindowAdapter>,
+    window_adapter: &WindowAdapterRc,
 ) {
     let mut actual_visitor =
         |component: &ItemTreeRc, index: u32, item: Pin<ItemRef>| -> VisitChildrenResult {
@@ -197,7 +244,7 @@ pub fn render_component_items(
     component: &ItemTreeRc,
     renderer: &mut dyn ItemRenderer,
     origin: LogicalPoint,
-    window_adapter: &Rc<dyn WindowAdapter>,
+    window_adapter: &WindowAdapterRc,
 ) {
     renderer.save_state();
     renderer.translate(origin.to_vector());
@@ -210,51 +257,57 @@ pub fn render_component_items(
 /// Compute the bounding rect of all children. This does /not/ include item's own bounding rect. Remember to run this
 /// via `evaluate_no_tracking`.
 pub fn item_children_bounding_rect(
-    component: &ItemTreeRc,
-    index: isize,
-    clip_rect: &LogicalRect,
+    item_rc: &ItemRc,
+    window_adapter: &WindowAdapterRc,
 ) -> LogicalRect {
-    item_children_bounding_rect_inner(component, index, clip_rect, Default::default())
+    item_children_bounding_rect_inner(item_rc, window_adapter, Default::default())
 }
 
 fn item_children_bounding_rect_inner(
-    component: &ItemTreeRc,
-    index: isize,
-    clip_rect: &LogicalRect,
+    item_rc: &ItemRc,
+    window_adapter: &WindowAdapterRc,
     transform: crate::lengths::ItemTransform,
 ) -> LogicalRect {
     let mut bounding_rect = LogicalRect::zero();
 
     let mut actual_visitor =
         |component: &ItemTreeRc, index: u32, item: Pin<ItemRef>| -> VisitChildrenResult {
-            let item_geometry = transform.outer_transformed_rect(
-                &ItemTreeRc::borrow_pin(component).as_ref().item_geometry(index).cast(),
-            );
-            let children_transform = ItemRc::new(component.clone(), index)
+            let item_rc = ItemRc::new(component.clone(), index);
+            let geom = ItemTreeRc::borrow_pin(component).as_ref().item_geometry(index);
+            let bounding = item_rc.bounding_rect(&geom, window_adapter);
+            let bounding = transform.outer_transformed_rect(&bounding.cast());
+            let children_transform = item_rc
                 .children_transform()
                 .unwrap_or_default()
-                .then_translate(item_geometry.origin.to_vector());
+                .then_translate(bounding.origin.to_vector());
 
-            let offset: LogicalPoint = item_geometry.origin.cast();
-            let local_clip_rect = clip_rect.translate(-offset.to_vector());
+            bounding_rect = bounding_rect.union(&bounding.cast());
 
-            if let Some(clipped_item_geometry) = item_geometry.intersection(&clip_rect.cast()) {
-                bounding_rect = bounding_rect.union(&clipped_item_geometry.cast());
-            }
-
-            if !item.as_ref().clips_children() {
+            if item.as_ref().clips_children() {
+                let clip = transform.outer_transformed_rect(&geom.cast()).cast();
+                if !bounding_rect.contains_rect(&clip) {
+                    bounding_rect = bounding_rect.union(
+                        &item_children_bounding_rect_inner(
+                            &item_rc,
+                            window_adapter,
+                            transform.then(&children_transform),
+                        )
+                        .intersection(&clip)
+                        .unwrap_or_default(),
+                    );
+                }
+            } else {
                 bounding_rect = bounding_rect.union(&item_children_bounding_rect_inner(
-                    component,
-                    index as isize,
-                    &local_clip_rect,
+                    &item_rc,
+                    window_adapter,
                     transform.then(&children_transform),
                 ));
             }
             VisitChildrenResult::CONTINUE
         };
     vtable::new_vref!(let mut actual_visitor : VRefMut<ItemVisitorVTable> for ItemVisitor = &mut actual_visitor);
-    VRc::borrow_pin(component).as_ref().visit_children_item(
-        index,
+    VRc::borrow_pin(item_rc.item_tree()).as_ref().visit_children_item(
+        item_rc.index() as isize,
         crate::item_tree::TraversalOrder::BackToFront,
         actual_visitor,
     );
@@ -299,7 +352,7 @@ pub trait HasFont {
 #[allow(missing_docs)]
 pub enum PlainOrStyledText {
     Plain(SharedString),
-    Styled(crate::api::StyledText),
+    Styled(crate::styled_text::StyledText),
 }
 
 /// Trait for an item that represents an string towards the renderer
@@ -423,7 +476,7 @@ pub trait ItemRenderer {
         _self_rc: &ItemRc,
         _size: LogicalSize,
     );
-    #[cfg(feature = "std")]
+    #[cfg(feature = "path")]
     fn draw_path(&mut self, path: Pin<&Path>, _self_rc: &ItemRc, _size: LogicalSize);
     fn draw_box_shadow(
         &mut self,
@@ -527,7 +580,7 @@ pub trait ItemRenderer {
     fn filter_item(
         &mut self,
         item: &ItemRc,
-        window_adapter: &Rc<dyn WindowAdapter>,
+        window_adapter: &WindowAdapterRc,
     ) -> (bool, LogicalRect) {
         let item_geometry = item.geometry();
         // Query bounding rect untracked, as properties that affect the bounding rect are already tracked

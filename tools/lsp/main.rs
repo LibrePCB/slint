@@ -43,6 +43,7 @@ use std::task::{Poll, Waker};
 use crate::common::document_cache::CompilerConfiguration;
 
 #[cfg(not(any(
+    target_os = "openbsd",
     target_os = "windows",
     target_arch = "wasm32",
     all(target_arch = "aarch64", target_os = "linux")
@@ -50,6 +51,7 @@ use crate::common::document_cache::CompilerConfiguration;
 use tikv_jemallocator::Jemalloc;
 
 #[cfg(not(any(
+    target_os = "openbsd",
     target_os = "windows",
     target_arch = "wasm32",
     all(target_arch = "aarch64", target_os = "linux")
@@ -213,6 +215,12 @@ impl RequestHandler {
 }
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let args: Cli = Cli::parse();
     if !args.backend.is_empty() {
         // Safety: there are no other threads at this point
@@ -340,10 +348,11 @@ fn main_loop(connection: Connection, init_param: InitializeParams, cli_args: Cli
             .iter()
             .filter_map(|entry| entry.split('=').collect_tuple().map(|(k, v)| (k.into(), v.into())))
             .collect(),
-        open_import_fallback: Some(Rc::new(move |path| {
+        open_import_callback: Some(Rc::new(move |path| {
             let to_preview = to_preview_clone.clone();
             // let server_notifier = server_notifier_.clone();
             Box::pin(async move {
+                tracing::trace!("Importing file: {}", path);
                 let contents = std::fs::read_to_string(&path);
                 if let Ok(url) = Url::from_file_path(&path) {
                     if let Ok(contents) = &contents {
@@ -370,6 +379,8 @@ fn main_loop(connection: Connection, init_param: InitializeParams, cli_args: Cli
             common::ByteFormat::Utf16
         },
         resource_url_mapper: None,
+        // The i_slint_compiler::CompilerConfiguration::default() will read the environment variable
+        enable_experimental: false,
     };
 
     let ctx = Rc::new(Context {
@@ -381,6 +392,7 @@ fn main_loop(connection: Connection, init_param: InitializeParams, cli_args: Cli
         to_show: Default::default(),
         open_urls: Default::default(),
         to_preview,
+        pending_recompile: Default::default(),
     });
 
     let mut futures = Vec::<Pin<Box<dyn Future<Output = Result<()>>>>>::new();
@@ -402,6 +414,11 @@ fn main_loop(connection: Connection, init_param: InitializeParams, cli_args: Cli
     };
 
     loop {
+        let recompile_timeout = if ctx.pending_recompile.borrow().is_empty() {
+            crossbeam_channel::never()
+        } else {
+            crossbeam_channel::after(std::time::Duration::from_millis(50))
+        };
         crossbeam_channel::select! {
             recv(connection.receiver) -> msg => {
                 match msg? {
@@ -436,6 +453,13 @@ fn main_loop(connection: Connection, init_param: InitializeParams, cli_args: Cli
                 #[cfg(feature = "preview-engine")]
                 futures.push(Box::pin(handle_preview_to_lsp_message(_msg?, &ctx)))
              },
+             recv(recompile_timeout) -> _ => {
+                 let pending_recompile = std::mem::take(&mut *ctx.pending_recompile.borrow_mut());
+
+                 for url in pending_recompile {
+                     futures.push(Box::pin(language::reload_document(&ctx, url)));
+                 }
+             }
         };
 
         let mut result = Ok(());
@@ -474,7 +498,12 @@ async fn handle_notification(req: lsp_server::Notification, ctx: &Rc<Context>) -
         }
         DidChangeTextDocument::METHOD => {
             let mut params: DidChangeTextDocumentParams = serde_json::from_value(req.params)?;
-            reload_document(
+            tracing::debug!(
+                "Document changed: {} (version: {})",
+                params.text_document.uri,
+                params.text_document.version
+            );
+            load_document(
                 ctx,
                 params.content_changes.pop().unwrap().text,
                 params.text_document.uri,
@@ -487,6 +516,7 @@ async fn handle_notification(req: lsp_server::Notification, ctx: &Rc<Context>) -
         DidChangeWatchedFiles::METHOD => {
             let params: DidChangeWatchedFilesParams = serde_json::from_value(req.params)?;
             for fe in params.changes {
+                tracing::debug!("Watched file changed: {} (type: {:?})", fe.uri, fe.typ);
                 trigger_file_watcher(ctx, fe.uri, fe.typ).await?;
             }
             Ok(())
@@ -552,6 +582,12 @@ async fn handle_preview_to_lsp_message(
     use crate::common::PreviewToLspMessage as M;
     match message {
         M::Diagnostics { uri, version, diagnostics } => {
+            if diagnostics.is_empty() {
+                // This is very common, so we log it at trace level
+                tracing::trace!("Preview: Empty diagnostics {}", uri);
+            } else {
+                tracing::debug!("Preview: {} diagnostics for {}", diagnostics.len(), uri);
+            }
             crate::common::lsp_to_editor::notify_lsp_diagnostics(
                 &ctx.server_notifier,
                 uri,
@@ -569,6 +605,7 @@ async fn handle_preview_to_lsp_message(
             .await;
         }
         M::PreviewTypeChanged { is_external } => {
+            tracing::debug!("Preview type changed: is_external={}", is_external);
             if is_external {
                 ctx.to_preview.set_preview_target(common::PreviewTarget::EmbeddedWasm)?;
             } else {
@@ -576,7 +613,8 @@ async fn handle_preview_to_lsp_message(
             }
         }
         M::RequestState { .. } => {
-            crate::language::request_state(ctx);
+            tracing::debug!("Preview requested state");
+            crate::language::send_state_to_preview(ctx);
         }
         M::SendWorkspaceEdit { label, edit } => {
             let _ = send_workspace_edit(ctx.server_notifier.clone(), label, Ok(edit)).await;

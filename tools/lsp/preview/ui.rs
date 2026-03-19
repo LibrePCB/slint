@@ -33,11 +33,7 @@ pub type PropertyDeclarations = HashMap<SmolStr, PropertyDeclaration>;
 pub fn create_ui(
     to_lsp: &Rc<dyn common::PreviewToLsp>,
     style: &str,
-    experimental: bool,
 ) -> Result<PreviewUi, PlatformError> {
-    #[cfg(all(target_vendor = "apple", not(target_arch = "wasm32")))]
-    crate::preview::connector::native::init_apple_platform()?;
-
     let ui = PreviewUi::new()?;
 
     // styles:
@@ -68,7 +64,6 @@ pub fn create_ui(
     let api = ui.global::<Api>();
 
     api.set_current_style(style.clone().into());
-    api.set_experimental(experimental);
     api.set_known_styles(style_model.into());
 
     api.on_add_new_component(super::add_new_component);
@@ -193,6 +188,7 @@ pub fn set_diagnostics(ui: &PreviewUi, diagnostics: &[slint_interpreter::Diagnos
             let level = match d.level() {
                 DiagnosticLevel::Error => LogMessageLevel::Error,
                 DiagnosticLevel::Warning => LogMessageLevel::Warning,
+                DiagnosticLevel::Note => LogMessageLevel::Note,
                 _ => LogMessageLevel::Debug,
             };
 
@@ -203,6 +199,9 @@ pub fn set_diagnostics(ui: &PreviewUi, diagnostics: &[slint_interpreter::Diagnos
                 (_, DiagnosticLevel::Error) => DiagnosticSummary::Errors,
                 (DiagnosticSummary::Errors, DiagnosticLevel::Warning) => DiagnosticSummary::Errors,
                 (_, DiagnosticLevel::Warning) => DiagnosticSummary::Warnings,
+                // Ignore Note level diagnostics for the summary.
+                // If there is only a note, that's not relevant enough to bother the user.
+                (acc, DiagnosticLevel::Note) => acc,
                 // DiagnosticLevel is non-exhaustive:
                 (acc, _) => acc,
             }
@@ -342,7 +341,7 @@ pub fn ui_set_known_components(
 
     api.set_known_components(result.clone().into());
     api.on_library_search(move |term| {
-        result.set_search_text(term.into());
+        result.set_search_text(term);
     });
 }
 
@@ -1354,7 +1353,7 @@ fn update_properties(
     for (c, n) in std::iter::zip(current_model.iter(), next_model.iter()) {
         debug_assert_eq!(c.group_name, n.group_name);
 
-        fn extract_inner_model<'a>(m: &'a PropertyGroup) -> &'a VecModel<PropertyInformation> {
+        fn extract_inner_model(m: &PropertyGroup) -> &VecModel<PropertyInformation> {
             m.properties
                 .as_any()
                 .downcast_ref::<search_model::SearchModel<PropertyInformation>>()

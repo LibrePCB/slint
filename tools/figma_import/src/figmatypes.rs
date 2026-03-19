@@ -141,11 +141,12 @@ pub struct LayoutGrid {
     pub count: f32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
 pub struct Effect {
     pub r#type: String,
     pub visible: bool,
-    pub radius: f32,
+    pub radius: Option<f32>,
     pub color: Option<Color>,
     pub blendMode: Option<BlendMode>,
     pub offset: Option<Vector>,
@@ -278,6 +279,7 @@ pub struct VectorNode {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
+#[allow(clippy::large_enum_variant)]
 pub enum Node {
     DOCUMENT(NodeCommon),
     CANVAS {
