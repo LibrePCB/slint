@@ -10,7 +10,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-06-10 03:42+0000\n"
+"POT-Creation-Date: 2024-11-18 03:16+0000\n"
 "PO-Revision-Date: 2023-06-06 13:52+0000\n"
 "Last-Translator: Olivier Goffart <olivier.goffart@slint-ui.com>, 2023\n"
 "Language-Team: German (https://app.transifex.com/slint/teams/170022/de/)\n"
@@ -20,45 +20,77 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
-#: ui/pages/text_edit_page.slint:10
-msgctxt "TextEditPage"
+#: gallery.slint:14 gallery.slint:19
+#, fuzzy
+msgctxt "App"
+msgid "Slint Widgets Gallery"
+msgstr "Slint Widgets Galerie"
+
+#: gallery.slint:20
+msgctxt "Menu"
+msgid "Controls"
+msgstr ""
+
+#: gallery.slint:20
+msgctxt "Menu"
+msgid "ListView"
+msgstr ""
+
+#: gallery.slint:20
+msgctxt "Menu"
+msgid "TableView"
+msgstr ""
+
+#: gallery.slint:20
+msgctxt "Menu"
 msgid "TextEdit"
 msgstr ""
 
-#: ui/pages/text_edit_page.slint:11
-msgctxt "TextEditPage"
+#: gallery.slint:20
+msgctxt "Menu"
+msgid "Easings"
+msgstr ""
+
+#: gallery.slint:20
+msgctxt "Menu"
+msgid "About"
+msgstr ""
+
+#: ui/pages/table_view_page.slint:23
+msgctxt "TableViewPage"
+msgid "TableView"
+msgstr ""
+
+#: ui/pages/table_view_page.slint:25
+msgctxt "TableViewPage"
 msgid ""
-"Similar to LineEdit, but can be used to enter several lines of text. The "
-"widget can be imported from \"std-widgets.slint\"."
+"StandardTableView can be used to display a list of text elements in columns "
+"and rows. It can be imported from \"std-widgets.slint\""
 msgstr ""
 
-#: ui/pages/text_edit_page.slint:15
-msgctxt "TextEditPage"
-msgid "Word-Wrap"
+#: ui/pages/table_view_page.slint:31
+msgctxt "TableViewPage"
+msgid "StandardTableView"
 msgstr ""
 
-#. min-width: 200px;
-#: ui/pages/text_edit_page.slint:19
-msgctxt "TextEditPage"
-msgid ""
-"This is our TextEdit widget, which allows for editing text that spans over "
-"multiple paragraphs.\n"
-"For example this line starts in a new paragraph.\n"
-"\n"
-"When the amount of lines - due to wrapping and number of paragraphs - "
-"exceeds the available vertical height, a vertical scrollbar is shown that "
-"allows scrolling.\n"
-"You may want to enter a bit of text here then in order to make them visible."
+#: ui/pages/table_view_page.slint:44
+msgctxt "TableViewPage"
+msgid "Header 1"
 msgstr ""
 
-#: ui/pages/text_edit_page.slint:20
-msgctxt "TextEditPage"
-msgid "Add some text"
+#: ui/pages/table_view_page.slint:45
+msgctxt "TableViewPage"
+msgid "Header 2"
 msgstr ""
 
-#: ui/pages/text_edit_page.slint:28
-msgctxt "TextEditPage"
-msgid "No-Wrap"
+#: ui/pages/table_view_page.slint:46
+msgctxt "TableViewPage"
+msgid "Header 3"
+msgstr ""
+
+#: ui/pages/table_view_page.slint:47
+msgctxt "TableViewPage"
+msgid "Header 4"
 msgstr ""
 
 #: ui/pages/easings_page.slint:55
@@ -79,6 +111,29 @@ msgstr ""
 #: ui/pages/easings_page.slint:102
 msgctxt "EasingsPage"
 msgid "Duration:"
+msgstr ""
+
+#: ui/pages/page.slint:24
+#, fuzzy
+msgctxt "Page"
+msgid "Widgets enabled"
+msgstr "Slint Widgets Galerie"
+
+#: ui/pages/page.slint:31
+msgctxt "Page"
+msgid "Dark Mode"
+msgstr ""
+
+#: ui/pages/about_page.slint:9
+msgctxt "AboutPage"
+msgid "About"
+msgstr ""
+
+#: ui/pages/about_page.slint:11
+msgctxt "AboutPage"
+msgid ""
+"Are you curious now? Check out the docs and getting starteds from the Github "
+"repository and the website https://slint.dev and try it yourself."
 msgstr ""
 
 #: ui/pages/list_view_page.slint:9 ui/pages/list_view_page.slint:55
@@ -182,29 +237,12 @@ msgctxt "ListViewPage"
 msgid "consetetur"
 msgstr ""
 
-#: ui/pages/page.slint:28
-#, fuzzy
-msgctxt "Page"
-msgid "Widgets enabled"
-msgstr "Slint Widgets Galerie"
-
-#: ui/pages/page.slint:35
-#, fuzzy
-msgctxt "Page"
-msgid "Widgets read-only"
-msgstr "Slint Widgets Galerie"
-
-#: ui/pages/page.slint:42
-msgctxt "Page"
-msgid "Dark Mode"
-msgstr ""
-
 #: ui/pages/controls_page.slint:10
 msgctxt "ControlsPage"
 msgid "Controls"
 msgstr ""
 
-#: ui/pages/controls_page.slint:12
+#: ui/pages/controls_page.slint:11
 #, fuzzy
 msgctxt "ControlsPage"
 msgid ""
@@ -218,293 +256,189 @@ msgstr ""
 "fluent-(dark/light) und material-(dark/light) verfügbar. Die Widgets können "
 "aus \"std-widgets.slint\" importiert werden."
 
-#: ui/pages/controls_page.slint:16
+#: ui/pages/controls_page.slint:15
 msgctxt "ControlsPage"
 msgid "Buttons"
 msgstr ""
 
-#: ui/pages/controls_page.slint:25
+#: ui/pages/controls_page.slint:24
 msgctxt "ControlsPage"
 msgid "Regular Button"
 msgstr ""
 
-#: ui/pages/controls_page.slint:30
+#: ui/pages/controls_page.slint:29
 msgctxt "ControlsPage"
 msgid "Primary Button with Icon"
 msgstr ""
 
-#: ui/pages/controls_page.slint:44
+#: ui/pages/controls_page.slint:43
 msgctxt "ControlsPage"
 msgid "ON"
 msgstr ""
 
-#: ui/pages/controls_page.slint:44
+#: ui/pages/controls_page.slint:43
 msgctxt "ControlsPage"
 msgid "OFF"
 msgstr ""
 
-#: ui/pages/controls_page.slint:53
+#: ui/pages/controls_page.slint:52
 msgctxt "ControlsPage"
 msgid "Primary Button with colorized icon"
 msgstr ""
 
-#: ui/pages/controls_page.slint:64
+#: ui/pages/controls_page.slint:63
 msgctxt "ControlsPage"
 msgid "CheckBox - ComboBox - Switch"
 msgstr ""
 
-#: ui/pages/controls_page.slint:72
+#: ui/pages/controls_page.slint:71
 msgctxt "ControlsPage"
 msgid "(checked)"
 msgstr ""
 
-#: ui/pages/controls_page.slint:72
+#: ui/pages/controls_page.slint:71
 msgctxt "ControlsPage"
 msgid "(unchecked)"
 msgstr ""
 
-#: ui/pages/controls_page.slint:78
+#: ui/pages/controls_page.slint:77
 msgctxt "ControlsPage"
 msgid "Select Something"
 msgstr ""
 
-#: ui/pages/controls_page.slint:78
+#: ui/pages/controls_page.slint:77
 msgctxt "ControlsPage"
 msgid "From this"
 msgstr ""
 
-#: ui/pages/controls_page.slint:78
+#: ui/pages/controls_page.slint:77
 msgctxt "ControlsPage"
 msgid "Combobox"
 msgstr ""
 
-#: ui/pages/controls_page.slint:83
+#: ui/pages/controls_page.slint:82
 #, fuzzy
 msgctxt "ControlsPage"
 msgid "Flight Mode"
 msgstr "Flugmodus"
 
-#: ui/pages/controls_page.slint:91
+#: ui/pages/controls_page.slint:90
 msgctxt "ControlsPage"
 msgid "LineEdit - SpinBox - TimePickerPopup - DatePickerPopup"
 msgstr ""
 
-#: ui/pages/controls_page.slint:99
+#: ui/pages/controls_page.slint:98
 msgctxt "ControlsPage"
 msgid "Enter some text"
 msgstr ""
 
-#: ui/pages/controls_page.slint:111
+#: ui/pages/controls_page.slint:109
 msgctxt "ControlsPage"
 msgid "Open TimePickerPopup"
 msgstr ""
 
-#: ui/pages/controls_page.slint:119
+#: ui/pages/controls_page.slint:117
 msgctxt "ControlsPage"
 msgid "Open DatePickerPopup"
 msgstr ""
 
-#: ui/pages/controls_page.slint:129
+#: ui/pages/controls_page.slint:126
 msgctxt "ControlsPage"
 msgid "Slider"
 msgstr ""
 
-#: ui/pages/controls_page.slint:142
+#: ui/pages/controls_page.slint:139
 msgctxt "ControlsPage"
 msgid "ProgressIndicator | Spinner"
 msgstr ""
 
-#: ui/pages/controls_page.slint:170
+#: ui/pages/controls_page.slint:167
 msgctxt "ControlsPage"
 msgid "indeterminate"
 msgstr ""
 
-#: ui/pages/controls_page.slint:178
+#: ui/pages/controls_page.slint:174
 msgctxt "ControlsPage"
 msgid "TabWidget"
 msgstr ""
 
-#: ui/pages/controls_page.slint:182
+#: ui/pages/controls_page.slint:178
 msgctxt "ControlsPage"
 msgid "Tab 1"
 msgstr ""
 
-#: ui/pages/controls_page.slint:188
+#: ui/pages/controls_page.slint:184
 msgctxt "ControlsPage"
 msgid "Content of tab 1"
 msgstr ""
 
-#: ui/pages/controls_page.slint:194
+#: ui/pages/controls_page.slint:190
 msgctxt "ControlsPage"
 msgid "Click me"
 msgstr ""
 
-#: ui/pages/controls_page.slint:203
+#: ui/pages/controls_page.slint:199
 msgctxt "ControlsPage"
 msgid "Tab 2"
 msgstr ""
 
-#: ui/pages/controls_page.slint:209
+#: ui/pages/controls_page.slint:205
 msgctxt "ControlsPage"
 msgid "Content of tab 2"
 msgstr ""
 
-#: ui/pages/controls_page.slint:215
+#: ui/pages/controls_page.slint:211
 msgctxt "ControlsPage"
 msgid "Check me"
 msgstr ""
 
-#: ui/pages/controls_page.slint:224
+#: ui/pages/controls_page.slint:220
 msgctxt "ControlsPage"
 msgid "Tab 3"
 msgstr ""
 
-#: ui/pages/controls_page.slint:228
+#: ui/pages/controls_page.slint:224
 msgctxt "ControlsPage"
 msgid "Content of tab 3"
 msgstr ""
 
-#: ui/pages/table_view_page.slint:26
-msgctxt "TableViewPage"
-msgid "TableView"
-msgstr ""
-
-#: ui/pages/table_view_page.slint:28
-msgctxt "TableViewPage"
-msgid ""
-"StandardTableView can be used to display a list of text elements in columns "
-"and rows. It can be imported from \"std-widgets.slint\""
-msgstr ""
-
-#: ui/pages/table_view_page.slint:34
-msgctxt "TableViewPage"
-msgid "StandardTableView"
-msgstr ""
-
-#: ui/pages/table_view_page.slint:52
-msgctxt "TableViewPage"
-msgid "Header 1"
-msgstr ""
-
-#: ui/pages/table_view_page.slint:53
-msgctxt "TableViewPage"
-msgid "Header 2"
-msgstr ""
-
-#: ui/pages/table_view_page.slint:54
-msgctxt "TableViewPage"
-msgid "Header 3"
-msgstr ""
-
-#: ui/pages/table_view_page.slint:55
-msgctxt "TableViewPage"
-msgid "Header 4"
-msgstr ""
-
-#: ui/pages/table_view_page.slint:62
-msgctxt "TableViewPage"
-msgid "Filter by Header 1:"
-msgstr ""
-
-#: ui/pages/table_view_page.slint:66
-msgctxt "TableViewPage"
-msgid "Enter filter text"
-msgstr ""
-
-#: ui/pages/about_page.slint:9
-msgctxt "AboutPage"
-msgid "About"
-msgstr ""
-
-#: ui/pages/about_page.slint:11
-msgctxt "AboutPage"
-msgid ""
-"Are you curious now? Check out the docs and getting starteds from the Github "
-"repository and the website https://slint.dev and try it yourself."
-msgstr ""
-
-#: gallery.slint:14 gallery.slint:41
-#, fuzzy
-msgctxt "App"
-msgid "Slint Widgets Gallery"
-msgstr "Slint Widgets Galerie"
-
-#: gallery.slint:19
-msgctxt "MenuBar"
-msgid "File"
-msgstr ""
-
-#: gallery.slint:20
-msgctxt "MenuBar"
-msgid "Open"
-msgstr ""
-
-#: gallery.slint:22
-msgctxt "MenuBar"
-msgid "Open Recent"
-msgstr ""
-
-#: gallery.slint:23
-msgctxt "MenuBar"
-msgid "Recent {}"
-msgstr ""
-
-#: gallery.slint:26
-msgctxt "MenuBar"
-msgid "Save"
-msgstr ""
-
-#: gallery.slint:28
-msgctxt "MenuBar"
-msgid "Save As"
-msgstr ""
-
-#: gallery.slint:29
-msgctxt "MenuBar"
-msgid "Name {}"
-msgstr ""
-
-#: gallery.slint:33
-msgctxt "MenuBar"
-msgid "Edit"
-msgstr ""
-
-#: gallery.slint:34
-msgctxt "MenuBar"
-msgid "Copy"
-msgstr ""
-
-#: gallery.slint:35
-msgctxt "MenuBar"
-msgid "Paste"
-msgstr ""
-
-#: gallery.slint:42
-msgctxt "Menu"
-msgid "Controls"
-msgstr ""
-
-#: gallery.slint:42
-msgctxt "Menu"
-msgid "ListView"
-msgstr ""
-
-#: gallery.slint:42
-msgctxt "Menu"
-msgid "TableView"
-msgstr ""
-
-#: gallery.slint:42
-msgctxt "Menu"
+#: ui/pages/text_edit_page.slint:9
+msgctxt "TextEditPage"
 msgid "TextEdit"
 msgstr ""
 
-#: gallery.slint:42
-msgctxt "Menu"
-msgid "Easings"
+#: ui/pages/text_edit_page.slint:10
+msgctxt "TextEditPage"
+msgid ""
+"Similar to LineEdit, but can be used to enter several lines of text. The "
+"widget can be imported from \"std-widgets.slint\"."
 msgstr ""
 
-#: gallery.slint:42
-msgctxt "Menu"
-msgid "About"
+#: ui/pages/text_edit_page.slint:14
+msgctxt "TextEditPage"
+msgid "Word-Wrap"
+msgstr ""
+
+#. min-width: 200px;
+#: ui/pages/text_edit_page.slint:18
+msgctxt "TextEditPage"
+msgid ""
+"This is our TextEdit widget, which allows for editing text that spans over "
+"multiple paragraphs.\n"
+"For example this line starts in a new paragraph.\n"
+"\n"
+"When the amount of lines - due to wrapping and number of paragraphs - "
+"exceeds the available vertical height, a vertical scrollbar is shown that "
+"allows scrolling.\n"
+"You may want to enter a bit of text here then in order to make them visible."
+msgstr ""
+
+#: ui/pages/text_edit_page.slint:19
+msgctxt "TextEditPage"
+msgid "Add some text"
+msgstr ""
+
+#: ui/pages/text_edit_page.slint:26
+msgctxt "TextEditPage"
+msgid "No-Wrap"
 msgstr ""

@@ -224,7 +224,7 @@ pub use i_slint_core::model::{
     ReverseModel, SortModel, VecModel,
 };
 pub use i_slint_core::timers::{Timer, TimerMode};
-pub use i_slint_core::translations::{select_bundled_translation, SelectBundledTranslationError};
+pub use i_slint_core::translations::{SelectBundledTranslationError, select_bundled_translation};
 
 pub mod private_unstable_api;
 

@@ -406,11 +406,6 @@ if (SLINT_BUILD_RUNTIME)
         set_property(TARGET Slint APPEND PROPERTY PUBLIC_HEADER ${header})
     endforeach()
 
-    # Let CMake know about generated header files of build.rs to hopefully
-    # get a correct dependency tree.
-    set_source_files_properties(generated_headers PROPERTIES GENERATED TRUE)
-    target_sources(Slint PRIVATE generated_headers)
-
     target_include_directories(Slint INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated_include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

@@ -1750,12 +1750,6 @@ impl WindowInner {
             window_adapter.set_mouse_cursor(mouse_input_state.cursor);
         }
 
-        if old_cursor != mouse_input_state.cursor
-            && let Some(window_adapter) = window_adapter.internal(crate::InternalToken)
-        {
-            window_adapter.set_mouse_cursor(mouse_input_state.cursor);
-        }
-
         self.mouse_input_state.set(mouse_input_state);
 
         if let Some(popup_id) = popup_to_close {
