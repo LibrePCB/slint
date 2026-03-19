@@ -1,9 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-use crate::api::PlatformError;
 use crate::SharedString;
-use alloc::boxed::Box;
 use core::fmt::Display;
 pub use formatter::FormatArgs;
 
@@ -195,34 +193,12 @@ pub fn translate(
 ) -> SharedString {
     #![allow(unused)]
     let mut output = SharedString::default();
-    let input = if plural.is_empty() || n == 1 { original } else { plural };
-    let translated =
-        translate_callback(original, contextid, domain, n, plural).unwrap_or_else(|| {
-            #[cfg(all(target_family = "unix", feature = "gettext-rs"))]
-            return translate_gettext(original, contextid, domain, n, plural);
-            return input.into();
-        });
+    let translated = if plural.is_empty() || n == 1 { original } else { plural };
+    #[cfg(all(target_family = "unix", feature = "gettext-rs"))]
+    let translated = translate_gettext(original, contextid, domain, n, plural);
     use core::fmt::Write;
     write!(output, "{}", formatter::format(&translated, &WithPlural(arguments, n))).unwrap();
     output
-}
-
-fn translate_callback(
-    string: &str,
-    context: &str,
-    domain: &str,
-    n: i32,
-    plural: &str,
-) -> Option<std::string::String> {
-    crate::context::GLOBAL_CONTEXT.with(|p| match p.get() {
-        Some(ctx) => {
-            if let Some(ref mut callback) = *ctx.0.translate_callback.borrow_mut() {
-                return Some(callback(string, context, domain, n, plural));
-            }
-            return None;
-        }
-        None => None,
-    })
 }
 
 #[cfg(all(target_family = "unix", feature = "gettext-rs"))]
@@ -374,18 +350,6 @@ fn index_for_locale(languages: &[&'static str]) -> Option<usize> {
     idx.or_else(|| {
         let locale = base(&locale);
         languages.iter().position(|x| base(x) == locale)
-    })
-}
-
-pub fn set_translate_callback(
-    callback: Option<Box<dyn FnMut(&str, &str, &str, i32, &str) -> std::string::String>>,
-) -> Result<(), PlatformError> {
-    crate::context::GLOBAL_CONTEXT.with(|p| match p.get() {
-        Some(ctx) => {
-            ctx.0.translate_callback.replace(callback);
-            Ok(())
-        }
-        None => Err(PlatformError::NoPlatform),
     })
 }
 
@@ -551,32 +515,6 @@ mod ffi {
             .map(|x| core::str::from_utf8(x.as_slice()).unwrap())
             .collect::<alloc::vec::Vec<_>>();
         set_bundled_languages(&languages);
-    }
-
-    type TranslationCallback = extern "C" fn(
-        string: Slice<u8>,
-        ctx: Slice<u8>,
-        domain: Slice<u8>,
-        n: i32,
-        plural: Slice<u8>,
-        out: &mut SharedString,
-    );
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn slint_translate_set_translate_callback(cb: TranslationCallback) -> bool {
-        let wrapper = move |s: &str, c: &str, d: &str, n: i32, p: &str| -> std::string::String {
-            let mut ret = SharedString::new();
-            cb(
-                s.as_bytes().into(),
-                c.as_bytes().into(),
-                d.as_bytes().into(),
-                n,
-                p.as_bytes().into(),
-                &mut ret,
-            );
-            ret.into()
-        };
-        set_translate_callback(Some(Box::new(wrapper))).is_ok()
     }
 
     #[unsafe(no_mangle)]

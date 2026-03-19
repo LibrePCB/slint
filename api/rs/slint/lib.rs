@@ -223,9 +223,7 @@ pub use i_slint_core::model::{
     ReverseModel, SortModel, StandardListViewItem, TableColumn, VecModel,
 };
 pub use i_slint_core::timers::{Timer, TimerMode};
-pub use i_slint_core::translations::{
-    select_bundled_translation, set_translate_callback, SelectBundledTranslationError,
-};
+pub use i_slint_core::translations::{select_bundled_translation, SelectBundledTranslationError};
 
 pub mod private_unstable_api;
 

@@ -331,11 +331,6 @@ inline void update_all_translations()
 }
 #endif
 
-inline bool set_translate_callback(cbindgen_private::TranslationCallback cb)
-{
-    return cbindgen_private::slint_translate_set_translate_callback(cb);
-}
-
 /// Select the current translation language when using bundled translations.
 /// This function requires that the application's `.slint` file was compiled with bundled
 /// translations. It must be called after creating the first component.
