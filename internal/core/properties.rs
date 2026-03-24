@@ -588,6 +588,13 @@ impl PropertyHandle {
     }
 
     fn remove_binding(&self) {
+        // Workaround for spurious crashes in LibrePCB, somehow caused by the
+        // Timer in LibraryTreeView. Crashes happened when opening several
+        // library categories one after the other, but only on Windows.
+        if self.lock_flag() {
+            return;
+        }
+
         assert!(!self.lock_flag(), "Recursion detected");
 
         if let Some(binding) = Self::pointer_to_binding(self.handle.get()) {
