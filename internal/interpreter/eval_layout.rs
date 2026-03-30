@@ -180,7 +180,7 @@ pub(crate) fn solve_box_layout(
 }
 
 pub(crate) fn solve_flexbox_layout(
-    flexbox_layout: &i_slint_compiler::layout::FlexBoxLayout,
+    flexbox_layout: &i_slint_compiler::layout::FlexboxLayout,
     local_context: &mut EvalLocalContext,
 ) -> Value {
     let component = local_context.component_instance;
@@ -224,7 +224,7 @@ pub(crate) fn solve_flexbox_layout(
         padding_and_spacing(&flexbox_layout.geometry, Orientation::Vertical, &expr_eval);
 
     core_layout::solve_flexbox_layout(
-        &core_layout::FlexBoxLayoutData {
+        &core_layout::FlexboxLayoutData {
             width: width_ref.as_ref().map(&expr_eval).unwrap_or(0.),
             height: height_ref.as_ref().map(&expr_eval).unwrap_or(0.),
             spacing_h,
@@ -245,7 +245,7 @@ pub(crate) fn solve_flexbox_layout(
 }
 
 fn flexbox_layout_direction(
-    flexbox_layout: &i_slint_compiler::layout::FlexBoxLayout,
+    flexbox_layout: &i_slint_compiler::layout::FlexboxLayout,
     local_context: &EvalLocalContext,
 ) -> FlexDirection {
     flexbox_layout
@@ -271,7 +271,7 @@ fn flexbox_layout_direction(
 }
 
 pub(crate) fn compute_flexbox_layout_info(
-    flexbox_layout: &i_slint_compiler::layout::FlexBoxLayout,
+    flexbox_layout: &i_slint_compiler::layout::FlexboxLayout,
     orientation: Orientation,
     local_context: &mut EvalLocalContext,
 ) -> Value {
@@ -352,57 +352,83 @@ pub(crate) fn compute_flexbox_layout_info(
 }
 
 fn flexbox_layout_data(
-    flexbox_layout: &i_slint_compiler::layout::FlexBoxLayout,
+    flexbox_layout: &i_slint_compiler::layout::FlexboxLayout,
     component: InstanceRef,
     expr_eval: &impl Fn(&NamedReference) -> f32,
     _local_context: &mut EvalLocalContext,
-) -> (Vec<core_layout::LayoutItemInfo>, Vec<core_layout::LayoutItemInfo>, Vec<u32>) {
+) -> (Vec<core_layout::FlexboxLayoutItemInfo>, Vec<core_layout::FlexboxLayoutItemInfo>, Vec<u32>) {
     let window_adapter = component.window_adapter();
     let mut cells_h = Vec::with_capacity(flexbox_layout.elems.len());
     let mut cells_v = Vec::with_capacity(flexbox_layout.elems.len());
     let mut repeated_indices = Vec::new();
 
     for layout_elem in &flexbox_layout.elems {
-        if layout_elem.element.borrow().repeated.is_some() {
-            let component_vec = repeater_instances(component, &layout_elem.element);
+        if layout_elem.item.element.borrow().repeated.is_some() {
+            let component_vec = repeater_instances(component, &layout_elem.item.element);
             repeated_indices.push(cells_h.len() as u32);
             repeated_indices.push(component_vec.len() as u32);
             cells_h.extend(component_vec.iter().map(|x| {
-                x.as_pin_ref().layout_item_info(to_runtime(Orientation::Horizontal), None)
+                x.as_pin_ref().flexbox_layout_item_info(to_runtime(Orientation::Horizontal), None)
             }));
-            cells_v.extend(
-                component_vec.iter().map(|x| {
-                    x.as_pin_ref().layout_item_info(to_runtime(Orientation::Vertical), None)
-                }),
-            );
+            cells_v.extend(component_vec.iter().map(|x| {
+                x.as_pin_ref().flexbox_layout_item_info(to_runtime(Orientation::Vertical), None)
+            }));
         } else {
             let mut layout_info_h = get_layout_info(
-                &layout_elem.element,
+                &layout_elem.item.element,
                 component,
                 &window_adapter,
                 Orientation::Horizontal,
             );
             fill_layout_info_constraints(
                 &mut layout_info_h,
-                &layout_elem.constraints,
+                &layout_elem.item.constraints,
                 Orientation::Horizontal,
                 &expr_eval,
             );
-            cells_h.push(core_layout::LayoutItemInfo { constraint: layout_info_h });
-
             let mut layout_info_v = get_layout_info(
-                &layout_elem.element,
+                &layout_elem.item.element,
                 component,
                 &window_adapter,
                 Orientation::Vertical,
             );
             fill_layout_info_constraints(
                 &mut layout_info_v,
-                &layout_elem.constraints,
+                &layout_elem.item.constraints,
                 Orientation::Vertical,
                 &expr_eval,
             );
-            cells_v.push(core_layout::LayoutItemInfo { constraint: layout_info_v });
+            let flex_grow = layout_elem.flex_grow.as_ref().map(&expr_eval).unwrap_or(0.0);
+            let flex_shrink = layout_elem.flex_shrink.as_ref().map(&expr_eval).unwrap_or(0.0);
+            let flex_basis = layout_elem.flex_basis.as_ref().map(&expr_eval).unwrap_or(-1.0);
+            let align_self = layout_elem
+                .align_self
+                .as_ref()
+                .map(|nr| {
+                    eval::load_property(component, &nr.element(), nr.name())
+                        .unwrap()
+                        .try_into()
+                        .unwrap()
+                })
+                .unwrap_or(i_slint_core::items::FlexAlignSelf::default());
+            let order = layout_elem.order.as_ref().map(&expr_eval).unwrap_or(0.0) as i32;
+            let item_info = core_layout::FlexboxLayoutItemInfo {
+                constraint: layout_info_h,
+                flex_grow,
+                flex_shrink,
+                flex_basis,
+                flex_align_self: align_self,
+                flex_order: order,
+            };
+            cells_h.push(item_info);
+            cells_v.push(core_layout::FlexboxLayoutItemInfo {
+                constraint: layout_info_v,
+                flex_grow,
+                flex_shrink,
+                flex_basis,
+                flex_align_self: align_self,
+                flex_order: order,
+            });
         }
     }
 
@@ -740,9 +766,7 @@ fn grid_layout_constraints(
                     // inner repeaters have different lengths across outer Row instances).
                     let pushed = constraints.len() - per_instance_start;
                     for _ in pushed..step {
-                        constraints.push(core_layout::LayoutItemInfo {
-                            constraint: core_layout::LayoutInfo::default(),
-                        });
+                        constraints.push(core_layout::LayoutItemInfo::default());
                     }
                 }
             } else {

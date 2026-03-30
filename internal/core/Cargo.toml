@@ -114,7 +114,7 @@ unicode-linebreak = { version = "0.1.5", optional = true }
 unicode-script = { version = "0.5.7", optional = true }
 icu_normalizer = { workspace = true, optional = true }
 sys-locale = { version = "0.3.2", optional = true, features = ["js"] }
-parley = { version = "0.7.0", optional = true }
+parley = { version = "0.8.0", optional = true }
 
 image = { workspace = true, optional = true, default-features = false }
 clru = { workspace = true, optional = true }
@@ -134,7 +134,7 @@ wgpu-28 = { workspace = true, optional = true }
 
 tr = { workspace = true, optional = true }
 
-taffy = { version = "0.7", default-features = false, features = ["flexbox", "taffy_tree", "alloc"] }
+taffy = { version = "0.9", default-features = false, features = ["flexbox", "taffy_tree", "alloc"] }
 
 [target.'cfg(target_family = "unix")'.dependencies]
 gettext-rs = { version = "0.7.1", optional = true, features = ["gettext-system"] }
@@ -151,7 +151,7 @@ i-slint-backend-testing = { path = "../backends/testing" }
 rustybuzz = { workspace = true }
 ttf-parser = { workspace = true }
 serde_json = { workspace = true }
-tiny-skia = "0.11.0"
+tiny-skia = "0.12.0"
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 async-compat = { version = "0.2.4" }
 tempfile = { version = "3.12.0" }

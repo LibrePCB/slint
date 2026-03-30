@@ -15,8 +15,8 @@ use super::{
 };
 use crate::graphics::{Brush, Color, FontRequest};
 use crate::input::{
-    FocusEvent, FocusEventResult, FocusReason, InputEventFilterResult, InputEventResult, KeyEvent,
-    KeyboardModifiers, MouseEvent, StandardShortcut, TextShortcut, key_codes,
+    FocusEvent, FocusEventResult, FocusReason, InputEventFilterResult, InputEventResult,
+    InternalKeyEvent, KeyboardModifiers, MouseEvent, StandardShortcut, TextShortcut, key_codes,
 };
 use crate::item_rendering::{
     CachedRenderingData, HasFont, ItemRenderer, PlainOrStyledText, RenderString, RenderText,
@@ -103,7 +103,7 @@ impl Item for ComplexText {
 
     fn capture_key_event(
         self: Pin<&Self>,
-        _: &KeyEvent,
+        _: &InternalKeyEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> KeyEventResult {
@@ -112,7 +112,7 @@ impl Item for ComplexText {
 
     fn key_event(
         self: Pin<&Self>,
-        _: &KeyEvent,
+        _: &InternalKeyEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> KeyEventResult {
@@ -233,21 +233,10 @@ pub struct StyledTextItem {
     pub width: Property<LogicalLength>,
     pub height: Property<LogicalLength>,
     pub text: Property<crate::styled_text::StyledText>,
-    pub font_size: Property<LogicalLength>,
-    pub font_weight: Property<i32>,
-    pub color: Property<Brush>,
+    pub default_color: Property<Brush>,
     pub horizontal_alignment: Property<TextHorizontalAlignment>,
     pub vertical_alignment: Property<TextVerticalAlignment>,
     pub link_clicked: Callback<StringArg>,
-
-    pub font_family: Property<SharedString>,
-    pub font_italic: Property<bool>,
-    pub wrap: Property<TextWrap>,
-    pub overflow: Property<TextOverflow>,
-    pub letter_spacing: Property<LogicalLength>,
-    pub stroke: Property<Brush>,
-    pub stroke_width: Property<LogicalLength>,
-    pub stroke_style: Property<TextStrokeStyle>,
     pub link_color: Property<Color>,
     pub cached_rendering_data: CachedRenderingData,
 }
@@ -280,36 +269,46 @@ impl Item for StyledTextItem {
         InputEventFilterResult::ForwardEvent
     }
 
-    #[cfg_attr(not(feature = "std"), allow(unused))]
+    #[cfg_attr(not(feature = "shared-parley"), allow(unused))]
     fn input_event(
         self: Pin<&Self>,
         event: &MouseEvent,
         window_adapter: &Rc<dyn WindowAdapter>,
         self_rc: &ItemRc,
-        _: &mut super::MouseCursor,
+        cursor: &mut super::MouseCursor,
     ) -> InputEventResult {
+        #[cfg(feature = "shared-parley")]
+        let find_link = |position: &LogicalPoint| {
+            let window_inner = WindowInner::from_pub(window_adapter.window());
+            let scale_factor = crate::lengths::ScaleFactor::new(window_inner.scale_factor());
+            crate::textlayout::sharedparley::link_under_cursor(
+                &mut window_inner.context().font_context().borrow_mut(),
+                scale_factor,
+                self,
+                self_rc,
+                LogicalSize::from_lengths(self.width(), self.height()),
+                *position * scale_factor,
+                None,
+            )
+        };
         match event {
-            #[cfg(feature = "std")]
+            #[cfg(feature = "shared-parley")]
+            MouseEvent::Moved { position, .. } => {
+                if find_link(position).is_some() {
+                    *cursor = super::MouseCursor::Pointer;
+                }
+                InputEventResult::EventIgnored
+            }
+            #[cfg(feature = "shared-parley")]
             MouseEvent::Pressed {
                 position,
                 button: PointerEventButton::Left,
                 click_count: _,
                 is_touch: _,
             } => {
-                let window_inner = WindowInner::from_pub(window_adapter.window());
-                let scale_factor = crate::lengths::ScaleFactor::new(window_inner.scale_factor());
-                if let Some(link) = crate::textlayout::sharedparley::link_under_cursor(
-                    &mut window_inner.context().font_context().borrow_mut(),
-                    scale_factor,
-                    self,
-                    self_rc,
-                    LogicalSize::from_lengths(self.width(), self.height()),
-                    *position * scale_factor,
-                    None, // No cache available from item event handler
-                ) {
+                if let Some(link) = find_link(position) {
                     Self::FIELD_OFFSETS.link_clicked.apply_pin(self).call(&(link.into(),));
                 }
-
                 InputEventResult::EventAccepted
             }
             _ => InputEventResult::EventIgnored,
@@ -318,7 +317,7 @@ impl Item for StyledTextItem {
 
     fn capture_key_event(
         self: Pin<&Self>,
-        _: &KeyEvent,
+        _: &InternalKeyEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> KeyEventResult {
@@ -327,7 +326,7 @@ impl Item for StyledTextItem {
 
     fn key_event(
         self: Pin<&Self>,
-        _: &KeyEvent,
+        _: &InternalKeyEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> KeyEventResult {
@@ -378,11 +377,11 @@ impl HasFont for StyledTextItem {
     fn font_request(self: Pin<&Self>, self_rc: &crate::items::ItemRc) -> FontRequest {
         crate::items::WindowItem::resolved_font_request(
             self_rc,
-            self.font_family(),
-            self.font_weight(),
-            self.font_size(),
-            self.letter_spacing(),
-            self.font_italic(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
         )
     }
 }
@@ -399,7 +398,7 @@ impl RenderText for StyledTextItem {
     }
 
     fn color(self: Pin<&Self>) -> Brush {
-        self.color()
+        self.default_color()
     }
 
     fn link_color(self: Pin<&Self>) -> Color {
@@ -413,15 +412,15 @@ impl RenderText for StyledTextItem {
     }
 
     fn wrap(self: Pin<&Self>) -> TextWrap {
-        self.wrap()
+        TextWrap::WordWrap
     }
 
     fn overflow(self: Pin<&Self>) -> TextOverflow {
-        self.overflow()
+        TextOverflow::Clip
     }
 
     fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) {
-        (self.stroke(), self.stroke_width(), self.stroke_style())
+        Default::default()
     }
 
     fn is_markdown(self: Pin<&Self>) -> bool {
@@ -497,7 +496,7 @@ impl Item for SimpleText {
 
     fn capture_key_event(
         self: Pin<&Self>,
-        _: &KeyEvent,
+        _: &InternalKeyEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> KeyEventResult {
@@ -506,7 +505,7 @@ impl Item for SimpleText {
 
     fn key_event(
         self: Pin<&Self>,
-        _: &KeyEvent,
+        _: &InternalKeyEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> KeyEventResult {
@@ -825,7 +824,7 @@ impl Item for TextInput {
                     self.byte_offset_for_position(*position, window_adapter, self_rc) as i32;
                 self.as_ref().pressed.set((click_count % 3) + 1);
 
-                if !window_adapter.window().0.modifiers.get().shift() {
+                if !window_adapter.window().0.context().0.modifiers.get().shift() {
                     self.as_ref().anchor_position_byte_offset.set(clicked_offset);
                 }
 
@@ -904,7 +903,7 @@ impl Item for TextInput {
 
     fn capture_key_event(
         self: Pin<&Self>,
-        _: &KeyEvent,
+        _: &InternalKeyEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> KeyEventResult {
@@ -913,7 +912,7 @@ impl Item for TextInput {
 
     fn key_event(
         self: Pin<&Self>,
-        event: &KeyEvent,
+        event: &InternalKeyEvent,
         window_adapter: &Rc<dyn WindowAdapter>,
         self_rc: &ItemRc,
     ) -> KeyEventResult {
@@ -923,7 +922,7 @@ impl Item for TextInput {
         match event.event_type {
             KeyEventType::KeyPressed => {
                 // invoke first key_pressed callback to give the developer/designer the possibility to implement a custom behaviour
-                if Self::FIELD_OFFSETS.key_pressed.apply_pin(self).call(&(event.clone(),))
+                if Self::FIELD_OFFSETS.key_pressed.apply_pin(self).call(&(event.key_event.clone(),))
                     == EventResult::Accept
                 {
                     return KeyEventResult::EventAccepted;
@@ -935,7 +934,7 @@ impl Item for TextInput {
                             TextInput::move_cursor(
                                 self,
                                 direction,
-                                event.modifiers.into(),
+                                event.key_event.modifiers.into(),
                                 TextChangeNotify::TriggerCallbacks,
                                 window_adapter,
                                 self_rc,
@@ -995,7 +994,7 @@ impl Item for TextInput {
                     None => (),
                 };
 
-                if let Some(keycode) = event.text.chars().next()
+                if let Some(keycode) = event.key_event.text.chars().next()
                     && keycode == key_codes::Return
                     && !self.read_only()
                     && self.single_line()
@@ -1005,8 +1004,8 @@ impl Item for TextInput {
                 }
 
                 // Only insert/interpreter non-control character strings
-                if event.text.is_empty()
-                    || event.text.as_str().chars().any(|ch| {
+                if event.key_event.text.is_empty()
+                    || event.key_event.text.as_str().chars().any(|ch| {
                         // exclude the private use area as we encode special keys into it
                         ('\u{f700}'..='\u{f7ff}').contains(&ch) || (ch.is_control() && ch != '\n')
                     })
@@ -1047,7 +1046,7 @@ impl Item for TextInput {
                     }
                 }
 
-                if self.read_only() || event.modifiers.control {
+                if self.read_only() || event.key_event.modifiers.control {
                     return KeyEventResult::EventIgnored;
                 }
 
@@ -1057,7 +1056,7 @@ impl Item for TextInput {
                     (self.cursor_position(&text), self.anchor_position(&text))
                 };
 
-                if !self.accept_text_input(event.text.as_str()) {
+                if !self.accept_text_input(event.key_event.text.as_str()) {
                     return KeyEventResult::EventIgnored;
                 }
 
@@ -1067,18 +1066,18 @@ impl Item for TextInput {
 
                 // FIXME: respect grapheme boundaries
                 let insert_pos = self.selection_anchor_and_cursor().1;
-                text.insert_str(insert_pos, &event.text);
+                text.insert_str(insert_pos, &event.key_event.text);
 
                 self.add_undo_item(UndoItem {
                     pos: insert_pos,
-                    text: event.text.clone(),
+                    text: event.key_event.text.clone(),
                     cursor: real_cursor,
                     anchor: real_anchor,
                     kind: UndoItemKind::TextInsert,
                 });
 
                 self.as_ref().text.set(text.into());
-                let new_cursor_pos = (insert_pos + event.text.len()) as i32;
+                let new_cursor_pos = (insert_pos + event.key_event.text.len()) as i32;
                 self.as_ref().anchor_position_byte_offset.set(new_cursor_pos);
                 self.set_cursor_position(
                     new_cursor_pos,
@@ -1097,13 +1096,17 @@ impl Item for TextInput {
                 KeyEventResult::EventAccepted
             }
             KeyEventType::KeyReleased => {
-                match Self::FIELD_OFFSETS.key_released.apply_pin(self).call(&(event.clone(),)) {
+                match Self::FIELD_OFFSETS
+                    .key_released
+                    .apply_pin(self)
+                    .call(&(event.key_event.clone(),))
+                {
                     EventResult::Accept => KeyEventResult::EventAccepted,
                     EventResult::Reject => KeyEventResult::EventIgnored,
                 }
             }
             KeyEventType::UpdateComposition | KeyEventType::CommitComposition => {
-                if !self.accept_text_input(&event.text) {
+                if !self.accept_text_input(&event.key_event.text) {
                     return KeyEventResult::EventIgnored;
                 }
 
@@ -1115,7 +1118,7 @@ impl Item for TextInput {
                     // Set the selection so the call to insert erases it
                     self.anchor_position_byte_offset.set(cursor.saturating_add(r.start));
                     self.cursor_position_byte_offset.set(cursor.saturating_add(r.end));
-                    if event.text.is_empty() {
+                    if event.key_event.text.is_empty() {
                         self.delete_selection(
                             window_adapter,
                             self_rc,
@@ -1128,7 +1131,7 @@ impl Item for TextInput {
                         );
                     }
                 }
-                self.insert(&event.text, window_adapter, self_rc);
+                self.insert(&event.key_event.text, window_adapter, self_rc);
                 if let Some(cursor) = event.cursor_position {
                     self.anchor_position_byte_offset.set(event.anchor_position.unwrap_or(cursor));
                     self.set_cursor_position(
@@ -1713,7 +1716,7 @@ impl TextInput {
         let cursor_relative =
             self.cursor_rect_for_byte_offset(cursor_position, window_adapter, self_rc);
         let geometry = self_rc.geometry();
-        let origin = self_rc.map_to_window(geometry.origin);
+        let origin = self_rc.map_to_native_window(geometry.origin);
         let origin_vector = origin.to_vector();
         let cursor_rect_origin =
             crate::api::LogicalPosition::from_euclid(cursor_relative.origin + origin_vector);
@@ -1727,7 +1730,7 @@ impl TextInput {
             self_rc.parent_item(crate::item_tree::ParentItemTraversalMode::StopAtPopups);
         let clip_rect = maybe_parent.map(|parent| {
             let geom = parent.geometry();
-            LogicalRect::new(parent.map_to_window(geom.origin), geom.size)
+            LogicalRect::new(parent.map_to_native_window(geom.origin), geom.size)
         });
 
         InputMethodProperties {

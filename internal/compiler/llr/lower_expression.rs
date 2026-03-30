@@ -251,9 +251,7 @@ pub fn lower_expression(
                 .collect::<_>(),
         },
         tree_Expression::EnumerationValue(e) => llr_Expression::EnumerationValue(e.clone()),
-        tree_Expression::KeyboardShortcut(ks) => {
-            llr_Expression::KeyboardShortcutLiteral(ks.clone())
-        }
+        tree_Expression::Keys(ks) => llr_Expression::KeysLiteral(ks.clone()),
         tree_Expression::ReturnStatement(..) => {
             panic!("The remove return pass should have removed all return")
         }
@@ -298,8 +296,8 @@ pub fn lower_expression(
         tree_Expression::SolveGridLayout { layout_organized_data_prop, layout, orientation } => {
             solve_grid_layout(layout_organized_data_prop, layout, *orientation, ctx)
         }
-        tree_Expression::SolveFlexBoxLayout(l) => solve_flexbox_layout(l, ctx),
-        tree_Expression::ComputeFlexBoxLayoutInfo(l, o) => compute_flexbox_layout_info(l, *o, ctx),
+        tree_Expression::SolveFlexboxLayout(l) => solve_flexbox_layout(l, ctx),
+        tree_Expression::ComputeFlexboxLayoutInfo(l, o) => compute_flexbox_layout_info(l, *o, ctx),
         tree_Expression::MinMax { ty, op, lhs, rhs } => llr_Expression::MinMax {
             ty: ty.clone(),
             op: *op,

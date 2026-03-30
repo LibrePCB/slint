@@ -3,12 +3,12 @@
 
 #pragma once
 
-#include "slint_internal.h"
-#include "slint_platform_internal.h"
-#include "slint_qt_internal.h"
-#include "slint_window.h"
-#include "slint_models.h"
-#include "slint_item_tree.h"
+#include "private/slint_internal.h"
+#include "private/slint_platform_internal.h"
+#include "private/slint_qt_internal.h"
+#include "private/slint_window.h"
+#include "private/slint_models.h"
+#include "private/slint_item_tree.h"
 
 #include <vector>
 #include <chrono>
@@ -195,7 +195,7 @@ box_layout_info_ortho(cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> 
     return cbindgen_private::slint_box_layout_info_ortho(cells, &padding);
 }
 
-inline SharedVector<float> solve_flexbox_layout(const cbindgen_private::FlexBoxLayoutData &data,
+inline SharedVector<float> solve_flexbox_layout(const cbindgen_private::FlexboxLayoutData &data,
                                                 cbindgen_private::Slice<int> repeater_indices)
 {
     SharedVector<float> result;
@@ -206,8 +206,8 @@ inline SharedVector<float> solve_flexbox_layout(const cbindgen_private::FlexBoxL
 }
 
 inline cbindgen_private::LayoutInfo
-flexbox_layout_info(cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> cells_h,
-                    cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> cells_v,
+flexbox_layout_info(cbindgen_private::Slice<cbindgen_private::FlexboxLayoutItemInfo> cells_h,
+                    cbindgen_private::Slice<cbindgen_private::FlexboxLayoutItemInfo> cells_v,
                     float spacing_h, float spacing_v, const cbindgen_private::Padding &padding_h,
                     const cbindgen_private::Padding &padding_v,
                     cbindgen_private::Orientation orientation,
@@ -317,11 +317,16 @@ inline StyledText parse_markdown(const SharedString &format_string,
     return result;
 }
 
-inline StyledText string_to_styled_text(SharedString text)
+inline StyledText string_to_styled_text(const SharedString &text)
 {
     StyledText result;
-    cbindgen_private::slint_string_to_styled_text(text, &result);
+    cbindgen_private::slint_string_to_styled_text(&text, &result);
     return result;
+}
+
+inline void open_url(const SharedString &url, const WindowAdapterRc &window_adapter)
+{
+    cbindgen_private::slint_open_url(&url, &window_adapter.handle());
 }
 
 inline SharedString translate_from_bundle(std::span<const char8_t *const> strs,
@@ -352,10 +357,10 @@ translate_from_bundle_with_plural(std::span<const char8_t *const> strs,
     return result;
 }
 
-inline SharedString keyboard_shortcut_to_string(const cbindgen_private::KeyboardShortcut &shortcut)
+inline SharedString keys_to_string(const cbindgen_private::Keys &keys)
 {
     SharedString result;
-    cbindgen_private::slint_keyboard_shortcut_to_string(&shortcut, &result);
+    cbindgen_private::slint_keys_to_string(&keys, &result);
     return result;
 }
 
@@ -512,11 +517,11 @@ cbindgen_private::Flickable::~Flickable()
 
 cbindgen_private::FocusScope::FocusScope()
 {
-    slint_maybe_shortcut_list_init(&shortcuts);
+    slint_maybe_key_binding_list_init(&key_bindings);
 }
 cbindgen_private::FocusScope::~FocusScope()
 {
-    slint_maybe_shortcut_list_free(&shortcuts);
+    slint_maybe_key_binding_list_free(&key_bindings);
 }
 
 cbindgen_private::NativeStyleMetrics::NativeStyleMetrics(void *)

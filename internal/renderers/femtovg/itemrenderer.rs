@@ -470,6 +470,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
                 items::LineJoin::Bevel => femtovg::LineJoin::Bevel,
                 items::LineJoin::Miter | _ => femtovg::LineJoin::Miter,
             });
+            paint.set_miter_limit(path.stroke_miter_limit());
             paint.set_anti_alias(anti_alias);
             paint
         });
@@ -890,7 +891,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         self.canvas.borrow_mut().rotate(angle_in_radians);
         let clip = &mut self.state.last_mut().unwrap().scissor;
         // Compute the bounding box of the rotated rectangle
-        let (sin, cos) = angle_in_radians.sin_cos();
+        let (sin, cos) = (-angle_in_radians).sin_cos();
         let rotate_point = |p: LogicalPoint| (p.x * cos - p.y * sin, p.x * sin + p.y * cos);
         let corners = [
             rotate_point(clip.origin),
@@ -914,6 +915,8 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
     fn scale(&mut self, x_factor: f32, y_factor: f32) {
         self.canvas.borrow_mut().scale(x_factor, y_factor);
         let clip = &mut self.state.last_mut().unwrap().scissor;
+        clip.origin.x /= x_factor;
+        clip.origin.y /= y_factor;
         clip.size.width /= x_factor;
         clip.size.height /= y_factor;
     }
@@ -991,11 +994,11 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GlyphRenderer for GLItemRendere
         match &mut brush {
             GlyphBrush::Fill(paint) => {
                 paint.set_font_size(font_size.get());
-                canvas.fill_glyph_run(font_id, glyphs_it, paint).unwrap();
+                canvas.fill_glyph_run(font_id, &[], glyphs_it, paint).unwrap();
             }
             GlyphBrush::Stroke(paint) => {
                 paint.set_font_size(font_size.get());
-                canvas.stroke_glyph_run(font_id, glyphs_it, paint).unwrap();
+                canvas.stroke_glyph_run(font_id, &[], glyphs_it, paint).unwrap();
             }
         }
     }

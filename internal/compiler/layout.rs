@@ -36,7 +36,7 @@ pub enum FlexDirection {
 pub enum Layout {
     GridLayout(GridLayout),
     BoxLayout(BoxLayout),
-    FlexBoxLayout(FlexBoxLayout),
+    FlexboxLayout(FlexboxLayout),
 }
 
 impl Layout {
@@ -45,7 +45,7 @@ impl Layout {
         match self {
             Layout::GridLayout(grid) => grid.visit_named_references(visitor),
             Layout::BoxLayout(l) => l.visit_named_references(visitor),
-            Layout::FlexBoxLayout(l) => l.visit_named_references(visitor),
+            Layout::FlexboxLayout(l) => l.visit_named_references(visitor),
         }
     }
 }
@@ -55,6 +55,17 @@ impl Layout {
 pub struct LayoutItem {
     pub element: ElementRc,
     pub constraints: LayoutConstraints,
+}
+
+/// A FlexboxLayout child item, wrapping a LayoutItem with flex-specific properties.
+#[derive(Debug, Clone)]
+pub struct FlexboxLayoutItem {
+    pub item: LayoutItem,
+    pub flex_grow: Option<NamedReference>,
+    pub flex_shrink: Option<NamedReference>,
+    pub flex_basis: Option<NamedReference>,
+    pub align_self: Option<NamedReference>,
+    pub order: Option<NamedReference>,
 }
 
 /// A child within a repeated Row in a GridLayout.
@@ -587,10 +598,10 @@ impl BoxLayout {
     }
 }
 
-/// Internal representation of a FlexBoxLayout (row or column direction with wrapping)
+/// Internal representation of a FlexboxLayout (row or column direction with wrapping)
 #[derive(Debug, Clone)]
-pub struct FlexBoxLayout {
-    pub elems: Vec<LayoutItem>,
+pub struct FlexboxLayout {
+    pub elems: Vec<FlexboxLayoutItem>,
     pub geometry: LayoutGeometry,
     pub direction: Option<NamedReference>,
     pub align_content: Option<NamedReference>,
@@ -598,10 +609,55 @@ pub struct FlexBoxLayout {
     pub flex_wrap: Option<NamedReference>,
 }
 
-impl FlexBoxLayout {
+impl FlexboxLayout {
+    /// Returns true if the given orientation is the main axis, based on compile-time
+    /// direction analysis. Returns false if direction is unknown at compile time
+    /// (conservatively treating it as cross-axis).
+    pub fn is_main_axis(&self, orientation: Orientation) -> bool {
+        use crate::expression_tree::Expression;
+        let direction = match self.direction.as_ref() {
+            None => Some(FlexDirection::Row), // default
+            Some(nr) => nr.element().borrow().bindings.get(nr.name()).and_then(|binding| {
+                match &binding.borrow().expression {
+                    Expression::EnumerationValue(ev) => match ev.value {
+                        0 => Some(FlexDirection::Row),
+                        1 => Some(FlexDirection::RowReverse),
+                        2 => Some(FlexDirection::Column),
+                        3 => Some(FlexDirection::ColumnReverse),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }),
+        };
+        matches!(
+            (direction, orientation),
+            (Some(FlexDirection::Row | FlexDirection::RowReverse), Orientation::Horizontal)
+                | (
+                    Some(FlexDirection::Column | FlexDirection::ColumnReverse),
+                    Orientation::Vertical
+                )
+        )
+    }
+
     pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
         for cell in &mut self.elems {
-            cell.constraints.visit_named_references(visitor);
+            cell.item.constraints.visit_named_references(visitor);
+            if let Some(e) = cell.flex_grow.as_mut() {
+                visitor(&mut *e)
+            }
+            if let Some(e) = cell.flex_shrink.as_mut() {
+                visitor(&mut *e)
+            }
+            if let Some(e) = cell.flex_basis.as_mut() {
+                visitor(&mut *e)
+            }
+            if let Some(e) = cell.align_self.as_mut() {
+                visitor(&mut *e)
+            }
+            if let Some(e) = cell.order.as_mut() {
+                visitor(&mut *e)
+            }
         }
         self.geometry.visit_named_references(visitor);
         if let Some(e) = self.direction.as_mut() {
@@ -710,7 +766,7 @@ pub fn is_layout(base_type: &ElementType) -> bool {
         ElementType::Builtin(be) => {
             matches!(
                 be.name.as_str(),
-                "GridLayout" | "HorizontalLayout" | "VerticalLayout" | "FlexBoxLayout"
+                "GridLayout" | "HorizontalLayout" | "VerticalLayout" | "FlexboxLayout"
             )
         }
         _ => false,

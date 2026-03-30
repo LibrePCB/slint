@@ -27,6 +27,7 @@ pub mod generate_item_indices;
 pub mod infer_aliases_types;
 mod inject_debug_hooks;
 mod inlining;
+mod key_bindings;
 mod lower_absolute_coordinates;
 mod lower_accessibility;
 mod lower_component_container;
@@ -51,7 +52,6 @@ mod remove_unused_properties;
 mod repeater_component;
 pub mod resolve_native_classes;
 pub mod resolving;
-mod shortcuts;
 mod unique_id;
 mod visible;
 mod windows;
@@ -122,7 +122,7 @@ pub async fn run_passes(
             &palette,
             diag,
         );
-        lower_states::lower_states(component, &doc.local_registry, diag);
+        lower_states::lower_states(component, diag);
         lower_text_input_interface::lower_text_input_interface(component);
         compile_paths::compile_paths(
             component,
@@ -203,7 +203,7 @@ pub async fn run_passes(
     unique_id::assign_unique_id(doc);
 
     doc.visit_all_used_components(|component| {
-        shortcuts::warn_duplicates(component, diag);
+        key_bindings::warn_duplicates(component, diag);
         lower_platform::lower_platform(component, type_loader);
 
         // Don't perform the empty rectangle removal when debug info is requested, because the resulting

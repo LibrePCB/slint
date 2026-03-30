@@ -11,8 +11,9 @@ use super::{
 };
 use crate::animations::Instant;
 use crate::animations::physics_simulation;
+use crate::input::InternalKeyEvent;
 use crate::input::{
-    FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, KeyEvent, MouseEvent,
+    FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, MouseEvent,
 };
 use crate::item_rendering::CachedRenderingData;
 use crate::layout::{LayoutInfo, Orientation};
@@ -36,6 +37,8 @@ use euclid::num::Zero;
 use i_slint_core_macros::*;
 #[allow(unused)]
 use num_traits::Float;
+mod data_ringbuffer;
+use data_ringbuffer::PositionTimeRingBuffer;
 
 /// Deceleration during the animation. It slows down the initial velocity of the simulation
 /// so that the simulation stops at some point if it didn't reach the limit
@@ -96,11 +99,14 @@ impl Item for Flickable {
                 let vpy = flick.viewport_y();
                 let p = ensure_in_bound(flick, LogicalPoint::from_lengths(vpx, vpy), &flick_rc);
 
-                if *x_out_of_bounds {
-                    (Flickable::FIELD_OFFSETS.viewport_x).apply_pin(flick).set(p.x_length());
+                let x = (Flickable::FIELD_OFFSETS.viewport_x).apply_pin(flick);
+                if *x_out_of_bounds && !x.has_binding() {
+                    x.set(p.x_length());
                 }
-                if *y_out_of_bounds {
-                    (Flickable::FIELD_OFFSETS.viewport_y).apply_pin(flick).set(p.y_length());
+
+                let y = (Flickable::FIELD_OFFSETS.viewport_y).apply_pin(flick);
+                if *y_out_of_bounds && !y.has_binding() {
+                    y.set(p.y_length());
                 }
             },
         );
@@ -167,7 +173,7 @@ impl Item for Flickable {
 
     fn capture_key_event(
         self: Pin<&Self>,
-        _: &KeyEvent,
+        _: &InternalKeyEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> KeyEventResult {
@@ -176,7 +182,7 @@ impl Item for Flickable {
 
     fn key_event(
         self: Pin<&Self>,
-        _: &KeyEvent,
+        _: &InternalKeyEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> KeyEventResult {
@@ -374,6 +380,10 @@ struct FlickableDataInner {
     /// We use two heurstics: First, a timeout after we received a scroll event, and second, if the mouse moves we
     /// stop filtering scroll event until the next scroll event.
     last_scroll_event: Option<(Instant, LogicalPoint)>,
+
+    /// Ringbuffer to store the last move events. From those data the velocity can be
+    /// calculated required for the animation after the release event
+    position_time_rb: PositionTimeRingBuffer<5>,
 }
 
 impl FlickableDataInner {
@@ -451,7 +461,9 @@ impl FlickableData {
         delta_x: Coord,
         delta_y: Coord,
     ) -> LogicalVector {
-        if window_adapter.window().0.modifiers.get().shift() && !cfg!(target_os = "macos") {
+        if window_adapter.window().0.context().0.modifiers.get().shift()
+            && !cfg!(target_os = "macos")
+        {
             // Shift invert coordinate for the purpose of scrolling.
             // But not on macOs because there the OS already take care of the change
             LogicalVector::new(delta_y, delta_x)
@@ -470,6 +482,7 @@ impl FlickableData {
         let mut inner = self.inner.borrow_mut();
         match event {
             MouseEvent::Pressed { position, button: PointerEventButton::Left, .. } => {
+                inner.position_time_rb = PositionTimeRingBuffer::default();
                 inner.pressed_pos = *position;
                 inner.pressed_time = Some(crate::animations::current_tick());
                 inner.pressed_viewport_pos = LogicalPoint::from_lengths(
@@ -545,9 +558,9 @@ impl FlickableData {
             MouseEvent::Pressed { .. } | MouseEvent::Released { .. } => {
                 InputEventFilterResult::ForwardAndIgnore
             }
-            MouseEvent::PinchGesture { .. }
-            | MouseEvent::RotationGesture { .. }
-            | MouseEvent::DoubleTapGesture { .. } => InputEventFilterResult::ForwardEvent,
+            MouseEvent::PinchGesture { .. } | MouseEvent::RotationGesture { .. } => {
+                InputEventFilterResult::ForwardEvent
+            }
             MouseEvent::DragMove(..) | MouseEvent::Drop(..) => {
                 InputEventFilterResult::ForwardAndIgnore
             }
@@ -598,6 +611,8 @@ impl FlickableData {
                         inner.pressed_pos = *position;
                     };
 
+                    inner.position_time_rb.push(crate::animations::current_tick(), *position);
+
                     let new_pos = inner.pressed_viewport_pos + (*position - inner.pressed_pos);
 
                     let x = (Flickable::FIELD_OFFSETS.viewport_x).apply_pin(flick);
@@ -645,9 +660,9 @@ impl FlickableData {
 
                 inner.process_wheel_event(flick, delta, *position, flick_rc)
             }
-            MouseEvent::PinchGesture { .. }
-            | MouseEvent::RotationGesture { .. }
-            | MouseEvent::DoubleTapGesture { .. } => InputEventResult::EventIgnored,
+            MouseEvent::PinchGesture { .. } | MouseEvent::RotationGesture { .. } => {
+                InputEventResult::EventIgnored
+            }
             MouseEvent::DragMove(..) | MouseEvent::Drop(..) => InputEventResult::EventIgnored,
         }
     }
@@ -655,13 +670,12 @@ impl FlickableData {
     fn mouse_released(
         inner: &mut FlickableDataInner,
         flick: Pin<&Flickable>,
-        event: &MouseEvent,
+        _event: &MouseEvent,
         flick_rc: &ItemRc,
     ) {
-        if let (Some(pressed_time), Some(pos)) = (inner.pressed_time, event.position()) {
-            let dist = (pos - inner.pressed_pos).cast::<f32>();
-
-            let millis = (crate::animations::current_tick() - pressed_time).as_millis();
+        if !inner.position_time_rb.empty() {
+            let (time, dist) = inner.position_time_rb.diff();
+            let millis = time.as_millis();
             if inner.capture_events
                 && dist.square_length() > (DISTANCE_THRESHOLD.get() * DISTANCE_THRESHOLD.get()) as _
                 && millis > 0
@@ -670,14 +684,16 @@ impl FlickableData {
                 let viewport_y = (Flickable::FIELD_OFFSETS.viewport_y).apply_pin(flick);
                 let vw = (Flickable::FIELD_OFFSETS.viewport_width).apply_pin(flick).get();
                 let vh = (Flickable::FIELD_OFFSETS.viewport_height).apply_pin(flick).get();
-                let limit_x = if dist.x < 0. { -vw } else { euclid::Length::new(Coord::default()) };
-                let limit_y = if dist.y < 0. { -vh } else { euclid::Length::new(Coord::default()) };
+                let limit_x =
+                    if dist.x < 0 as Coord { -vw } else { euclid::Length::new(Coord::default()) };
+                let limit_y =
+                    if dist.y < 0 as Coord { -vh } else { euclid::Length::new(Coord::default()) };
 
                 let limit =
                     ensure_in_bound(flick, LogicalPoint::from_lengths(limit_x, limit_y), flick_rc);
                 {
                     let simulation = physics_simulation::ConstantDecelerationParameters::new(
-                        dist.x / (millis as f32 / 1000.),
+                        dist.x as f32 / (millis as f32 / 1000.),
                         DECELERATION,
                     );
                     viewport_x.set_physic_animation_value(limit.x_length(), simulation);
@@ -685,13 +701,13 @@ impl FlickableData {
 
                 {
                     let animation_y = physics_simulation::ConstantDecelerationParameters::new(
-                        dist.y / (millis as f32 / 1000.),
+                        dist.y as f32 / (millis as f32 / 1000.),
                         DECELERATION,
                     );
                     viewport_y.set_physic_animation_value(limit.y_length(), animation_y);
                 }
 
-                if dist.x != 0. || dist.y != 0. {
+                if dist.x != 0 as Coord || dist.y != 0 as Coord {
                     (Flickable::FIELD_OFFSETS.flicked).apply_pin(flick).call(&());
                 }
             }

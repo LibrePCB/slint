@@ -108,7 +108,7 @@ pub fn rust_primitive_type(ty: &Type) -> Option<proc_macro2::TokenStream> {
             let i = ident(&e.name);
             if e.node.is_some() { Some(quote!(#i)) } else { Some(quote!(sp::#i)) }
         }
-        Type::KeyboardShortcutType => Some(quote!(sp::KeyboardShortcut)),
+        Type::Keys => Some(quote!(sp::Keys)),
         Type::Brush => Some(quote!(slint::Brush)),
         Type::LayoutCache => Some(quote!(
             sp::SharedVector<
@@ -1242,6 +1242,20 @@ fn generate_sub_component(
             }
         });
 
+    let flexbox_layout_item_info_for_repeated_fn =
+        component.flexbox_layout_item_info_for_repeated.as_ref().map(|expr| {
+            let expr = compile_expression(&expr.borrow(), &ctx);
+            quote! {
+                fn flexbox_layout_item_info_for_repeated(
+                    self: ::core::pin::Pin<&Self>,
+                ) -> sp::FlexboxLayoutItemInfo {
+                    #![allow(unused)]
+                    let _self = self;
+                    #expr
+                }
+            }
+        });
+
     // FIXME! this is only public because of the ComponentHandle::WeakInner. we should find another way
     let visibility = parent_ctx.is_none().then(|| quote!(pub));
 
@@ -1353,6 +1367,8 @@ fn generate_sub_component(
             }
 
             #grid_layout_input_for_repeated_fn
+
+            #flexbox_layout_item_info_for_repeated_fn
 
             fn subtree_range(self: ::core::pin::Pin<&Self>, dyn_index: u32) -> sp::IndexRange {
                 #![allow(unused)]
@@ -2129,7 +2145,7 @@ fn generate_repeated_component(
                             let _self = self.as_ref();
                             let mut count = 0usize;
                             #(#scan_steps)*
-                            sp::LayoutItemInfo { constraint: sp::LayoutInfo::default() }
+                            sp::LayoutItemInfo::default()
                         } else {
                             sp::LayoutItemInfo { constraint: self.as_ref().layout_info(o) }
                         }
@@ -2161,8 +2177,23 @@ fn generate_repeated_component(
                 }
             }
         });
+        let flexbox_layout_item_info_fn =
+            root_sc.flexbox_layout_item_info_for_repeated.as_ref().map(|_| {
+                quote! {
+                    fn flexbox_layout_item_info(
+                        self: ::core::pin::Pin<&Self>,
+                        o: sp::Orientation,
+                        child_index: sp::Option<usize>,
+                    ) -> sp::FlexboxLayoutItemInfo {
+                        let mut info = self.as_ref().flexbox_layout_item_info_for_repeated();
+                        info.constraint = self.layout_item_info(o, child_index).constraint;
+                        info
+                    }
+                }
+            });
         quote! {
             #layout_item_info_fn
+            #flexbox_layout_item_info_fn
             #grid_layout_input_data_fn
         }
     };
@@ -2532,17 +2563,17 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             let s = s.as_str();
             quote!(sp::SharedString::from(#s))
         }
-        Expression::KeyboardShortcutLiteral(shortcut) => {
-                let key = &*shortcut.key;
-                let alt = shortcut.modifiers.alt;
-                let control = shortcut.modifiers.control;
-                let shift = shortcut.modifiers.shift;
-                let meta = shortcut.modifiers.meta;
-                let ignore_shift = shortcut.ignore_shift;
-                let ignore_alt = shortcut.ignore_alt;
+        Expression::KeysLiteral(keys) => {
+                let key = &*keys.key;
+                let alt = keys.modifiers.alt;
+                let control = keys.modifiers.control;
+                let shift = keys.modifiers.shift;
+                let meta = keys.modifiers.meta;
+                let ignore_shift = keys.ignore_shift;
+                let ignore_alt = keys.ignore_alt;
 
                 quote!(
-                    sp::make_keyboard_shortcut(
+                    sp::make_keys(
                         #key.into(),
                         sp::KeyboardModifiers {
                             alt: #alt,
@@ -2654,9 +2685,6 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                         quote!(#c => sp::SharedString::from(#v))
                     });
                     quote!(match #f { #(#cases,)*  _ => sp::SharedString::default() })
-                }
-                (Type::KeyboardShortcutType, Type::String) => {
-                    quote!(sp::ToSharedString::to_shared_string(&#f))
                 }
                 (_, Type::Void) => {
                     quote!({#f;})
@@ -3050,7 +3078,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             ctx,
         ),
 
-        Expression::WithFlexBoxLayoutItemInfo {
+        Expression::WithFlexboxLayoutItemInfo {
             cells_h_variable,
             cells_v_variable,
             repeater_indices_var_name,
@@ -3152,15 +3180,6 @@ fn compile_builtin_function_call(
                 )
             } else {
                 panic!("internal error: invalid args to SetFocusItem {arguments:?}")
-            }
-        }
-        BuiltinFunction::KeyboardShortcutMatches => {
-            if let [shortcut, event] = arguments {
-                let shortcut = compile_expression(shortcut, ctx);
-                let event = compile_expression(event, ctx);
-                quote!(#shortcut.matches(&#event))
-            } else {
-                panic!("internal error: invalid args to KeyboardShortcut::matches {arguments:?}")
             }
         }
         BuiltinFunction::ClearFocusItem => {
@@ -3555,6 +3574,7 @@ fn compile_builtin_function_call(
         }
         BuiltinFunction::StringToLowercase => quote!(sp::SharedString::from(#(#a)*.to_lowercase())),
         BuiltinFunction::StringToUppercase => quote!(sp::SharedString::from(#(#a)*.to_uppercase())),
+        BuiltinFunction::KeysToString => quote!(sp::ToSharedString::to_shared_string(&#(#a)*)),
         BuiltinFunction::ColorRgbaStruct => quote!( #(#a)*.to_argb_u8()),
         BuiltinFunction::ColorHsvaStruct => quote!( #(#a)*.to_hsva()),
         BuiltinFunction::ColorOklchStruct => quote!( #(#a)*.to_oklch()),
@@ -3769,6 +3789,11 @@ fn compile_builtin_function_call(
             } else {
                 panic!("internal error: invalid args to RestartTimer {arguments:?}")
             }
+        }
+        BuiltinFunction::OpenUrl => {
+            let url = a.next().unwrap();
+            let window_adapter_tokens = access_window_adapter_field(ctx);
+            quote!(sp::open_url(&#url, #window_adapter_tokens.window()))
         }
         BuiltinFunction::ParseMarkdown => {
             let format_string = a.next().unwrap();
@@ -4228,10 +4253,10 @@ fn generate_with_flexbox_layout_item_info(
                 let loop_code = quote!(for i in 0.._self.#repeater_id.len() {
                     if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
                         items_vec_h.push(
-                            sub_comp.as_pin_ref().layout_item_info(sp::Orientation::Horizontal, None),
+                            sub_comp.as_pin_ref().flexbox_layout_item_info(sp::Orientation::Horizontal, None),
                         );
                         items_vec_v.push(
-                            sub_comp.as_pin_ref().layout_item_info(sp::Orientation::Vertical, None),
+                            sub_comp.as_pin_ref().flexbox_layout_item_info(sp::Orientation::Vertical, None),
                         );
                     }
                 });
@@ -4301,9 +4326,12 @@ fn generate_resources(doc: &Document) -> Vec<TokenStream> {
                 &crate::embedded_resources::EmbeddedResourcesKind::ListOnly => {
                     quote!()
                 },
-                crate::embedded_resources::EmbeddedResourcesKind::RawData => {
+                crate::embedded_resources::EmbeddedResourcesKind::FileData => {
                     let data = embedded_file_tokens(path);
                     quote!(static #symbol: &'static [u8] = #data;)
+                }
+                crate::embedded_resources::EmbeddedResourcesKind::DataUriPayload(bytes, _) => {
+                    quote!(static #symbol: &'static [u8] = &[#(#bytes),*];)
                 }
                 #[cfg(feature = "software-renderer")]
                 crate::embedded_resources::EmbeddedResourcesKind::TextureData(crate::embedded_resources::Texture {
