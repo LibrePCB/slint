@@ -9,6 +9,7 @@
 #include "private/slint_window.h"
 #include "private/slint_models.h"
 #include "private/slint_item_tree.h"
+#include "private/slint_keys.h"
 
 #include <vector>
 #include <chrono>
@@ -201,22 +202,29 @@ inline SharedVector<float> solve_flexbox_layout(const cbindgen_private::FlexboxL
     SharedVector<float> result;
     cbindgen_private::Slice<uint32_t> ri =
             make_slice(reinterpret_cast<uint32_t *>(repeater_indices.ptr), repeater_indices.len);
-    cbindgen_private::slint_solve_flexbox_layout(&data, ri, &result);
+    cbindgen_private::slint_solve_flexbox_layout(&data, ri, &result, nullptr, nullptr);
     return result;
 }
 
-inline cbindgen_private::LayoutInfo
-flexbox_layout_info(cbindgen_private::Slice<cbindgen_private::FlexboxLayoutItemInfo> cells_h,
-                    cbindgen_private::Slice<cbindgen_private::FlexboxLayoutItemInfo> cells_v,
-                    float spacing_h, float spacing_v, const cbindgen_private::Padding &padding_h,
-                    const cbindgen_private::Padding &padding_v,
-                    cbindgen_private::Orientation orientation,
-                    cbindgen_private::FlexDirection direction, float constraint_size,
-                    cbindgen_private::FlexWrap flex_wrap)
+inline cbindgen_private::LayoutInfo flexbox_layout_info_main_axis(
+        cbindgen_private::Slice<cbindgen_private::FlexboxLayoutItemInfo> cells, float spacing,
+        const cbindgen_private::Padding &padding, cbindgen_private::FlexboxLayoutWrap flex_wrap)
 {
-    return cbindgen_private::slint_flexbox_layout_info(cells_h, cells_v, spacing_h, spacing_v,
-                                                       &padding_h, &padding_v, orientation,
-                                                       direction, constraint_size, flex_wrap);
+    return cbindgen_private::slint_flexbox_layout_info_main_axis(cells, spacing, &padding,
+                                                                 flex_wrap);
+}
+
+inline cbindgen_private::LayoutInfo flexbox_layout_info_cross_axis(
+        cbindgen_private::Slice<cbindgen_private::FlexboxLayoutItemInfo> cells_h,
+        cbindgen_private::Slice<cbindgen_private::FlexboxLayoutItemInfo> cells_v, float spacing_h,
+        float spacing_v, const cbindgen_private::Padding &padding_h,
+        const cbindgen_private::Padding &padding_v,
+        cbindgen_private::FlexboxLayoutDirection direction,
+        cbindgen_private::FlexboxLayoutWrap flex_wrap, float constraint_size)
+{
+    return cbindgen_private::slint_flexbox_layout_info_cross_axis(
+            cells_h, cells_v, spacing_h, spacing_v, &padding_h, &padding_v, direction, flex_wrap,
+            constraint_size);
 }
 
 /// Access the layout cache of an item within a repeater (standard cache)
@@ -243,11 +251,12 @@ inline T layout_cache_grid_repeater_access(const SharedVector<T> &cache, size_t 
 template<typename VT, typename ItemType>
 inline cbindgen_private::LayoutInfo
 item_layout_info(VT *itemvtable, ItemType *item_ptr, cbindgen_private::Orientation orientation,
-                 WindowAdapterRc *window_adapter, const ItemTreeRc &component_rc,
-                 uint32_t item_index)
+                 float cross_axis_constraint, WindowAdapterRc *window_adapter,
+                 const ItemTreeRc &component_rc, uint32_t item_index)
 {
     cbindgen_private::ItemRc item_rc { component_rc, item_index };
-    return itemvtable->layout_info({ itemvtable, item_ptr }, orientation, window_adapter, &item_rc);
+    return itemvtable->layout_info({ itemvtable, item_ptr }, orientation, cross_axis_constraint,
+                                   window_adapter, &item_rc);
 }
 } // namespace private_api
 
@@ -324,9 +333,9 @@ inline StyledText string_to_styled_text(const SharedString &text)
     return result;
 }
 
-inline void open_url(const SharedString &url, const WindowAdapterRc &window_adapter)
+inline bool open_url(const SharedString &url, const WindowAdapterRc &window_adapter)
 {
-    cbindgen_private::slint_open_url(&url, &window_adapter.handle());
+    return cbindgen_private::slint_open_url(&url, &window_adapter.handle());
 }
 
 inline SharedString translate_from_bundle(std::span<const char8_t *const> strs,
@@ -354,13 +363,6 @@ translate_from_bundle_with_plural(std::span<const char8_t *const> strs,
                        plural_rules.size());
     cbindgen_private::slint_translate_from_bundle_with_plural(
             strs_slice, indices_slice, plural_rules_slice, arguments, n, &result);
-    return result;
-}
-
-inline SharedString keys_to_string(const cbindgen_private::Keys &keys)
-{
-    SharedString result;
-    cbindgen_private::slint_keys_to_string(&keys, &result);
     return result;
 }
 

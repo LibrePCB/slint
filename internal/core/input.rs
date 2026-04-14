@@ -27,25 +27,47 @@ use core::time::Duration;
 /// TODO: merge with platform::WindowEvent
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
 pub enum MouseEvent {
     /// The mouse or finger was pressed
-    /// `position` is the position of the mouse when the event happens.
-    /// `button` describes the button that is pressed when the event happens.
-    /// `click_count` represents the current number of clicks.
-    Pressed { position: LogicalPoint, button: PointerEventButton, click_count: u8, is_touch: bool },
+    Pressed {
+        /// The position of the pointer when the event happened.
+        position: LogicalPoint,
+        /// The button that was pressed.
+        button: PointerEventButton,
+        /// The current click count reported for this press.
+        click_count: u8,
+        /// Whether the event originated from touch input.
+        is_touch: bool,
+    },
     /// The mouse or finger was released
-    /// `position` is the position of the mouse when the event happens.
-    /// `button` describes the button that is pressed when the event happens.
-    /// `click_count` represents the current number of clicks.
-    Released { position: LogicalPoint, button: PointerEventButton, click_count: u8, is_touch: bool },
+    Released {
+        /// The position of the pointer when the event happened.
+        position: LogicalPoint,
+        /// The button that was released.
+        button: PointerEventButton,
+        /// The current click count reported for this release.
+        click_count: u8,
+        /// Whether the event originated from touch input.
+        is_touch: bool,
+    },
     /// The position of the pointer has changed
-    Moved { position: LogicalPoint, is_touch: bool },
+    Moved {
+        /// The new position of the pointer.
+        position: LogicalPoint,
+        /// Whether the event originated from touch input.
+        is_touch: bool,
+    },
     /// Wheel was operated.
-    /// `pos` is the position of the mouse when the event happens.
-    /// `delta_x` is the amount of pixels to scroll in horizontal direction,
-    /// `delta_y` is the amount of pixels to scroll in vertical direction.
-    Wheel { position: LogicalPoint, delta_x: Coord, delta_y: Coord },
+    Wheel {
+        /// The position of the pointer when the event happened.
+        position: LogicalPoint,
+        /// The horizontal scroll delta in logical pixels.
+        delta_x: Coord,
+        /// The vertical scroll delta in logical pixels.
+        delta_y: Coord,
+        /// The gesture phase reported for the wheel event.
+        phase: TouchPhase,
+    },
     /// The mouse is being dragged over this item.
     /// [`InputEventResult::EventIgnored`] means that the item does not handle the drag operation
     /// and [`InputEventResult::EventAccepted`] means that the item can accept it.
@@ -53,13 +75,23 @@ pub enum MouseEvent {
     /// The mouse is released while dragging over this item.
     Drop(DropEvent),
     /// A platform-recognized pinch gesture (macOS/iOS trackpad, Qt).
-    /// `delta` is the incremental scale change; ScaleRotateGestureHandler accumulates it.
-    PinchGesture { position: LogicalPoint, delta: f32, phase: TouchPhase },
+    PinchGesture {
+        /// The focal position of the gesture.
+        position: LogicalPoint,
+        /// The incremental scale delta for this gesture update.
+        delta: f32,
+        /// The gesture phase reported by the platform.
+        phase: TouchPhase,
+    },
     /// A platform-recognized rotation gesture (macOS/iOS trackpad, Qt).
-    /// `delta` is the incremental rotation in degrees using the Slint convention:
-    /// positive = clockwise. Backends must convert from their platform convention
-    /// before constructing this event.
-    RotationGesture { position: LogicalPoint, delta: f32, phase: TouchPhase },
+    RotationGesture {
+        /// The focal position of the gesture.
+        position: LogicalPoint,
+        /// The incremental rotation in degrees, where positive means clockwise.
+        delta: f32,
+        /// The gesture phase reported by the platform.
+        phase: TouchPhase,
+    },
     /// The mouse exited the item or component
     Exit,
 }
@@ -151,7 +183,9 @@ impl MouseEvent {
     }
 }
 
-/// Phase of a touch or gesture event.
+/// Phase of a touch, gesture event or wheel event.
+/// A touchpad is recognized as wheel event and therefore
+/// we need to find out when the touch event starts and ends
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TouchPhase {
@@ -161,7 +195,7 @@ pub enum TouchPhase {
     Moved,
     /// The gesture completed normally.
     Ended,
-    /// The gesture was cancelled (e.g., interrupted by the system).
+    /// The gesture was cancelled (e.g., interrupted by the system) or the mouse wheel was used
     Cancelled,
 }
 
@@ -208,6 +242,7 @@ pub enum InputEventFilterResult {
     /// This is what happens when the flickable wants to delay the event.
     /// This should only be used for Press event, and the event will be sent after the delay, or
     /// if a release event is seen before that delay
+    /// If any other component is handling the event it will be not handled by the component returned this result
     //(Can't use core::time::Duration because it is not repr(c))
     DelayForwarding(u64),
 }
@@ -216,7 +251,7 @@ pub enum InputEventFilterResult {
 #[allow(missing_docs, non_upper_case_globals)]
 pub mod key_codes {
     macro_rules! declare_consts_for_special_keys {
-       ($($char:literal # $name:ident # $($shifted:expr)? $(=> $($_qt:ident)|* # $($_winit:ident $(($_pos:ident))?)|*    # $($_xkb:ident)|* )? ;)*) => {
+       ($($char:literal # $name:ident # $($shifted:ident)? # $($_muda:ident)? $(=> $($_qt:ident)|* # $($_winit:ident $(($_pos:ident))?)|*    # $($_xkb:ident)|* )? ;)*) => {
             $(pub const $name : char = $char;)*
 
             #[allow(missing_docs)]
@@ -297,22 +332,6 @@ impl InternalKeyboardModifierState {
             debug_assert_eq!(key_code.len_utf8(), text.len());
         }
 
-        // Special cases:
-        #[cfg(target_os = "windows")]
-        {
-            if self.altgr {
-                // Windows sends Ctrl followed by AltGr on AltGr. Disable the Ctrl again!
-                self.left_control = false;
-                self.right_control = false;
-            } else if self.control() && self.alt() {
-                // Windows treats Ctrl-Alt as AltGr
-                self.left_control = false;
-                self.right_control = false;
-                self.left_alt = false;
-                self.right_alt = false;
-            }
-        }
-
         Some(self)
     }
 
@@ -328,6 +347,70 @@ impl InternalKeyboardModifierState {
     pub fn control(&self) -> bool {
         self.right_control || self.left_control
     }
+
+    pub fn modifiers_for(&self, _event: &InternalKeyEvent) -> KeyboardModifiers {
+        #[allow(unused_mut)]
+        let mut alt = self.alt();
+        #[allow(unused_mut)]
+        let mut control = self.control();
+
+        // Windows treats Ctrl+Alt as implying AltGr, but not vice-versa
+        // Unfortunately, our different backends produce different key combinations here.
+        //
+        // ## Qt
+        // Qt always sends Ctrl + Alt instead of AltGr, and does not tell us whether this
+        // was interpreted as AltGr or not. So with Qt we have no way of telling whether
+        // AltGr is pressed, and we have to assume that it is pressed whenever Ctrl + Alt is pressed.
+        // In that case the `text_without_modifiers` is also not set.
+        //
+        // ## Winit
+        // Winit sends the actual Ctrl/Alt/AltGr keypresses correctly.
+        // With winit we can detect whether ctrl+alt actually caused a AltGr conversion or not,
+        // by checking whether the text_without_modifiers is different from the event text.
+        //
+        // ## Wasm
+        // Winit on the web for some reasons sends first a Ctrl and then AltGr event when only AltGr
+        // is pressed.
+        // So there we need to get rid of the additional Ctrl event whenever AltGr is pressed.
+        #[cfg(target_os = "windows")]
+        {
+            // Non-web windows (Usually winit or Qt)
+            if !self.altgr && self.control() && self.alt() {
+                // AltGr is not pressed, but Ctrl+Alt is pressed.
+                // Try to detect if an AltGr conversion occured.
+                // If so, disable Ctrl and Alt
+                //
+                // On platforms that don't provide text_without_modifiers, fall back to a simple
+                // heuristic that assumes A-Z & 0-9 are not produced with AltGr, but all other keys are.
+                let implies_altgr = if _event.text_without_modifiers.is_empty() {
+                    _event.key_event.text.chars().any(|c| !c.is_ascii_alphanumeric())
+                } else {
+                    _event.text_without_modifiers.to_lowercase()
+                        != _event.key_event.text.to_lowercase()
+                };
+                if implies_altgr {
+                    alt = false;
+                    control = false;
+                }
+            }
+        }
+        #[cfg(target_family = "wasm")]
+        if crate::detect_operating_system() == OperatingSystemType::Windows {
+            // Non-native windows (e.g. Winit on the web)
+            // This currently injects additional Ctrl events, so remove those if AltGr is
+            // pressed.
+            let is_altgr = self.altgr
+                || (self.control()
+                    && self.alt()
+                    && _event.key_event.text.chars().any(|c| !c.is_ascii_alphanumeric()));
+            if is_altgr {
+                alt = false;
+                control = false;
+            }
+        }
+
+        KeyboardModifiers { alt, control, meta: self.meta(), shift: self.shift() }
+    }
 }
 
 impl From<InternalKeyboardModifierState> for KeyboardModifiers {
@@ -341,21 +424,16 @@ impl From<InternalKeyboardModifierState> for KeyboardModifiers {
     }
 }
 
-/// A `Keys` is created by the `@keys(...)` macro and
-/// defines which key event(s) activate a KeyBinding.
+#[i_slint_core_macros::slint_doc]
+/// The `Keys` type is the Rust representation of Slint's `keys` primitive type.
+///
+/// It can be created with the `@keys` macro in Slint and defines which key event(s) activate a KeyBinding.
+///
+/// See also the Slint documentation on [Key Bindings](slint:KeyBindingOverview).
 #[derive(Clone, Eq, PartialEq, Default)]
 #[repr(C)]
 pub struct Keys {
-    /// The `key` used to trigger the shortcut
-    ///
-    /// Note: This is currently converted to lowercase when the shortcut is created!
-    key: SharedString,
-    /// `KeyboardModifier`s that need to be pressed for the shortcut to fire
-    modifiers: KeyboardModifiers,
-    /// Whether to ignore shift state when matching the shortcut
-    ignore_shift: bool,
-    /// Whether to ignore alt state when matching the shortcut
-    ignore_alt: bool,
+    inner: KeysInner,
 }
 
 /// Re-exported in private_unstable_api to create a Keys struct.
@@ -365,7 +443,9 @@ pub fn make_keys(
     ignore_shift: bool,
     ignore_alt: bool,
 ) -> Keys {
-    Keys { key: key.to_lowercase().into(), modifiers, ignore_shift, ignore_alt }
+    Keys {
+        inner: KeysInner { key: key.to_lowercase().into(), modifiers, ignore_shift, ignore_alt },
+    }
 }
 
 #[cfg(feature = "ffi")]
@@ -405,20 +485,45 @@ pub(crate) mod ffi {
     }
 }
 
+/// Internal representation of the `Keys` type.
+/// This is semver exempt and is only used to set up the native menu in the backends.
+#[derive(PartialEq, Eq, Clone, Default)]
+#[repr(C)]
+pub struct KeysInner {
+    /// The `key` used to trigger the shortcut
+    ///
+    /// Note: This is currently converted to lowercase when the shortcut is created!
+    pub key: SharedString,
+    /// `KeyboardModifier`s that need to be pressed for the shortcut to fire
+    pub modifiers: KeyboardModifiers,
+    /// Whether to ignore shift state when matching the shortcut
+    pub ignore_shift: bool,
+    /// Whether to ignore alt state when matching the shortcut
+    pub ignore_alt: bool,
+}
+
+impl KeysInner {
+    /// Private access to the KeysInner for a given Keys value.
+    pub fn from_pub(keys: &Keys) -> &Self {
+        &keys.inner
+    }
+}
+
 impl Keys {
     /// Check whether a `Keys` can be triggered by the given `KeyEvent`
     pub(crate) fn matches(&self, key_event: &KeyEvent) -> bool {
+        let inner = &self.inner;
         // An empty Keys is never triggered, even if the modifiers match.
-        if self.key.is_empty() {
+        if inner.key.is_empty() {
             return false;
         }
 
         // TODO: Should this check the event_type and only match on KeyReleased?
-        let mut expected_modifiers = self.modifiers;
-        if self.ignore_shift {
+        let mut expected_modifiers = inner.modifiers;
+        if inner.ignore_shift {
             expected_modifiers.shift = key_event.modifiers.shift;
         }
-        if self.ignore_alt {
+        if inner.ignore_alt {
             expected_modifiers.alt = key_event.modifiers.alt;
         }
         // Note: The shortcut's key is already in lowercase and NFC-normalized
@@ -430,16 +535,16 @@ impl Keys {
         // if caps lock is active, even if shift is not pressed.
         let event_text = key_event.text.chars().flat_map(|character| character.to_lowercase());
 
-        event_text.eq(self.key.chars()) && key_event.modifiers == expected_modifiers
+        event_text.eq(inner.key.chars()) && key_event.modifiers == expected_modifiers
     }
 
     fn format_key_for_display(&self) -> crate::SharedString {
-        let key_str = self.key.as_str();
+        let key_str = self.inner.key.as_str();
         let first_char = key_str.chars().next();
 
         if let Some(first_char) = first_char {
             macro_rules! check_special_key {
-                ($($char:literal # $name:ident # $($shifted:expr)? $(=> $($qt:ident)|* # $($winit:ident $(($_pos:ident))?)|* # $($xkb:ident)|*)? ;)*) => {
+                ($($char:literal # $name:ident # $($shifted:ident)? # $($_muda:ident)? $(=> $($qt:ident)|* # $($winit:ident $(($_pos:ident))?)|* # $($xkb:ident)|*)? ;)*) => {
                     match first_char {
                     $($(
                         // Use $qt as a marker - if it exists, generate the check
@@ -464,9 +569,9 @@ impl Keys {
 }
 
 impl Display for Keys {
-    /// Converts the keyboard shortcut to a string that looks native on the current platform.
+    /// Converts the [`Keys`] to a string that looks native on the current platform.
     ///
-    /// For example, the shortcut created with @keys(Meta + Control + A)
+    /// For example, the shortcut created with `@keys(Meta + Control + A)`
     /// will be converted like this:
     /// - **macOS**: `⌃⌘A`
     /// - **Windows**: `Win+Ctrl+A`
@@ -480,7 +585,8 @@ impl Display for Keys {
     // - Windows: <https://learn.microsoft.com/en-us/windows/apps/design/input/keyboard-accelerators>
     // - Linux: <https://developer.gnome.org/hig/guidelines/keyboard.html>
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if self.key.is_empty() {
+        let inner = &self.inner;
+        if inner.key.is_empty() {
             return Ok(());
         }
 
@@ -491,16 +597,16 @@ impl Display for Keys {
             // List modifier keys in the correct order.
             // If you use more than one modifier key in a custom shortcut, always list them in this order:
             //  Control, Option, Shift, Command
-            if self.modifiers.meta {
+            if inner.modifiers.meta {
                 f.write_str("⌃")?;
             }
-            if !self.ignore_alt && self.modifiers.alt {
+            if !inner.ignore_alt && inner.modifiers.alt {
                 f.write_str("⌥")?;
             }
-            if !self.ignore_shift && self.modifiers.shift {
+            if !inner.ignore_shift && inner.modifiers.shift {
                 f.write_str("⇧")?;
             }
-            if self.modifiers.control {
+            if inner.modifiers.control {
                 f.write_str("⌘")?;
             }
         } else {
@@ -515,19 +621,19 @@ impl Display for Keys {
                     ("Ctrl", "Alt", "Shift", "Super")
                 };
 
-            if self.modifiers.meta {
+            if inner.modifiers.meta {
                 f.write_str(meta_str)?;
                 f.write_str(separator)?;
             }
-            if self.modifiers.control {
+            if inner.modifiers.control {
                 f.write_str(ctrl_str)?;
                 f.write_str(separator)?;
             }
-            if !self.ignore_alt && self.modifiers.alt {
+            if !inner.ignore_alt && inner.modifiers.alt {
                 f.write_str(alt_str)?;
                 f.write_str(separator)?;
             }
-            if !self.ignore_shift && self.modifiers.shift {
+            if !inner.ignore_shift && inner.modifiers.shift {
                 f.write_str(shift_str)?;
                 f.write_str(separator)?;
             }
@@ -539,23 +645,24 @@ impl Display for Keys {
 impl core::fmt::Debug for Keys {
     /// Formats the keyboard shortcut so that the output would be accepted by the @keys macro in Slint.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let inner = &self.inner;
         // Make sure to keep this in sync with the implemenation in compiler/langtype.rs
-        if self.key.is_empty() {
+        if inner.key.is_empty() {
             write!(f, "")
         } else {
-            let alt = self
+            let alt = inner
                 .ignore_alt
                 .then_some("Alt?+")
-                .or(self.modifiers.alt.then_some("Alt+"))
+                .or(inner.modifiers.alt.then_some("Alt+"))
                 .unwrap_or_default();
-            let ctrl = if self.modifiers.control { "Control+" } else { "" };
-            let meta = if self.modifiers.meta { "Meta+" } else { "" };
-            let shift = self
+            let ctrl = if inner.modifiers.control { "Control+" } else { "" };
+            let meta = if inner.modifiers.meta { "Meta+" } else { "" };
+            let shift = inner
                 .ignore_shift
                 .then_some("Shift?+")
-                .or(self.modifiers.shift.then_some("Shift+"))
+                .or(inner.modifiers.shift.then_some("Shift+"))
                 .unwrap_or_default();
-            let keycode: SharedString = self
+            let keycode: SharedString = inner
                 .key
                 .chars()
                 .flat_map(|character| {
@@ -596,6 +703,13 @@ pub struct InternalKeyEvent {
     pub key_event: KeyEvent,
     /// Indicates whether the key was pressed or released
     pub event_type: KeyEventType,
+    /// The key without any modifiers held
+    /// Important on Windows, to distinguish between key presses when Ctrl+Alt was pressed
+    /// vs. AltGr.
+    /// This is optional, and we will fall back to a heuristic for Ctrl+Alt on Windows if this
+    /// isn't provided.
+    #[cfg(target_os = "windows")]
+    pub text_without_modifiers: SharedString,
     /// If the event type is KeyEventType::UpdateComposition or KeyEventType::CommitComposition,
     /// then this field specifies what part of the current text to replace.
     /// Relative to the offset of the pre-edit text within the text input element's text.
@@ -1286,7 +1400,7 @@ impl TextCursorBlinker {
         // Re-start timer, in case.
         Self::start(&instance, cycle_duration);
         prop.set_binding(move || {
-            TextCursorBlinker::FIELD_OFFSETS.cursor_visible.apply_pin(instance.as_ref()).get()
+            TextCursorBlinker::FIELD_OFFSETS.cursor_visible().apply_pin(instance.as_ref()).get()
         });
     }
 
@@ -1301,7 +1415,7 @@ impl TextCursorBlinker {
                 move || {
                     if let Some(blinker) = weak_blinker.upgrade() {
                         let visible = TextCursorBlinker::FIELD_OFFSETS
-                            .cursor_visible
+                            .cursor_visible()
                             .apply_pin(blinker.as_ref())
                             .get();
                         blinker.cursor_visible.set(!visible);

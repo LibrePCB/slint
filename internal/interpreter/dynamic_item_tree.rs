@@ -234,7 +234,7 @@ impl RepeatedItemTree for ErasedItemTreeBox {
         let flex_align_self = eval::load_property(instance_ref, root_element, "flex-align-self")
             .ok()
             .and_then(|v| v.try_into().ok())
-            .unwrap_or(i_slint_core::items::FlexAlignSelf::Auto);
+            .unwrap_or(i_slint_core::items::FlexboxLayoutAlignSelf::Auto);
         let flex_order = load_f32("flex-order") as i32;
 
         i_slint_core::layout::FlexboxLayoutItemInfo {
@@ -913,10 +913,7 @@ pub async fn load(
     mut compiler_config: CompilerConfiguration,
 ) -> CompilationResult {
     // If the native style should be Qt, resolve it here as we know that we have it
-    let is_native = match &compiler_config.style {
-        Some(s) => s == "native",
-        None => std::env::var("SLINT_STYLE").map_or(true, |s| s == "native"),
-    };
+    let is_native = compiler_config.style.as_deref() == Some("native");
     if is_native {
         // On wasm, look at the browser user agent
         #[cfg(target_arch = "wasm32")]
@@ -1678,6 +1675,29 @@ pub fn instantiate(
         unsafe {
             let item = Pin::new_unchecked(&*instance_ref.as_ptr().add(p.offset));
             p.prop.set(item, eval::default_value_for_type(&decl.property_type), None).unwrap();
+        }
+    }
+
+    #[cfg(slint_debug_property)]
+    {
+        let component_id = description.original.id.as_str();
+
+        // Set debug names on custom (root element) properties
+        for (prop_name, prop_info) in &description.custom_properties {
+            let name = format!("{}.{}", component_id, prop_name);
+            unsafe {
+                let item = Pin::new_unchecked(&*instance_ref.as_ptr().add(prop_info.offset));
+                prop_info.prop.set_debug_name(item, name);
+            }
+        }
+
+        // Set debug names on built-in item properties
+        for (item_name, item_within_component) in &description.items {
+            let item = unsafe { item_within_component.item_from_item_tree(instance_ref.as_ptr()) };
+            for (prop_name, prop_rtti) in &item_within_component.rtti.properties {
+                let name = format!("{}::{}.{}", component_id, item_name, prop_name);
+                prop_rtti.set_debug_name(item, name);
+            }
         }
     }
 

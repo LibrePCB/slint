@@ -133,7 +133,10 @@ fn rust_property_type(ty: &Type) -> Option<proc_macro2::TokenStream> {
 }
 
 fn primitive_property_value(ty: &Type, property_accessor: MemberAccess) -> TokenStream {
-    let value = property_accessor.get_property();
+    primitive_value_from_property_value(ty, property_accessor.get_property())
+}
+
+fn primitive_value_from_property_value(ty: &Type, value: TokenStream) -> TokenStream {
     match ty {
         Type::LogicalLength => quote!(#value.get()),
         _ => value,
@@ -383,18 +386,21 @@ fn generate_public_component(
             }
         }
 
-        impl slint::ComponentHandle for #public_component_id {
+        impl slint::StrongHandle for #public_component_id {
             type WeakInner = sp::VWeak<sp::ItemTreeVTable, #inner_component_id>;
+
+            fn upgrade_from_weak_inner(inner: &Self::WeakInner) -> sp::Option<Self> {
+                sp::Some(Self(inner.upgrade()?))
+            }
+        }
+
+        impl slint::ComponentHandle for #public_component_id {
             fn as_weak(&self) -> slint::Weak<Self> {
                 slint::Weak::new(sp::VRc::downgrade(&self.0))
             }
 
             fn clone_strong(&self) -> Self {
                 Self(self.0.clone())
-            }
-
-            fn upgrade_from_weak_inner(inner: &Self::WeakInner) -> sp::Option<Self> {
-                sp::Some(Self(inner.upgrade()?))
             }
 
             fn run(&self) -> ::core::result::Result<(), slint::PlatformError> {
@@ -968,21 +974,21 @@ fn generate_sub_component(
                 });
             });
             let ensure_updated = if let Some(listview) = &repeated.listview {
-                let vp_y = access_local_member(&listview.viewport_y, &ctx);
-                let vp_h = access_local_member(&listview.viewport_height, &ctx);
-                let lv_h = access_local_member(&listview.listview_height, &ctx);
-                let vp_w = access_local_member(&listview.viewport_width, &ctx);
-                let lv_w = access_local_member(&listview.listview_width, &ctx);
+                let vp_y = access_member(&listview.viewport_y, &ctx).unwrap();
+                let vp_h = access_member(&listview.viewport_height, &ctx).unwrap();
+                let lv_h = access_member(&listview.listview_height, &ctx).unwrap();
+                let vp_w = access_member(&listview.viewport_width, &ctx).unwrap();
+                let lv_w = access_member(&listview.listview_width, &ctx).unwrap();
 
                 quote! {
-                    #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated_listview(
+                    #inner_component_id::FIELD_OFFSETS.#repeater_id().apply_pin(_self).ensure_updated_listview(
                         || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone()).unwrap().into() },
                         #vp_w, #vp_h, #vp_y, #lv_w.get(), #lv_h
                     );
                 }
             } else {
                 quote! {
-                    #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated(
+                    #inner_component_id::FIELD_OFFSETS.#repeater_id().apply_pin(_self).ensure_updated(
                         || #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone()).unwrap().into()
                     );
                 }
@@ -1087,7 +1093,7 @@ fn generate_sub_component(
             quote!(tree_index_of_first_child + #local_index_of_first_child - 1)
         };
 
-        let sub_compo_field = access_component_field_offset(&format_ident!("Self"), &field_name);
+        let sub_compo_field = access_component_field_offset(&inner_component_id, &field_name);
 
         init.push(quote!(#sub_component_id::init(
             sp::VRcMapped::map(self_rc.clone(), |x| #sub_compo_field.apply_pin(x)),
@@ -1171,12 +1177,24 @@ fn generate_sub_component(
                 let mut access = quote!();
                 let mut ty = ctx.property_ty(prop2);
                 for f in fields {
-                    let Type::Struct (s) = &ty else { panic!("Field of two way binding on a non-struct type") };
+                    let Type::Struct(s) = &ty else {
+                        panic!("Field of two way binding on a non-struct type")
+                    };
                     let a = struct_field_access(s, f);
                     access.extend(quote!(.#a));
                     ty = s.fields.get(f).unwrap();
                 }
-                quote!(sp::Property::link_two_way_with_map(#p2, #p1, |s| s #access .clone(), |s, v| s #access = v.clone()))
+                let to_property_value =
+                    set_primitive_property_value(ty, quote!(s #access .clone()));
+                let to_struct_value = primitive_value_from_property_value(ty, quote!((*v).clone()));
+                quote!(
+                    sp::Property::link_two_way_with_map(
+                        #p2,
+                        #p1,
+                        |s| #to_property_value,
+                        |s, v| s #access = #to_struct_value,
+                    )
+                )
             }
         });
         init.push(quote!(#r;))
@@ -1605,15 +1623,28 @@ fn generate_global(
         let aliases = global.aliases.iter().map(|name| ident(name));
         let getters = generate_global_getters(global, root);
 
+        let strong_handle_impl = quote!(
+            impl slint::StrongHandle for #public_component_id<'static> {
+                type WeakInner = sp::Weak<#inner_component_id>;
+
+                fn upgrade_from_weak_inner(inner: &Self::WeakInner) -> ::core::option::Option<Self> {
+                    let inner = ::core::pin::Pin::new(inner.upgrade()?);
+                    ::core::option::Option::Some(Self(inner, ::core::marker::PhantomData::default()))
+                }
+            }
+        );
+
         quote!(
             #[allow(unused)]
-            pub struct #public_component_id<'a>(#pub_token &'a ::core::pin::Pin<sp::Rc<#inner_component_id>>);
+            pub struct #public_component_id<'a>(#pub_token ::core::pin::Pin<sp::Rc<#inner_component_id>>, #pub_token ::core::marker::PhantomData<&'a #inner_component_id>);
 
             impl<'a> #public_component_id<'a> {
                 #property_and_callback_accessors
             }
             #(pub type #aliases<'a> = #public_component_id<'a>;)*
             #getters
+
+            #strong_handle_impl
         )
     });
 
@@ -1623,7 +1654,7 @@ fn generate_global(
             #[const_field_offset(sp::const_field_offset)]
             #[repr(C)]
             #[pin]
-            #pub_token struct #inner_component_id {
+            pub struct #inner_component_id {
                 #(#pub_token  #declared_property_vars: sp::Property<#declared_property_types>,)*
                 #(#pub_token  #declared_callbacks: sp::Callback<(#(#declared_callbacks_types,)*), #declared_callbacks_ret>,)*
                 #(#pub_token  #change_tracker_names : sp::ChangeTracker,)*
@@ -1661,8 +1692,15 @@ fn generate_global_getters(
         let root_component_id = ident(&c.name);
         quote! {
             impl<'a> slint::Global<'a, #root_component_id> for #public_component_id<'a> {
+                type StaticSelf = #public_component_id<'static>;
+
                 fn get(component: &'a #root_component_id) -> Self {
-                    Self(&component.0.globals.get().unwrap().#global_id)
+                    Self(component.0.globals.get().unwrap().#global_id.clone(), ::core::marker::PhantomData::default())
+                }
+
+                fn as_weak(&self) -> slint::Weak<Self::StaticSelf> {
+                    let inner = ::core::pin::Pin::into_inner(self.0.clone());
+                    slint::Weak::new(sp::Rc::downgrade(&inner))
                 }
             }
         }
@@ -1993,7 +2031,7 @@ fn generate_repeated_component(
                             &unit.sub_components[inner_rep_sc_idx],
                         );
                         quote! {
-                            #inner_component_id::FIELD_OFFSETS.#inner_rep_id.apply_pin(_self.as_ref()).ensure_updated(
+                            #inner_component_id::FIELD_OFFSETS.#inner_rep_id().apply_pin(_self.as_ref()).ensure_updated(
                                 || #inner_inner_component_id::new(_self.self_weak.get().unwrap().clone()).unwrap().into()
                             );
                             let inner_len = _self.as_ref().#inner_rep_id.len();
@@ -2286,12 +2324,12 @@ fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> M
         match index {
             llr::LocalMemberIndex::Property(property_idx) => {
                 let property_name = ident(&g.properties[*property_idx].name);
-                let property_field = quote!({ *&#global_name::FIELD_OFFSETS.#property_name });
+                let property_field = quote!({ *&#global_name::FIELD_OFFSETS.#property_name() });
                 MemberAccess::Direct(quote!(#property_field.apply_pin(#_self)))
             }
             llr::LocalMemberIndex::Callback(callback_idx) => {
                 let callback_name = ident(&g.callbacks[*callback_idx].name);
-                let callback_field = quote!({ *&#global_name::FIELD_OFFSETS.#callback_name });
+                let callback_field = quote!({ *&#global_name::FIELD_OFFSETS.#callback_name() });
                 MemberAccess::Direct(quote!(#callback_field.apply_pin(#_self)))
             }
             llr::LocalMemberIndex::Function(function_idx) => {
@@ -2360,7 +2398,9 @@ fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> M
                     for i in &local_reference.sub_component_path {
                         let component_id = inner_component_id(sub_component);
                         let sub_component_name = ident(&sub_component.sub_components[*i].name);
-                        compo_path = quote!( #component_id::FIELD_OFFSETS.#sub_component_name.apply_pin(#compo_path));
+                        let field =
+                            access_component_field_offset(&component_id, &sub_component_name);
+                        compo_path = quote!(#field.apply_pin(#compo_path));
                         sub_component = &ctx.compilation_unit.sub_components
                             [sub_component.sub_components[*i].ty];
                     }
@@ -2404,7 +2444,7 @@ fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> M
                     } else {
                         let property_name = ident(prop_name);
                         let item_ty = ident(&sub_component.items[*item_index].ty.class_name);
-                        let prop_offset = quote!((#compo_path #item_field + sp::#item_ty::FIELD_OFFSETS.#property_name));
+                        let prop_offset = quote!((#compo_path #item_field + sp::#item_ty::FIELD_OFFSETS.#property_name()));
                         parent_path.map_or_else(
                             || MemberAccess::Direct(quote!(#prop_offset.apply_pin(_self))),
                             |parent_path| {
@@ -2510,7 +2550,8 @@ fn follow_sub_component_path<'a>(
     for i in sub_component_path {
         let component_id = inner_component_id(sub_component);
         let sub_component_name = ident(&sub_component.sub_components[*i].name);
-        compo_path = quote!(#compo_path {#component_id::FIELD_OFFSETS.#sub_component_name} +);
+        let field = access_component_field_offset(&component_id, &sub_component_name);
+        compo_path = quote!(#compo_path #field +);
         sub_component = &compilation_unit.sub_components[sub_component.sub_components[*i].ty];
     }
     (compo_path, sub_component)
@@ -2557,6 +2598,14 @@ fn access_item_rc(pr: &llr::MemberReference, ctx: &EvaluationContext) -> TokenSt
     quote!(&sp::ItemRc::new(#component_rc_tokens, #item_index_tokens))
 }
 
+/// Compile `expr` to a Rust expression returning an owned value.
+fn compile_expression_to_value(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
+    let compiled_expr = compile_expression(expr, ctx);
+
+    quote!((#compiled_expr).clone())
+}
+
+/// Compile `expr` to a Rust expression which may potentially return a reference.
 fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
     match expr {
         Expression::StringLiteral(s) => {
@@ -2619,7 +2668,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                             let fields = lhs.fields.iter().enumerate().map(|(index, (name, _))| {
                                 let index = proc_macro2::Literal::usize_unsuffixed(index);
                                 let name = ident(name);
-                                quote!(the_struct.#name =  obj.#index as _;)
+                                quote!(the_struct.#name = (obj.#index).clone() as _;)
                             });
                             let id = struct_name_to_tokens(targetstruct).unwrap();
                             quote!({ let obj = #f; let mut the_struct = #id::default(); #(#fields)* the_struct })
@@ -2702,7 +2751,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         }
         Expression::CallBackCall { callback, arguments } => {
             let f = access_member(callback, ctx);
-            let a = arguments.iter().map(|a| compile_expression(a, ctx));
+            let a = arguments.iter().map(|a| compile_expression_to_value(a, ctx));
             if expr.ty(ctx) == Type::Void {
                 f.then(|f| quote!(#f.call(&(#(#a as _,)*))))
             } else {
@@ -2807,8 +2856,8 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         }
         Expression::BinaryExpression { lhs, rhs, op } => {
             let lhs_ty = lhs.ty(ctx);
-            let lhs = compile_expression_no_parenthesis(lhs, ctx);
-            let rhs = compile_expression_no_parenthesis(rhs, ctx);
+            let lhs = compile_expression_to_value_no_parenthesis(lhs, ctx);
+            let rhs = compile_expression_to_value_no_parenthesis(rhs, ctx);
 
             if lhs_ty.as_unit_product().is_some() && (*op == '=' || *op == '!') {
                 let maybe_negate = if *op == '!' { quote!(!) } else { quote!() };
@@ -2873,12 +2922,12 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                     quote!(sp::Image::load_from_path(::std::path::Path::new(#path)).unwrap_or_default())
                 }
                 crate::expression_tree::ImageReference::EmbeddedData { resource_id, extension } => {
-                    let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id);
+                    let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id.0);
                     let format = proc_macro2::Literal::byte_string(extension.as_bytes());
                     quote!(sp::load_image_from_embedded_data(#symbol.into(), sp::Slice::from_slice(#format)))
                 }
                 crate::expression_tree::ImageReference::EmbeddedTexture { resource_id } => {
-                    let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id);
+                    let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id.0);
                     quote!(
                         sp::Image::from(sp::ImageInner::StaticTextures(&#symbol))
                     )
@@ -2905,7 +2954,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             )
         }
         Expression::Array { values, element_ty, output } => {
-            let val = values.iter().map(|e| compile_expression(e, ctx));
+            let val = values.iter().map(|e| compile_expression_to_value(e, ctx));
             match output {
                 ArrayOutput::Model => {
                     let rust_element_ty = rust_primitive_type(element_ty).unwrap();
@@ -2920,7 +2969,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             }
         }
         Expression::Struct { ty, values } => {
-            let elem = ty.fields.keys().map(|k| values.get(k).map(|e| compile_expression(e, ctx)));
+            let elem = ty.fields.keys().map(|k| values.get(k).map(|e| compile_expression_to_value(e, ctx)));
             if ty.name.is_some() {
                 let name_tokens = struct_name_to_tokens(&ty.name).unwrap();
                 let keys = ty.fields.keys().map(|k| ident(k));
@@ -2928,7 +2977,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                 {
                     quote!(#name_tokens{#(#keys: #elem as _,)*})
                 } else {
-                    quote!({ let mut the_struct = #name_tokens::default(); #(the_struct.#keys =  #elem as _;)* the_struct})
+                    quote!({ let mut the_struct = #name_tokens::default(); #(the_struct.#keys = #elem as _;)* the_struct})
                 }
             } else {
                 let as_ = ty.fields.values().map(|t| {
@@ -2942,7 +2991,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                     }
                 });
                 // This will produce a tuple
-                quote!((#(#elem #as_,)*))
+                quote!((#((#elem).clone() #as_,)*))
             }
         }
 
@@ -2953,7 +3002,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         }
         Expression::ReadLocalVariable { name, .. } => {
             let name = ident(name);
-            quote!(#name.clone())
+            quote!(#name)
         }
         Expression::EasingCurve(EasingCurve::Linear) => {
             quote!(sp::EasingCurve::Linear)
@@ -3169,7 +3218,7 @@ fn compile_builtin_function_call(
     arguments: &[Expression],
     ctx: &EvaluationContext,
 ) -> TokenStream {
-    let mut a = arguments.iter().map(|a| compile_expression(a, ctx));
+    let mut a = arguments.iter().map(|a| compile_expression_to_value(a, ctx));
     match function {
         BuiltinFunction::SetFocusItem => {
             if let [Expression::PropertyReference(pr)] = arguments {
@@ -3469,13 +3518,14 @@ fn compile_builtin_function_call(
             }
         }
         BuiltinFunction::ImplicitLayoutInfo(orient) => {
-            if let [Expression::PropertyReference(pr)] = arguments {
+            if let [Expression::PropertyReference(pr), constraint_expr] = arguments {
                 let item = access_member(pr, ctx);
                 let window_adapter_tokens = access_window_adapter_field(ctx);
+                let constraint = compile_expression(constraint_expr, ctx);
                 item.then(|item| {
                     let item_rc = access_item_rc(pr, ctx);
                     quote!(
-                        sp::Item::layout_info(#item, #orient, #window_adapter_tokens, &#item_rc)
+                        sp::Item::layout_info(#item, #orient, #constraint as _, #window_adapter_tokens, &#item_rc)
                     )
                 })
             } else {
@@ -3647,6 +3697,10 @@ fn compile_builtin_function_call(
             let window_adapter_tokens = access_window_adapter_field(ctx);
             quote!(sp::WindowInner::from_pub(#window_adapter_tokens.window()).color_scheme())
         }
+        BuiltinFunction::AccentColor => {
+            let window_adapter_tokens = access_window_adapter_field(ctx);
+            quote!(sp::WindowInner::from_pub(#window_adapter_tokens.window()).accent_color())
+        }
         BuiltinFunction::SupportsNativeMenuBar => {
             let window_adapter_tokens = access_window_adapter_field(ctx);
             quote!(sp::WindowInner::from_pub(#window_adapter_tokens.window()).supports_native_menu_bar())
@@ -3693,11 +3747,10 @@ fn compile_builtin_function_call(
                     quote!(sp::MenuFromItemTree::new(sp::VRc::into_dyn(menu_item_tree_instance)))
                 };
                 quote! {
-                    let menu_item_tree = #menu_from_item_tree;
+                    let menu_item_tree = sp::VRc::new(#menu_from_item_tree);
                     if sp::WindowInner::from_pub(#window_adapter_tokens.window()).supports_native_menu_bar() {
-                        let menu_item_tree = sp::VRc::new(menu_item_tree);
-                        let menu_item_tree = sp::VRc::into_dyn(menu_item_tree);
-                        sp::WindowInner::from_pub(#window_adapter_tokens.window()).setup_menubar(menu_item_tree);
+                        let menu_item_tree_dyn = sp::VRc::into_dyn(sp::VRc::clone(&menu_item_tree));
+                        sp::WindowInner::from_pub(#window_adapter_tokens.window()).setup_menubar(menu_item_tree_dyn);
                     } else
                 }
             };
@@ -3706,23 +3759,25 @@ fn compile_builtin_function_call(
                 let menu_item_tree_instance = #item_tree_id::new(_self.self_weak.get().unwrap().clone()).unwrap();
                 #native_impl
                 /*else*/ {
-                    let menu_item_tree = sp::Rc::new(menu_item_tree);
-                    let menu_item_tree_ = menu_item_tree.clone();
+                    let menu_item_tree_ = sp::VRc::clone(&menu_item_tree);
                     #access_entries.set_binding(move || {
                         let mut entries = sp::SharedVector::default();
-                        sp::Menu::sub_menu(&*menu_item_tree_, sp::Option::None, &mut entries);
+                        sp::VRc::borrow(&menu_item_tree_).sub_menu(sp::Option::None, &mut entries);
+                        sp::ModelRc::new(sp::SharedVectorModel::from(entries))
+                    });
+                    let menu_item_tree_ = sp::VRc::clone(&menu_item_tree);
+                    #access_sub_menu.set_handler(move |entry| {
+                        let mut entries = sp::SharedVector::default();
+                        sp::VRc::borrow(&menu_item_tree_).sub_menu(sp::Option::Some(&entry.0), &mut entries);
                         sp::ModelRc::new(sp::SharedVectorModel::from(entries))
                     });
                     let menu_item_tree_ = menu_item_tree.clone();
-                    #access_sub_menu.set_handler(move |entry| {
-                        let mut entries = sp::SharedVector::default();
-                        sp::Menu::sub_menu(&*menu_item_tree_, sp::Option::Some(&entry.0), &mut entries);
-                        sp::ModelRc::new(sp::SharedVectorModel::from(entries))
-                    });
                     #access_activated.set_handler(move |entry| {
-                        sp::Menu::activate(&*menu_item_tree, &entry.0);
+                        sp::VRc::borrow(&menu_item_tree_).activate(&entry.0);
                     });
                 }
+                sp::WindowInner::from_pub(#window_adapter_tokens.window())
+                    .setup_menubar_shortcuts(sp::VRc::into_dyn(menu_item_tree));
             })
         }
         BuiltinFunction::MonthDayCount => {
@@ -3793,7 +3848,7 @@ fn compile_builtin_function_call(
         BuiltinFunction::OpenUrl => {
             let url = a.next().unwrap();
             let window_adapter_tokens = access_window_adapter_field(ctx);
-            quote!(sp::open_url(&#url, #window_adapter_tokens.window()))
+            quote!(sp::open_url(&#url, #window_adapter_tokens.window()).is_ok())
         }
         BuiltinFunction::ParseMarkdown => {
             let format_string = a.next().unwrap();
@@ -3872,7 +3927,7 @@ fn generate_common_repeater_code(
     }
 
     let code = quote!(
-        #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated(
+        #inner_component_id::FIELD_OFFSETS.#repeater_id().apply_pin(_self).ensure_updated(
             || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone()).unwrap().into() }
         );
         #repeater_code
@@ -3918,7 +3973,7 @@ fn build_inner_ensure_and_len(
                     inner_component_id(&unit.sub_components[inner_rep_sc_idx]);
                 let inner_rep_id = format_ident!("repeater{}", usize::from(*repeater_index));
                 Some(quote! {
-                    #row_inner_component_id::FIELD_OFFSETS.#inner_rep_id.apply_pin(pin).ensure_updated(
+                    #row_inner_component_id::FIELD_OFFSETS.#inner_rep_id().apply_pin(pin).ensure_updated(
                         || #inner_inner_component_id::new(pin.self_weak.get().unwrap().clone()).unwrap().into()
                     );
                     total += pin.#inner_rep_id.len();
@@ -4292,12 +4347,11 @@ fn generate_with_flexbox_layout_item_info(
     } }
 }
 
-// In Rust debug builds, accessing the member of the FIELD_OFFSETS ends up copying the
-// entire FIELD_OFFSETS into a new stack allocation, which with large property
-// binding initialization functions isn't re-used and with large generated inner
-// components ends up large amounts of stack space (see issue #133)
+/// Access a field offset via `FIELD_OFFSETS.field()`. The `FIELD_OFFSETS`
+/// constant is a ZST with const fn methods, so this does not create a MIR
+/// local of any aggregate type.
 fn access_component_field_offset(component_id: &Ident, field: &Ident) -> TokenStream {
-    quote!({ *&#component_id::FIELD_OFFSETS.#field })
+    quote!(#component_id::FIELD_OFFSETS.#field())
 }
 
 fn embedded_file_tokens(path: &str) -> TokenStream {
@@ -4319,15 +4373,16 @@ fn generate_resources(doc: &Document) -> Vec<TokenStream> {
 
     doc.embedded_file_resources
         .borrow()
-        .iter()
-        .map(|(path, er)| {
-            let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", er.id);
+        .iter_enumerated()
+        .map(|(resource_id, er)| {
+            let resource_id = resource_id.0;
+            let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id);
             match &er.kind {
                 &crate::embedded_resources::EmbeddedResourcesKind::ListOnly => {
                     quote!()
                 },
                 crate::embedded_resources::EmbeddedResourcesKind::FileData => {
-                    let data = embedded_file_tokens(path);
+                    let data = embedded_file_tokens(er.path.as_deref().unwrap());
                     quote!(static #symbol: &'static [u8] = #data;)
                 }
                 crate::embedded_resources::EmbeddedResourcesKind::DataUriPayload(bytes, _) => {
@@ -4345,7 +4400,7 @@ fn generate_resources(doc: &Document) -> Vec<TokenStream> {
                     } else {
                         quote!(sp::Color::from_argb_encoded(0))
                     };
-                    let symbol_data = format_ident!("SLINT_EMBEDDED_RESOURCE_{}_DATA", er.id);
+                    let symbol_data = format_ident!("SLINT_EMBEDDED_RESOURCE_{}_DATA", resource_id);
                     let data_size = data.len();
                     quote!(
                         #link_section
@@ -4480,7 +4535,11 @@ pub fn generate_named_exports(exports: &crate::object_tree::Exports) -> Vec<Toke
         .collect::<Vec<_>>()
 }
 
-fn compile_expression_no_parenthesis(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
+fn remove_parenthesis(
+    expr: &Expression,
+    ctx: &EvaluationContext,
+    compile: impl FnOnce(&Expression, &EvaluationContext) -> TokenStream,
+) -> TokenStream {
     fn extract_single_group(stream: &TokenStream) -> Option<TokenStream> {
         let mut iter = stream.clone().into_iter();
         let elem = iter.next()?;
@@ -4494,13 +4553,24 @@ fn compile_expression_no_parenthesis(expr: &Expression, ctx: &EvaluationContext)
         Some(elem.stream())
     }
 
-    let mut stream = compile_expression(expr, ctx);
+    let mut stream = compile(expr, ctx);
     if !matches!(expr, Expression::Struct { .. }) {
         while let Some(s) = extract_single_group(&stream) {
             stream = s;
         }
     }
     stream
+}
+
+fn compile_expression_no_parenthesis(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
+    remove_parenthesis(expr, ctx, compile_expression)
+}
+
+fn compile_expression_to_value_no_parenthesis(
+    expr: &Expression,
+    ctx: &EvaluationContext,
+) -> TokenStream {
+    remove_parenthesis(expr, ctx, compile_expression_to_value)
 }
 
 #[cfg(feature = "bundle-translations")]

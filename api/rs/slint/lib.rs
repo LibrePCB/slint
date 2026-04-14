@@ -75,11 +75,11 @@ build = "build.rs"
 edition = "2021"
 
 [dependencies]
-slint = "1.15"
+slint = "1.16.0"
 ...
 
 [build-dependencies]
-slint-build = "1.15"
+slint-build = "1.16.0"
 ```
 
 Use the API of the slint-build crate in the `build.rs` file:
@@ -189,7 +189,8 @@ For each callback
 
 The global can be accessed with the [`ComponentHandle::global()`] function, or with [`Global::get()`]
 
-See the [documentation of the `Global` trait](Global) for an example.
+See our [sample global](docs::generated_code::SampleGlobal) for an example of the API of the generated global.
+See also the [documentation of the `Global` trait](Global).
 
 **Note**: Global singletons are instantiated once per component. When declaring multiple components for `export` to Rust,
 each instance will have their own instance of associated globals singletons.

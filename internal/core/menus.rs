@@ -5,7 +5,7 @@
 #![allow(unsafe_code)]
 
 use crate::graphics::Image;
-use crate::input::InternalKeyEvent;
+use crate::input::{InternalKeyEvent, Keys};
 use crate::item_rendering::CachedRenderingData;
 use crate::item_tree::{ItemTreeRc, ItemWeak, VisitChildrenResult};
 use crate::items::{ItemRc, ItemRef, MenuEntry, VoidArg};
@@ -120,6 +120,7 @@ impl MenuFromItemTree {
                     let checkable = menu_item.checkable();
                     let checked = menu_item.checked();
                     let icon = menu_item.icon();
+                    let shortcut = menu_item.shortcut();
                     self.item_cache.borrow_mut().insert(
                         id.clone(),
                         ShadowTreeNode { item: ItemRc::downgrade(&item), children },
@@ -133,6 +134,7 @@ impl MenuFromItemTree {
                         checkable,
                         checked,
                         icon,
+                        shortcut,
                     });
                 }
                 VisitChildrenResult::CONTINUE
@@ -194,14 +196,18 @@ pub struct MenuItem {
     pub checkable: Property<bool>,
     pub checked: Property<bool>,
     pub icon: Property<Image>,
+    pub shortcut: Property<Keys>,
 }
 
 impl crate::items::Item for MenuItem {
     fn init(self: Pin<&Self>, _self_rc: &ItemRc) {}
 
+    fn deinit(self: Pin<&Self>, _window_adapter: &Rc<dyn WindowAdapter>) {}
+
     fn layout_info(
         self: Pin<&Self>,
         _orientation: crate::items::Orientation,
+        _cross_axis_constraint: crate::Coord,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> crate::layout::LayoutInfo {
@@ -282,7 +288,7 @@ impl crate::items::ItemConsts for MenuItem {
     const cached_rendering_data_offset: const_field_offset::FieldOffset<
         MenuItem,
         CachedRenderingData,
-    > = MenuItem::FIELD_OFFSETS.cached_rendering_data.as_unpinned_projection();
+    > = MenuItem::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
 }
 
 #[cfg(feature = "ffi")]

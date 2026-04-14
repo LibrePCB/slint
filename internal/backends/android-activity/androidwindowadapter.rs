@@ -10,6 +10,7 @@ use android_activity::{InputStatus, MainEvent, PollEvent};
 use i_slint_core::api::{
     LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, PlatformError, Window,
 };
+use i_slint_core::graphics::Color;
 use i_slint_core::input::{InternalKeyEvent, KeyEvent, KeyEventResult, KeyEventType, TouchPhase};
 use i_slint_core::items::ColorScheme;
 use i_slint_core::lengths::PhysicalEdges;
@@ -165,6 +166,10 @@ impl i_slint_core::window::WindowAdapterInternal for AndroidWindowAdapter {
 
     fn color_scheme(&self) -> ColorScheme {
         self.color_scheme.as_ref().get()
+    }
+
+    fn accent_color(&self) -> Color {
+        self.java_helper.accent_color().unwrap_or_else(|e| print_jni_error(&self.app, e))
     }
 
     fn safe_area_inset(&self) -> PhysicalEdges {
@@ -510,14 +515,7 @@ impl AndroidWindowAdapter {
 
     fn resize(&self) -> Result<(), PlatformError> {
         let Some(win) = self.app.native_window() else { return Ok(()) };
-        let (offset, size) = if self.fullscreen.get() {
-            (
-                Default::default(),
-                PhysicalSize { width: win.width() as u32, height: win.height() as u32 },
-            )
-        } else {
-            self.java_helper.get_view_rect().unwrap_or_else(|e| print_jni_error(&self.app, e))
-        };
+        let size = PhysicalSize { width: win.width() as u32, height: win.height() as u32 };
 
         let scale_factor = self.window.scale_factor();
         self.window
@@ -527,7 +525,7 @@ impl AndroidWindowAdapter {
                 .map(|internal| internal.safe_area_inset().to_logical(scale_factor))
                 .unwrap_or_default(),
         );
-        self.offset.set(offset);
+        self.offset.set(Default::default());
         Ok(())
     }
 

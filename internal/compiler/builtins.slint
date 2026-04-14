@@ -256,6 +256,7 @@ component MenuItem {
     callback activated();
     in property <bool> enabled: true;
     in property <bool> checkable: false;
+    in property <keys> shortcut;
     in-out property <bool> checked: false;
     in property <image> icon;
     //-disallow_global_types_as_child_elements
@@ -456,10 +457,10 @@ export component FlexboxLayout {
     in property <length> spacing-vertical;
     in property <length> spacing;
     in property <LayoutAlignment> alignment: LayoutAlignment.start;  // CSS default is flex-start
-    in property <FlexDirection> flex-direction;
-    in property <FlexAlignContent> align-content;
-    in property <FlexAlignItems> align-items;
-    in property <FlexWrap> flex-wrap;
+    in property <FlexboxLayoutDirection> flex-direction;
+    in property <FlexboxLayoutAlignContent> align-content;
+    in property <FlexboxLayoutAlignItems> align-items;
+    in property <FlexboxLayoutWrap> flex-wrap;
 }
 
 component MoveTo {
@@ -614,7 +615,7 @@ export global TextInputInterface {
 export global Platform {
     out property <OperatingSystemType> os;
     out property <string> style-name;
-    function open-url(url: string) {}
+    function open-url(url: string) -> bool { return false; }
 }
 
 export component NativeButton {

@@ -43,6 +43,9 @@ pub trait ErasedPropertyInfo {
     );
     fn offset(&self) -> usize;
 
+    #[cfg(slint_debug_property)]
+    fn set_debug_name(&self, item: Pin<ItemRef>, name: String);
+
     /// Safety: Property2 must be a (pinned) pointer to a `Property<T>`
     /// where T is the same T as the one represented by this property.
     unsafe fn link_two_ways(&self, item: Pin<ItemRef>, property2: *const ());
@@ -81,6 +84,10 @@ impl<Item: vtable::HasStaticVTable<corelib::items::ItemVTable>> ErasedPropertyIn
     }
     fn offset(&self) -> usize {
         (*self).offset()
+    }
+    #[cfg(slint_debug_property)]
+    fn set_debug_name(&self, item: Pin<ItemRef>, name: String) {
+        (*self).set_debug_name(ItemRef::downcast_pin(item).unwrap(), name);
     }
     unsafe fn link_two_ways(&self, item: Pin<ItemRef>, property2: *const ()) {
         // Safety: ErasedPropertyInfo::link_two_ways and PropertyInfo::link_two_ways have the same safety requirement
@@ -1407,6 +1414,14 @@ fn call_builtin_function(
             .internal(corelib::InternalToken)
             .map_or(ColorScheme::Unknown, |x| x.color_scheme())
             .into(),
+        BuiltinFunction::AccentColor => {
+            let color = local_context
+                .component_instance
+                .window_adapter()
+                .internal(corelib::InternalToken)
+                .map_or(corelib::Color::default(), |x| x.accent_color());
+            Value::Brush(corelib::Brush::SolidColor(color))
+        }
         BuiltinFunction::SupportsNativeMenuBar => local_context
             .component_instance
             .window_adapter()
@@ -1435,12 +1450,13 @@ fn call_builtin_function(
                 rest.first(),
             );
 
-            if let Some(w) = component.window_adapter().internal(i_slint_core::InternalToken)
-                && !no_native
-                && w.supports_native_menu_bar()
-            {
-                let menubar = vtable::VRc::into_dyn(menu_item_tree);
-                w.setup_menubar(menubar);
+            let window_adapter = component.window_adapter();
+            let window_inner = WindowInner::from_pub(window_adapter.window());
+            let menubar = vtable::VRc::into_dyn(vtable::VRc::clone(&menu_item_tree));
+            window_inner.setup_menubar_shortcuts(vtable::VRc::clone(&menubar));
+
+            if !no_native && window_inner.supports_native_menu_bar() {
+                window_inner.setup_menubar(menubar);
                 return Value::Void;
             }
 
@@ -1521,8 +1537,11 @@ fn call_builtin_function(
         }
         BuiltinFunction::ImplicitLayoutInfo(orient) => {
             let component = local_context.component_instance;
-            if let [Expression::ElementReference(item)] = arguments {
+            if let [Expression::ElementReference(item), constraint_expr] = arguments {
                 generativity::make_guard!(guard);
+
+                let constraint: f32 =
+                    eval_expression(constraint_expr, local_context).try_into().unwrap_or(-1.);
 
                 let item = item.upgrade().unwrap();
                 let enclosing_component = enclosing_component_for_element(&item, component, guard);
@@ -1536,6 +1555,7 @@ fn call_builtin_function(
                     .as_ref()
                     .layout_info(
                         crate::eval_layout::to_runtime(orient),
+                        constraint,
                         &window_adapter,
                         &ItemRc::new(vtable::VRc::into_dyn(item_comp), item_info.item_index()),
                     )
@@ -1644,8 +1664,7 @@ fn call_builtin_function(
             let url: SharedString =
                 eval_expression(&arguments[0], local_context).try_into().unwrap();
             let window_adapter = local_context.component_instance.window_adapter();
-            corelib::open_url(&url, window_adapter.window());
-            Value::Void
+            Value::Bool(corelib::open_url(&url, window_adapter.window()).is_ok())
         }
         BuiltinFunction::ParseMarkdown => {
             let format_string: SharedString =

@@ -57,10 +57,16 @@ pub struct Document {
     pub imports: Vec<ImportedTypes>,
     pub library_exports: HashMap<String, LibraryInfo>,
 
-    /// Map of resources that should be embedded in the generated code, indexed by their absolute path on
-    /// disk on the build system
-    pub embedded_file_resources:
-        RefCell<BTreeMap<SmolStr, crate::embedded_resources::EmbeddedResources>>,
+    /// Resources to embed in the generated code.
+    ///
+    /// The [`crate::embedded_resources::EmbeddedResourcesIdx`] is the identifier used by code generators.
+    /// Each entry's `path` is the absolute path on disk, or `None` for in-memory data URI payloads.
+    pub embedded_file_resources: RefCell<
+        typed_index_collections::TiVec<
+            crate::embedded_resources::EmbeddedResourcesIdx,
+            crate::embedded_resources::EmbeddedResources,
+        >,
+    >,
 
     #[cfg(feature = "bundle-translations")]
     pub translation_builder: Option<crate::translations::TranslationsBuilder>,
@@ -779,7 +785,7 @@ pub struct Element {
     /// Currently contains also the callbacks. FIXME: should that be changed?
     pub bindings: BindingsMap,
     pub change_callbacks: BTreeMap<SmolStr, RefCell<Vec<Expression>>>,
-    pub property_analysis: RefCell<HashMap<SmolStr, PropertyAnalysis>>,
+    pub property_analysis: RefCell<BTreeMap<SmolStr, PropertyAnalysis>>,
 
     pub children: Vec<ElementRc>,
     /// The component which contains this element.
@@ -3028,8 +3034,18 @@ pub fn inject_element_as_repeated_element(repeated_element: &ElementRc, new_root
             SmolStr::new_static("layoutinfo-h"),
             crate::typeregister::layout_info_type().into(),
         );
-        let expr_h = crate::layout::implicit_layout_info_call(old_root, Orientation::Horizontal);
-        let expr_v = crate::layout::implicit_layout_info_call(old_root, Orientation::Vertical);
+        let expr_h = crate::layout::implicit_layout_info_call(
+            old_root,
+            Orientation::Horizontal,
+            crate::layout::BuiltinFilter::All,
+        )
+        .unwrap();
+        let expr_v = crate::layout::implicit_layout_info_call(
+            old_root,
+            Orientation::Vertical,
+            crate::layout::BuiltinFilter::All,
+        )
+        .unwrap();
         let expr_v =
             BindingExpression::new_with_span(expr_v, old_root.borrow().to_source_location());
         li_v.element().borrow_mut().bindings.insert(li_v.name().clone(), expr_v.into());

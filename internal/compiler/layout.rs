@@ -20,7 +20,7 @@ pub enum Orientation {
 }
 
 #[derive(Clone, Debug, Copy, Eq, PartialEq, Default)]
-pub enum FlexDirection {
+pub enum FlexboxLayoutDirection {
     /// Items are laid out in rows (horizontal primary axis)
     #[default]
     Row,
@@ -30,6 +30,17 @@ pub enum FlexDirection {
     Column,
     /// Items are laid out in columns in reverse order (vertical primary axis, bottom to top)
     ColumnReverse,
+}
+
+/// Relationship between a queried orientation and a FlexboxLayout's direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexboxAxisRelation {
+    /// The queried orientation is the main axis (e.g., Horizontal for a Row flex)
+    MainAxis,
+    /// The queried orientation is the cross axis (e.g., Vertical for a Row flex)
+    CrossAxis,
+    /// The flex direction is not known at compile time
+    Unknown,
 }
 
 #[derive(Clone, Debug, derive_more::From)]
@@ -548,6 +559,14 @@ pub struct GridLayout {
 }
 
 impl GridLayout {
+    /// Clone each element's cell into a new Rc, breaking any Rc sharing with the original.
+    pub fn clone_cells(&mut self) {
+        for e in &mut self.elems {
+            let cloned = Rc::new(RefCell::new(e.cell.borrow().clone()));
+            e.cell = cloned;
+        }
+    }
+
     pub fn visit_rowcol_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
         for elem in &mut self.elems {
             let mut cell = elem.cell.borrow_mut();
@@ -610,34 +629,47 @@ pub struct FlexboxLayout {
 }
 
 impl FlexboxLayout {
-    /// Returns true if the given orientation is the main axis, based on compile-time
-    /// direction analysis. Returns false if direction is unknown at compile time
-    /// (conservatively treating it as cross-axis).
-    pub fn is_main_axis(&self, orientation: Orientation) -> bool {
-        use crate::expression_tree::Expression;
-        let direction = match self.direction.as_ref() {
-            None => Some(FlexDirection::Row), // default
+    /// Try to determine the flex direction at compile time from a constant binding.
+    /// Returns None if the direction is set at runtime.
+    fn compile_time_direction(&self) -> Option<FlexboxLayoutDirection> {
+        match self.direction.as_ref() {
+            None => Some(FlexboxLayoutDirection::Row),
             Some(nr) => nr.element().borrow().bindings.get(nr.name()).and_then(|binding| {
-                match &binding.borrow().expression {
-                    Expression::EnumerationValue(ev) => match ev.value {
-                        0 => Some(FlexDirection::Row),
-                        1 => Some(FlexDirection::RowReverse),
-                        2 => Some(FlexDirection::Column),
-                        3 => Some(FlexDirection::ColumnReverse),
+                if let crate::expression_tree::Expression::EnumerationValue(ev) =
+                    &binding.borrow().expression
+                {
+                    match ev.enumeration.values[ev.value].as_str() {
+                        "row" => Some(FlexboxLayoutDirection::Row),
+                        "row-reverse" => Some(FlexboxLayoutDirection::RowReverse),
+                        "column" => Some(FlexboxLayoutDirection::Column),
+                        "column-reverse" => Some(FlexboxLayoutDirection::ColumnReverse),
                         _ => None,
-                    },
-                    _ => None,
+                    }
+                } else {
+                    None
                 }
             }),
-        };
-        matches!(
-            (direction, orientation),
-            (Some(FlexDirection::Row | FlexDirection::RowReverse), Orientation::Horizontal)
-                | (
-                    Some(FlexDirection::Column | FlexDirection::ColumnReverse),
-                    Orientation::Vertical
-                )
-        )
+        }
+    }
+
+    /// Determine the relationship between a queried orientation and this flex's direction.
+    pub fn axis_relation(&self, orientation: Orientation) -> FlexboxAxisRelation {
+        match self.compile_time_direction() {
+            None => FlexboxAxisRelation::Unknown,
+            Some(dir) => {
+                let is_main = matches!(
+                    (dir, orientation),
+                    (
+                        FlexboxLayoutDirection::Row | FlexboxLayoutDirection::RowReverse,
+                        Orientation::Horizontal
+                    ) | (
+                        FlexboxLayoutDirection::Column | FlexboxLayoutDirection::ColumnReverse,
+                        Orientation::Vertical
+                    )
+                );
+                if is_main { FlexboxAxisRelation::MainAxis } else { FlexboxAxisRelation::CrossAxis }
+            }
+        }
     }
 
     pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
@@ -675,8 +707,34 @@ impl FlexboxLayout {
     }
 }
 
-/// Get the implicit layout info of a particular element
-pub fn implicit_layout_info_call(elem: &ElementRc, orientation: Orientation) -> Expression {
+/// Controls whether `implicit_layout_info_call` returns layout info for builtins
+/// that don't have an intrinsic size (Rectangle, Empty, TouchArea, etc.).
+#[derive(Clone, Copy, PartialEq)]
+pub enum BuiltinFilter {
+    /// Return layout info for all builtins (existing behavior).
+    All,
+    /// Skip builtins whose `default_size_binding` is not `ImplicitSize`.
+    SkipNonImplicit,
+}
+
+/// Get the implicit layout info of a particular element.
+pub fn implicit_layout_info_call(
+    elem: &ElementRc,
+    orientation: Orientation,
+    filter: BuiltinFilter,
+) -> Option<Expression> {
+    implicit_layout_info_call_with_constraint(elem, orientation, filter, None)
+}
+
+/// Like `implicit_layout_info_call`, but with an optional cross-axis constraint.
+/// When `constraint` is Some, it's passed as the cross_axis_constraint parameter
+/// to Item::layout_info for height-for-width support.
+pub fn implicit_layout_info_call_with_constraint(
+    elem: &ElementRc,
+    orientation: Orientation,
+    filter: BuiltinFilter,
+    constraint: Option<Expression>,
+) -> Option<Expression> {
     let mut elem_it = elem.clone();
     loop {
         return match &elem_it.clone().borrow().base_type {
@@ -686,7 +744,10 @@ pub fn implicit_layout_info_call(elem: &ElementRc, orientation: Orientation) -> 
                         // We cannot take nr as is because it is relative to the elem's component. We therefore need to
                         // use `elem` as an element for the PropertyReference, not `root` within the base of elem
                         debug_assert!(Rc::ptr_eq(&nr.element(), &base_comp.root_element));
-                        Expression::PropertyReference(NamedReference::new(elem, nr.name().clone()))
+                        Some(Expression::PropertyReference(NamedReference::new(
+                            elem,
+                            nr.name().clone(),
+                        )))
                     }
                     None => {
                         elem_it = base_comp.root_element.clone();
@@ -707,9 +768,12 @@ pub fn implicit_layout_info_call(elem: &ElementRc, orientation: Orientation) -> 
                         | "Clip"
                 ) =>
             {
+                if filter == BuiltinFilter::SkipNonImplicit {
+                    return None;
+                }
                 // hard-code the value for rectangle because many rectangle end up optimized away and we
                 // don't want to depend on the element.
-                Expression::Struct {
+                Some(Expression::Struct {
                     ty: crate::typeregister::layout_info_type(),
                     values: [("min", 0.), ("max", f32::MAX), ("preferred", 0.)]
                         .iter()
@@ -727,13 +791,23 @@ pub fn implicit_layout_info_call(elem: &ElementRc, orientation: Orientation) -> 
                                 }),
                         )
                         .collect(),
-                }
+                })
             }
-            _ => Expression::FunctionCall {
+            ElementType::Builtin(base_type)
+                if filter == BuiltinFilter::SkipNonImplicit
+                    && base_type.default_size_binding
+                        != crate::langtype::DefaultSizeBinding::ImplicitSize =>
+            {
+                None
+            }
+            _ => Some(Expression::FunctionCall {
                 function: BuiltinFunction::ImplicitLayoutInfo(orientation).into(),
-                arguments: vec![Expression::ElementReference(Rc::downgrade(elem))],
+                arguments: vec![
+                    Expression::ElementReference(Rc::downgrade(elem)),
+                    constraint.unwrap_or(Expression::NumberLiteral(-1., Unit::None)),
+                ],
                 source_location: None,
-            },
+            }),
         };
     }
 }

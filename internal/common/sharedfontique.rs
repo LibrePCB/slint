@@ -23,7 +23,7 @@ pub fn create_collection(shared: bool) -> Collection {
 
     #[cfg(any(target_family = "wasm", target_os = "nto"))]
     {
-        let data = include_bytes!("sharedfontique/DejaVuSans.ttf");
+        let data = include_bytes!("sharedfontique/Inter-VariableFont.ttf");
         let fonts = collection.register_fonts(fontique::Blob::new(Arc::new(data)), None);
         for script in fontique::Script::all_samples().iter().map(|(script, _)| *script) {
             collection.append_fallbacks(
@@ -134,39 +134,6 @@ impl std::ops::Deref for Collection {
 impl std::ops::DerefMut for Collection {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
-    }
-}
-
-/// Font metrics in design space. Scale with desired pixel size and divided by units_per_em
-/// to obtain pixel metrics.
-#[derive(Clone)]
-pub struct DesignFontMetrics {
-    pub ascent: f32,
-    pub descent: f32,
-    pub x_height: f32,
-    pub cap_height: f32,
-    pub units_per_em: f32,
-}
-
-impl DesignFontMetrics {
-    pub fn new(font: &fontique::QueryFont) -> Self {
-        let font_ref = skrifa::FontRef::from_index(font.blob.data(), font.index).unwrap();
-        Self::new_from_font_ref(&font_ref)
-    }
-
-    pub fn new_from_font_ref(font_ref: &skrifa::FontRef) -> Self {
-        let metrics = skrifa::metrics::Metrics::new(
-            font_ref,
-            skrifa::instance::Size::unscaled(),
-            skrifa::instance::LocationRef::default(),
-        );
-        Self {
-            ascent: metrics.ascent,
-            descent: metrics.descent,
-            x_height: metrics.x_height.unwrap_or_default(),
-            cap_height: metrics.cap_height.unwrap_or_default(),
-            units_per_em: metrics.units_per_em as f32,
-        }
     }
 }
 

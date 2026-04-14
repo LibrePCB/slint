@@ -88,6 +88,7 @@ pub enum BuiltinFunction {
     Hsv,
     Oklch,
     ColorScheme,
+    AccentColor,
     SupportsNativeMenuBar,
     /// Setup the menu bar
     ///
@@ -215,7 +216,7 @@ declare_builtin_function_types!(
     StringToLowercase: (Type::String) -> Type::String,
     StringToUppercase: (Type::String) -> Type::String,
     KeysToString: (Type::Keys) -> Type::String,
-    ImplicitLayoutInfo(..): (Type::ElementReference) -> typeregister::layout_info_type().into(),
+    ImplicitLayoutInfo(..): (Type::ElementReference, Type::Float32) -> typeregister::layout_info_type().into(),
     ColorRgbaStruct: (Type::Color) -> Type::Struct(Rc::new(Struct {
         fields: IntoIterator::into_iter([
             (SmolStr::new_static("red"), Type::Int32),
@@ -266,6 +267,7 @@ declare_builtin_function_types!(
     ColorScheme: () -> Type::Enumeration(
         typeregister::BUILTIN.with(|e| e.enums.ColorScheme.clone()),
     ),
+    AccentColor: () -> Type::Color,
     SupportsNativeMenuBar: () -> Type::Bool,
     // entries, sub-menu, activate. But the types here are not accurate.
     SetupMenuBar: (Type::Model, typeregister::noarg_callback_type(), typeregister::noarg_callback_type()) -> Type::Void,
@@ -293,7 +295,7 @@ declare_builtin_function_types!(
     RestartTimer: (Type::ElementReference) -> Type::Void,
     ParseMarkdown: (Type::String, Type::Array(Type::StyledText.into())) -> Type::StyledText,
     StringToStyledText: (Type::String) -> Type::StyledText
-    OpenUrl: (Type::String) -> Type::Void,
+    OpenUrl: (Type::String) -> Type::Bool,
 );
 
 impl Default for BuiltinFunctionTypes {
@@ -321,6 +323,7 @@ impl BuiltinFunction {
             }
             BuiltinFunction::AnimationTick => false,
             BuiltinFunction::ColorScheme => false,
+            BuiltinFunction::AccentColor => false,
             BuiltinFunction::SupportsNativeMenuBar => false,
             BuiltinFunction::SetupMenuBar => false,
             BuiltinFunction::MonthDayCount => false,
@@ -411,6 +414,7 @@ impl BuiltinFunction {
             BuiltinFunction::GetWindowDefaultFontSize => true,
             BuiltinFunction::AnimationTick => true,
             BuiltinFunction::ColorScheme => true,
+            BuiltinFunction::AccentColor => true,
             BuiltinFunction::SupportsNativeMenuBar => true,
             BuiltinFunction::SetupMenuBar => false,
             BuiltinFunction::MonthDayCount => true,
@@ -1832,8 +1836,8 @@ pub enum EasingCurve {
 pub enum ImageReference {
     None,
     AbsolutePath(SmolStr),
-    EmbeddedData { resource_id: usize, extension: String },
-    EmbeddedTexture { resource_id: usize },
+    EmbeddedData { resource_id: crate::embedded_resources::EmbeddedResourcesIdx, extension: String },
+    EmbeddedTexture { resource_id: crate::embedded_resources::EmbeddedResourcesIdx },
 }
 
 /// Print the expression as a .slint code (not necessarily valid .slint)
