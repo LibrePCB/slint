@@ -1,6 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore textitem
 /*!
 This module contains the builtin text related items.
 
@@ -11,7 +12,7 @@ use super::{
     EventResult, FontMetrics, InputType, Item, ItemConsts, ItemRc, ItemRef, KeyEventArg,
     KeyEventResult, KeyEventType, PointArg, PointerEventButton, RenderingResult, StringArg,
     TextHorizontalAlignment, TextOverflow, TextStrokeStyle, TextVerticalAlignment, TextWrap,
-    VoidArg, WindowItem,
+    VoidArg,
 };
 use crate::graphics::{Brush, Color, FontRequest};
 use crate::input::{
@@ -26,10 +27,10 @@ use crate::lengths::{LogicalLength, LogicalPoint, LogicalRect, LogicalSize};
 use crate::platform::Clipboard;
 #[cfg(feature = "rtti")]
 use crate::rtti::*;
+use crate::string::string_to_float;
 use crate::window::{InputMethodProperties, InputMethodRequest, WindowAdapter, WindowInner};
 use crate::{Callback, Coord, Property, SharedString, SharedVector};
-use alloc::rc::Rc;
-use alloc::string::String;
+use alloc::{rc::Rc, string::String};
 use const_field_offset::FieldOffsets;
 use core::cell::Cell;
 use core::pin::Pin;
@@ -238,6 +239,8 @@ pub struct StyledTextItem {
     pub height: Property<LogicalLength>,
     pub text: Property<crate::styled_text::StyledText>,
     pub default_color: Property<Brush>,
+    pub default_font_size: Property<LogicalLength>,
+    pub default_font_family: Property<SharedString>,
     pub horizontal_alignment: Property<TextHorizontalAlignment>,
     pub vertical_alignment: Property<TextVerticalAlignment>,
     pub link_clicked: Callback<StringArg>,
@@ -305,7 +308,7 @@ impl Item for StyledTextItem {
                 position,
                 button: PointerEventButton::Left,
                 click_count: _,
-                is_touch: _,
+                touch_finger_id: _,
             } => {
                 if let Some(link) = find_link(position) {
                     *cursor = super::MouseCursor::Pointer;
@@ -388,9 +391,9 @@ impl HasFont for StyledTextItem {
     fn font_request(self: Pin<&Self>, self_rc: &crate::items::ItemRc) -> FontRequest {
         crate::items::WindowItem::resolved_font_request(
             self_rc,
+            self.default_font_family(),
             Default::default(),
-            Default::default(),
-            Default::default(),
+            self.default_font_size(),
             Default::default(),
             Default::default(),
         )
@@ -953,7 +956,7 @@ impl Item for TextInput {
         }
         match event.event_type {
             KeyEventType::KeyPressed => {
-                // invoke first key_pressed callback to give the developer/designer the possibility to implement a custom behaviour
+                // invoke first key_pressed callback to give the developer/designer the possibility to implement a custom behavior
                 if Self::FIELD_OFFSETS
                     .key_pressed()
                     .apply_pin(self)
@@ -963,71 +966,41 @@ impl Item for TextInput {
                     return KeyEventResult::EventAccepted;
                 }
 
-                match event.text_shortcut() {
-                    Some(text_shortcut) if !self.read_only() => match text_shortcut {
-                        TextShortcut::Move(direction) => {
-                            TextInput::move_cursor(
-                                self,
-                                direction,
-                                event.key_event.modifiers.into(),
-                                TextChangeNotify::TriggerCallbacks,
-                                window_adapter,
-                                self_rc,
-                            );
-                            return KeyEventResult::EventAccepted;
-                        }
-                        TextShortcut::DeleteForward => {
-                            TextInput::select_and_delete(
-                                self,
-                                TextCursorDirection::Forward,
-                                window_adapter,
-                                self_rc,
-                            );
-                            return KeyEventResult::EventAccepted;
-                        }
-                        TextShortcut::DeleteBackward => {
-                            // Special case: backspace breaks the grapheme and selects the previous character
-                            TextInput::select_and_delete(
-                                self,
-                                TextCursorDirection::PreviousCharacter,
-                                window_adapter,
-                                self_rc,
-                            );
-                            return KeyEventResult::EventAccepted;
-                        }
-                        TextShortcut::DeleteWordForward => {
-                            TextInput::select_and_delete(
-                                self,
-                                TextCursorDirection::ForwardByWord,
-                                window_adapter,
-                                self_rc,
-                            );
-                            return KeyEventResult::EventAccepted;
-                        }
-                        TextShortcut::DeleteWordBackward => {
-                            TextInput::select_and_delete(
-                                self,
-                                TextCursorDirection::BackwardByWord,
-                                window_adapter,
-                                self_rc,
-                            );
-                            return KeyEventResult::EventAccepted;
-                        }
-                        TextShortcut::DeleteToStartOfLine => {
-                            TextInput::select_and_delete(
-                                self,
-                                TextCursorDirection::StartOfLine,
-                                window_adapter,
-                                self_rc,
-                            );
-                            return KeyEventResult::EventAccepted;
-                        }
-                    },
-                    Some(_) => {
+                let delete_direction = match event.text_shortcut() {
+                    Some(TextShortcut::Move(direction)) => {
+                        TextInput::move_cursor(
+                            self,
+                            direction,
+                            event.key_event.modifiers.into(),
+                            TextChangeNotify::TriggerCallbacks,
+                            window_adapter,
+                            self_rc,
+                        );
+                        return KeyEventResult::EventAccepted;
+                    }
+                    // Special case: backspace breaks the grapheme and selects the previous character
+                    Some(TextShortcut::DeleteBackward) => {
+                        Some(TextCursorDirection::PreviousCharacter)
+                    }
+                    Some(TextShortcut::DeleteForward) => Some(TextCursorDirection::Forward),
+                    Some(TextShortcut::DeleteWordForward) => {
+                        Some(TextCursorDirection::ForwardByWord)
+                    }
+                    Some(TextShortcut::DeleteWordBackward) => {
+                        Some(TextCursorDirection::BackwardByWord)
+                    }
+                    Some(TextShortcut::DeleteToStartOfLine) => {
+                        Some(TextCursorDirection::StartOfLine)
+                    }
+                    None => None,
+                };
+                if let Some(direction) = delete_direction {
+                    if self.read_only() {
                         return KeyEventResult::EventIgnored;
                     }
-                    None => (),
-                };
+                    TextInput::select_and_delete(self, direction, window_adapter, self_rc);
+                    return KeyEventResult::EventAccepted;
+                }
 
                 if let Some(keycode) = event.key_event.text.chars().next()
                     && keycode == key_codes::Return
@@ -1304,7 +1277,7 @@ impl HasFont for TextInput {
 
 impl RenderString for TextInput {
     fn text(self: Pin<&Self>) -> PlainOrStyledText {
-        PlainOrStyledText::Plain(self.as_ref().text())
+        PlainOrStyledText::Plain(self.as_ref().visual_representation(None).text.clone())
     }
 }
 
@@ -1375,20 +1348,7 @@ fn safe_byte_offset(unsafe_byte_offset: i32, text: &str) -> usize {
     if unsafe_byte_offset <= 0 {
         return 0;
     }
-    let byte_offset_candidate = unsafe_byte_offset as usize;
-
-    if byte_offset_candidate >= text.len() {
-        return text.len();
-    }
-
-    if text.is_char_boundary(byte_offset_candidate) {
-        return byte_offset_candidate;
-    }
-
-    // Use std::floor_char_boundary once stabilized.
-    text.char_indices()
-        .find_map(|(offset, _)| if offset >= byte_offset_candidate { Some(offset) } else { None })
-        .unwrap_or(text.len())
+    text.ceil_char_boundary(unsafe_byte_offset as usize)
 }
 
 /// This struct holds the fields needed for rendering a TextInput item after applying any
@@ -1397,7 +1357,7 @@ fn safe_byte_offset(unsafe_byte_offset: i32, text: &str) -> usize {
 #[derive(Debug)]
 pub struct TextInputVisualRepresentation {
     /// The text to be rendered including any pre-edit string
-    pub text: String,
+    pub text: SharedString,
     /// If set, this field specifies the range as byte offsets within the text field where the composition
     /// is in progress. Renderers typically provide visual feedback for the currently composed text, such as
     /// by using underlines.
@@ -1410,7 +1370,7 @@ pub struct TextInputVisualRepresentation {
     pub text_color: Brush,
     /// The color of the blinking cursor
     pub cursor_color: Color,
-    text_without_password: Option<String>,
+    text_without_password: Option<SharedString>,
     password_character: char,
 }
 
@@ -1448,14 +1408,25 @@ impl TextInputVisualRepresentation {
         self.password_character = password_character;
     }
 
-    /// Use this function to make a byte offset in the text used for rendering back to a byte offset in the
+    /// Use this function to make a byte offset in the visual text (used for rendering) back to a byte offset in the
     /// TextInput's text. The offsets might differ for example for password text input fields.
-    pub fn map_byte_offset_from_byte_offset_in_visual_text(&self, byte_offset: usize) -> usize {
+    pub fn map_byte_offset_from_visual_text_to_actual_text(&self, byte_offset: usize) -> usize {
         if let Some(text_without_password) = self.text_without_password.as_ref() {
             text_without_password
                 .char_indices()
                 .nth(byte_offset / self.password_character.len_utf8())
                 .map_or(text_without_password.len(), |(r, _)| r)
+        } else {
+            byte_offset
+        }
+    }
+
+    /// Map the byte_offset inside the TextInput's text to the byte offset in the visual text.
+    /// This is the opposite of `map_byte_offset_from_byte_offset_in_visual_text`.
+    pub fn map_byte_offset_from_actual_to_visual_text(&self, byte_offset: usize) -> usize {
+        if let Some(text_without_password) = self.text_without_password.as_ref() {
+            text_without_password[..byte_offset].chars().count()
+                * self.password_character.len_utf8()
         } else {
             byte_offset
         }
@@ -1975,17 +1946,6 @@ impl TextInput {
         }
     }
 
-    pub fn font_request(self: Pin<&Self>, self_rc: &ItemRc) -> FontRequest {
-        WindowItem::resolved_font_request(
-            self_rc,
-            self.font_family(),
-            self.font_weight(),
-            self.font_size(),
-            self.letter_spacing(),
-            self.font_italic(),
-        )
-    }
-
     /// Returns a [`TextInputVisualRepresentation`] struct that contains all the fields necessary for rendering the text input,
     /// after making adjustments such as applying a substitution of characters for password input fields, or making sure
     /// that the selection start is always less or equal than the selection end.
@@ -1993,13 +1953,14 @@ impl TextInput {
         self: Pin<&Self>,
         password_character_fn: Option<fn() -> char>,
     ) -> TextInputVisualRepresentation {
-        let mut text: String = self.text().into();
+        let mut text = self.text();
 
         let preedit_text = self.preedit_text();
         let (preedit_range, selection_range, cursor_position) = if !preedit_text.is_empty() {
             let cursor_position = self.cursor_position(&text);
 
-            text.insert_str(cursor_position, &preedit_text);
+            text =
+                [&text[..cursor_position], &preedit_text, &text[cursor_position..]].concat().into();
             let preedit_range = cursor_position..cursor_position + preedit_text.len();
 
             if let Some(preedit_sel) = self.preedit_selection().as_option() {
@@ -2015,7 +1976,7 @@ impl TextInput {
             let (selection_anchor_pos, selection_cursor_pos) = self.selection_anchor_and_cursor();
             let selection_range = selection_anchor_pos..selection_cursor_pos;
             let cursor_position = self.cursor_position(&text);
-            let cursor_visible = self.cursor_visible() && self.enabled() && !self.read_only();
+            let cursor_visible = self.cursor_visible() && self.enabled();
             let cursor_position = if cursor_visible && selection_range.is_empty() {
                 Some(cursor_position)
             } else {
@@ -2106,16 +2067,14 @@ impl TextInput {
                         items.push(item);
                     }
                 }
-                (UndoItemKind::TextRemove, UndoItemKind::TextRemove) => {
-                    if item.pos + item.text.len() == last.pos {
-                        last.pos = item.pos;
-                        let old_text = last.text.clone();
-                        last.text = item.text;
-                        last.text += &old_text;
-                        // prepend
-                    } else {
-                        items.push(item);
-                    }
+                (UndoItemKind::TextRemove, UndoItemKind::TextRemove)
+                    if item.pos + item.text.len() == last.pos =>
+                {
+                    last.pos = item.pos;
+                    let old_text = last.text.clone();
+                    last.text = item.text;
+                    last.text += &old_text;
+                    // prepend
                 }
                 _ => {
                     items.push(item);
@@ -2128,7 +2087,7 @@ impl TextInput {
         self.undo_items.set(items);
     }
 
-    fn undo(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, self_rc: &ItemRc) {
+    pub fn undo(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, self_rc: &ItemRc) {
         let mut items = self.undo_items.take();
         let Some(last) = items.pop() else {
             return;
@@ -2173,7 +2132,7 @@ impl TextInput {
         Self::FIELD_OFFSETS.edited().apply_pin(self).call(&());
     }
 
-    fn redo(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, self_rc: &ItemRc) {
+    pub fn redo(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, self_rc: &ItemRc) {
         let mut items = self.redo_items.take();
         let Some(last) = items.pop() else {
             return;
@@ -2230,17 +2189,35 @@ impl TextInput {
 
     fn accept_text_input(self: Pin<&Self>, text_to_insert: &str) -> bool {
         let input_type = self.input_type();
-        if input_type == InputType::Number && !text_to_insert.chars().all(|ch| ch.is_ascii_digit())
-        {
-            return false;
-        } else if input_type == InputType::Decimal {
-            let (a, c) = self.selection_anchor_and_cursor();
-            let text = self.text();
-            let text = [&text[..a], text_to_insert, &text[c..]].concat();
-            if text.as_str() != "." && text.as_str() != "-" && text.parse::<f64>().is_err() {
-                return false;
+
+        match input_type {
+            InputType::Number => return text_to_insert.chars().all(|ch| ch.is_ascii_digit()),
+            InputType::Decimal => {
+                let (a, c) = self.selection_anchor_and_cursor();
+                let current = self.text();
+                let candidate = [&current[..a], text_to_insert, &current[c..]].concat();
+
+                // Allow localized ".", "-", "-." because otherwise the cannot start entering
+                if candidate.len() <= 2
+                    && crate::context::GLOBAL_CONTEXT.with(|ctx| {
+                        let sep =
+                            ctx.get().map(|ctx| ctx.locale_decimal_separator()).unwrap_or('.');
+                        let mut it = candidate.chars();
+                        match (it.next(), it.next()) {
+                            (Some('-'), None) => true,
+                            (Some('-'), Some(c2)) => c2 == sep,
+                            (Some(c1), None) => c1 == sep,
+                            _ => false,
+                        }
+                    })
+                {
+                    return true;
+                }
+                return string_to_float(&candidate).is_some();
             }
+            InputType::Password | InputType::Text | InputType::Search => (),
         }
+
         true
     }
 }
@@ -2375,6 +2352,36 @@ pub unsafe extern "C" fn slint_textinput_paste(
         let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
         let self_rc = ItemRc::new(self_component.clone(), self_index);
         text_input.paste(window_adapter, &self_rc);
+    }
+}
+
+#[cfg(feature = "ffi")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_textinput_undo(
+    text_input: Pin<&TextInput>,
+    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
+    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
+    self_index: u32,
+) {
+    unsafe {
+        let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
+        let self_rc = ItemRc::new(self_component.clone(), self_index);
+        text_input.undo(window_adapter, &self_rc);
+    }
+}
+
+#[cfg(feature = "ffi")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_textinput_redo(
+    text_input: Pin<&TextInput>,
+    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
+    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
+    self_index: u32,
+) {
+    unsafe {
+        let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
+        let self_rc = ItemRc::new(self_component.clone(), self_index);
+        text_input.redo(window_adapter, &self_rc);
     }
 }
 

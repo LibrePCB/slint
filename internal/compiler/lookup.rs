@@ -470,7 +470,10 @@ impl LookupObject for ElementRc {
             _ => false,
         };
         if !is_global {
-            for (name, ty, _) in crate::typeregister::reserved_properties() {
+            for (name, ty, visibility) in crate::typeregister::reserved_properties() {
+                if visibility == PropertyVisibility::Private {
+                    continue;
+                }
                 let name = SmolStr::new_static(name);
                 let e =
                     expression_from_reference(NamedReference::new(self, name.clone()), &ty, None);
@@ -665,7 +668,7 @@ impl ColorSpecific {
 pub struct KeysLookup;
 
 macro_rules! special_keys_lookup {
-    ($($char:literal # $name:ident # $($shifted:ident)? # $($_muda:ident)? $(=> $($qt:ident)|* # $($winit:ident $(($_pos:ident))?)|* # $($_xkb:ident)|*)? ;)*) => {
+    ($($char:literal # $name:ident # $($shifted:ident)? $(=> $($_muda:ident)? # $($qt:ident)|* # $($winit:ident $(($_pos:ident))?)|* # $($_xkb:ident)|*)? ;)*) => {
         impl LookupObject for KeysLookup {
             fn for_each_entry<R>(
                 &self,
@@ -1037,6 +1040,7 @@ impl LookupObject for StringExpression<'_> {
             .or_else(|| f("to-uppercase", member_function(BuiltinFunction::StringToUppercase)))
     }
 }
+
 struct ColorExpression<'a>(&'a Expression);
 impl LookupObject for ColorExpression<'_> {
     fn for_each_entry<R>(

@@ -1,18 +1,13 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore RAII
 pub use parley;
 pub use parley::fontique;
 
-use alloc::vec::Vec;
-use core::ops::Range;
-use core::pin::Pin;
-use euclid::num::Zero;
-use skrifa::MetadataProvider as _;
-use std::cell::RefCell;
-
+use crate::item_rendering::HasFont;
 use crate::{
-    Color, SharedString,
+    Color,
     graphics::FontRequest,
     item_rendering::PlainOrStyledText,
     items::TextStrokeStyle,
@@ -23,6 +18,42 @@ use crate::{
     renderer::RendererSealed,
     textlayout::{TextHorizontalAlignment, TextOverflow, TextVerticalAlignment, TextWrap},
 };
+use alloc::vec::Vec;
+use core::ops::Range;
+use core::pin::Pin;
+use euclid::num::Zero;
+use i_slint_common::sharedfontique;
+use skrifa::MetadataProvider as _;
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::sync::Arc;
+
+#[derive(derive_more::Deref, derive_more::DerefMut)]
+pub struct FontContext {
+    #[deref]
+    #[deref_mut]
+    pub inner: parley::FontContext,
+    /// `(ptr, len)` of each `&'static [u8]` already handed to fontique, so repeat
+    /// `register_static_font` calls for the same embedded font are skipped.
+    registered_static_fonts: HashSet<(usize, usize)>,
+}
+
+impl FontContext {
+    pub fn new(inner: parley::FontContext) -> Self {
+        Self { inner, registered_static_fonts: HashSet::default() }
+    }
+
+    pub fn register_static_font(&mut self, data: &'static [u8]) {
+        let key = (data.as_ptr() as usize, data.len());
+        if self.registered_static_fonts.insert(key) {
+            self.inner.collection.register_fonts(fontique::Blob::new(Arc::new(data)), None);
+        }
+    }
+
+    pub fn clear_registered_static_fonts(&mut self) {
+        self.registered_static_fonts.clear();
+    }
+}
 
 type InnerTextLayoutCache = crate::item_rendering::ItemCache<Vec<TextParagraph>>;
 
@@ -71,8 +102,6 @@ pub type PhysicalRect = euclid::Rect<f32, PhysicalPx>;
 type PhysicalSize = euclid::Size2D<f32, PhysicalPx>;
 type PhysicalPoint = euclid::Point2D<f32, PhysicalPx>;
 
-use i_slint_common::sharedfontique;
-
 /// Trait used for drawing text and text input elements with parley, where parley does the
 /// shaping and positioning, and the renderer is responsible for drawing just the glyphs.
 pub trait GlyphRenderer: crate::item_rendering::ItemRenderer {
@@ -112,7 +141,7 @@ pub trait GlyphRenderer: crate::item_rendering::ItemRenderer {
         glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph>,
     );
 
-    fn fill_rectange_with_color(&mut self, physical_rect: PhysicalRect, color: Color) {
+    fn fill_rectangle_with_color(&mut self, physical_rect: PhysicalRect, color: Color) {
         if let Some(platform_brush) = self.platform_brush_for_color(&color) {
             self.fill_rectangle(physical_rect, platform_brush);
         }
@@ -123,7 +152,7 @@ pub trait GlyphRenderer: crate::item_rendering::ItemRenderer {
     fn fill_rectangle(&mut self, physical_rect: PhysicalRect, brush: Self::PlatformBrush);
 }
 
-pub const DEFAULT_FONT_SIZE: LogicalLength = LogicalLength::new(12.);
+pub use super::DEFAULT_FONT_SIZE;
 
 std::thread_local! {
     static LAYOUT_CONTEXT: RefCell<parley::LayoutContext<Brush>> = Default::default();
@@ -190,7 +219,28 @@ impl LayoutWithoutLineBreaksBuilder {
         font_ctx: &'a mut parley::FontContext,
         text: &'a str,
     ) -> parley::RangedBuilder<'a, Brush> {
-        let mut builder = layout_ctx.ranged_builder(font_ctx, text, self.scale_factor.get(), true);
+        // Pin the line height to the requested font's metrics so fallback runs (e.g.
+        // password chars rendered by a wider-descender symbol font) don't grow the
+        // line box. FontSizeRelative makes the ratio scale with any per-span FontSize.
+        let line_height_ratio = self.font_request.as_ref().and_then(|font_request| {
+            let font = font_request
+                .clone()
+                .query_fontique(&mut font_ctx.collection, &mut font_ctx.source_cache)?;
+            let face = skrifa::FontRef::from_index(font.blob.data(), font.index).ok()?;
+            let location = face.axes().location(font.synthesis.variation_settings());
+            let metrics = face.metrics(skrifa::instance::Size::unscaled(), &location);
+            let units_per_em = metrics.units_per_em as f32;
+            (units_per_em > 0.0)
+                .then(|| (metrics.ascent - metrics.descent + metrics.leading) / units_per_em)
+        });
+
+        let mut builder = layout_ctx.ranged_builder(font_ctx, text, self.scale_factor.get(), false);
+
+        if let Some(ratio) = line_height_ratio {
+            builder.push_default(parley::StyleProperty::LineHeight(
+                parley::style::LineHeight::FontSizeRelative(ratio),
+            ));
+        }
 
         if let Some(ref font_request) = self.font_request {
             let mut fallback_family_iter = sharedfontique::FALLBACK_FAMILIES
@@ -242,6 +292,15 @@ impl LayoutWithoutLineBreaksBuilder {
             TextWrap::NoWrap => parley::style::OverflowWrap::Normal,
             TextWrap::WordWrap | TextWrap::CharWrap => parley::style::OverflowWrap::Anywhere,
         }));
+        if self.text_wrap == TextWrap::NoWrap {
+            // Parley 0.9 removed the width parameter from `Layout::align()` and instead
+            // uses the `max_advance` set by `break_all_lines()` as the alignment container
+            // width. To allow passing `max_physical_width` to `break_all_lines` for alignment
+            // purposes without triggering actual line wrapping, we must set `TextWrapMode::NoWrap`.
+            builder.push_default(parley::StyleProperty::TextWrapMode(
+                parley::style::TextWrapMode::NoWrap,
+            ));
+        }
 
         builder.push_default(parley::StyleProperty::Brush(Brush {
             override_fill_color: None,
@@ -420,8 +479,6 @@ fn create_text_paragraphs(
     paragraphs
 }
 
-/// `text_wrap` is passed separately from the shaped paragraphs because
-/// `text_layout_info()` calls `text_size()` with `NoWrap` for horizontal sizing.
 /// Note: parley currently uses `WordBreak` while shaping via `analyze_text()`,
 /// so shaped paragraphs aren't identical across wrap modes. This is why `text_size()`
 /// doesn't use the `TextLayoutCache` — it would be incorrect to share cached paragraphs
@@ -431,14 +488,13 @@ fn layout(
     font_context: &mut parley::FontContext,
     mut paragraphs: Vec<TextParagraph>,
     scale_factor: ScaleFactor,
-    text_wrap: TextWrap,
     options: LayoutOptions,
 ) -> Layout {
     let max_physical_width = options.max_width.map(|max_width| max_width * scale_factor);
     let max_physical_height = options.max_height.map(|max_height| max_height * scale_factor);
 
-    // Returned None if failed to get the elipsis glyph for some rare reason.
-    let get_elipsis_glyph = |font_context: &mut parley::FontContext| {
+    // Returned None if failed to get the ellipsis glyph for some rare reason.
+    let get_ellipsis_glyph = |font_context: &mut parley::FontContext| {
         let mut layout = layout_builder.build(font_context, "…", None, None, None);
         layout.break_all_lines(None);
         let line = layout.lines().next()?;
@@ -451,24 +507,20 @@ fn layout(
         Some((glyph, run.run().font().clone()))
     };
 
-    let elision_info =
-        if let (TextOverflow::Elide, Some(max_physical_width)) =
-            (options.text_overflow, max_physical_width)
-        {
-            get_elipsis_glyph(font_context).map(|(elipsis_glyph, font_for_elipsis_glyph)| {
-                ElisionInfo { elipsis_glyph, font_for_elipsis_glyph, max_physical_width }
-            })
-        } else {
-            None
-        };
+    let elision_info = if let (TextOverflow::Elide, Some(max_physical_width)) =
+        (options.text_overflow, max_physical_width)
+    {
+        get_ellipsis_glyph(font_context).map(|(ellipsis_glyph, font_for_ellipsis_glyph)| {
+            ElisionInfo { ellipsis_glyph, font_for_ellipsis_glyph, max_physical_width }
+        })
+    } else {
+        None
+    };
 
     let mut para_y = 0.0;
     for para in paragraphs.iter_mut() {
-        para.layout.break_all_lines(
-            max_physical_width.filter(|_| text_wrap != TextWrap::NoWrap).map(|width| width.get()),
-        );
+        para.layout.break_all_lines(max_physical_width.map(|width| width.get()));
         para.layout.align(
-            max_physical_width.map(|width| width.get()),
             match options.horizontal_align {
                 TextHorizontalAlignment::Start | TextHorizontalAlignment::Left => {
                     parley::Alignment::Left
@@ -488,10 +540,10 @@ fn layout(
     let max_width = paragraphs
         .iter()
         .map(|p| {
-            // The max width is used for the elipsis computation when eliding text. We *want* to exclude whitespace
+            // The max width is used for the ellipsis computation when eliding text. We *want* to exclude whitespace
             // for that, but we can't at the glyph run level, so the glyph runs always *do* include whitespace glyphs,
             // and as such we must also accept the full width here including trailing whitespace, otherwise text with
-            // trailing whitespace will assigned a smaller width for rendering and thus the elipsis will be placed.
+            // trailing whitespace will assigned a smaller width for rendering and thus the ellipsis will be placed.
             PhysicalLength::new(p.layout.full_width())
         })
         .fold(PhysicalLength::zero(), PhysicalLength::max);
@@ -563,8 +615,8 @@ fn get_or_create_text_paragraphs<'a>(
 }
 
 struct ElisionInfo {
-    elipsis_glyph: parley::layout::Glyph,
-    font_for_elipsis_glyph: parley::FontData,
+    ellipsis_glyph: parley::layout::Glyph,
+    font_for_ellipsis_glyph: parley::FontData,
     max_physical_width: PhysicalLength,
 }
 
@@ -602,10 +654,10 @@ impl TextParagraph {
                 let metrics = line.metrics();
                 match layout.max_physical_height {
                     // If overflow: clip is set, we apply a hard pixel clip, but with overflow: elide,
-                    // we want to place an elipsis on the last line and not draw any lines beyond the
+                    // we want to place an ellipsis on the last line and not draw any lines beyond the
                     // given max height.
                     Some(max_physical_height) if layout.elision_info.is_some() => {
-                        max_physical_height.get().ceil() >= metrics.max_coord
+                        max_physical_height.get().ceil() >= metrics.block_max_coord
                     }
                     _ => true,
                 }
@@ -617,8 +669,8 @@ impl TextParagraph {
             for item in line.items() {
                 match item {
                     parley::PositionedLayoutItem::GlyphRun(glyph_run) => {
-                        let elipsis = if last_line {
-                            let (truncated_glyphs, elipsis) =
+                        let ellipsis = if last_line {
+                            let (truncated_glyphs, ellipsis) =
                                 layout.glyphs_with_elision(&glyph_run);
 
                             Self::draw_glyph_run(
@@ -630,7 +682,7 @@ impl TextParagraph {
                                 &mut truncated_glyphs.into_iter(),
                                 draw_glyphs,
                             );
-                            elipsis
+                            ellipsis
                         } else {
                             Self::draw_glyph_run(
                                 &glyph_run,
@@ -644,17 +696,17 @@ impl TextParagraph {
                             None
                         };
 
-                        if let Some((elipsis_glyph, elipsis_font, font_size)) = elipsis {
+                        if let Some((ellipsis_glyph, ellipsis_font, font_size)) = ellipsis {
                             let run = glyph_run.run();
                             draw_glyphs(
                                 item_renderer,
-                                &elipsis_font,
+                                &ellipsis_font,
                                 font_size,
                                 run.normalized_coords(),
                                 &run.synthesis(),
                                 default_fill_brush.clone(),
                                 para_y,
-                                &mut core::iter::once(elipsis_glyph),
+                                &mut core::iter::once(ellipsis_glyph),
                             );
                         }
                     }
@@ -922,7 +974,7 @@ impl Layout {
     }
 
     /// Returns an iterator over the run's glyphs, truncated if necessary to fit within the max width,
-    /// plus an optional elipsis glyph with its font and size to be drawn separately.
+    /// plus an optional ellipsis glyph with its font and size to be drawn separately.
     /// Call this function only for the last line of the layout.
     fn glyphs_with_elision<'a>(
         &'a self,
@@ -931,8 +983,8 @@ impl Layout {
         impl Iterator<Item = parley::layout::Glyph> + Clone + 'a,
         Option<(parley::layout::Glyph, parley::FontData, PhysicalLength)>,
     ) {
-        let elipsis_advance =
-            self.elision_info.as_ref().map(|info| info.elipsis_glyph.advance).unwrap_or(0.0);
+        let ellipsis_advance =
+            self.elision_info.as_ref().map(|info| info.ellipsis_glyph.advance).unwrap_or(0.0);
         let max_width = self
             .elision_info
             .as_ref()
@@ -942,39 +994,39 @@ impl Layout {
         let run_start = PhysicalLength::new(glyph_run.offset());
         let run_end = PhysicalLength::new(glyph_run.offset() + glyph_run.advance());
 
-        // Run starts after where the elipsis would go - skip entirely
+        // Run starts after where the ellipsis would go - skip entirely
         let run_beyond_elision = run_start > max_width;
-        // Run extends beyond max width and needs truncation + elipsis
+        // Run extends beyond max width and needs truncation + ellipsis
         let needs_elision = !run_beyond_elision && run_end.get().floor() > max_width.get().ceil();
 
         let truncated_glyphs = glyph_run.positioned_glyphs().take_while(move |glyph| {
             !run_beyond_elision
                 && (!needs_elision
-                    || PhysicalLength::new(glyph.x + glyph.advance + elipsis_advance) <= max_width)
+                    || PhysicalLength::new(glyph.x + glyph.advance + ellipsis_advance) <= max_width)
         });
 
-        let elipsis = if needs_elision {
+        let ellipsis = if needs_elision {
             self.elision_info.as_ref().map(|info| {
-                let elipsis_x = glyph_run
+                let ellipsis_x = glyph_run
                     .positioned_glyphs()
                     .find(|glyph| {
-                        PhysicalLength::new(glyph.x + glyph.advance + info.elipsis_glyph.advance)
+                        PhysicalLength::new(glyph.x + glyph.advance + info.ellipsis_glyph.advance)
                             > info.max_physical_width
                     })
                     .map(|g| g.x)
                     .unwrap_or(0.0);
 
-                let mut elipsis_glyph = info.elipsis_glyph;
-                elipsis_glyph.x = elipsis_x;
+                let mut ellipsis_glyph = info.ellipsis_glyph;
+                ellipsis_glyph.x = ellipsis_x;
 
                 let font_size = PhysicalLength::new(glyph_run.run().font_size());
-                (elipsis_glyph, info.font_for_elipsis_glyph.clone(), font_size)
+                (ellipsis_glyph, info.font_for_ellipsis_glyph.clone(), font_size)
             })
         } else {
             None
         };
 
-        (truncated_glyphs, elipsis)
+        (truncated_glyphs, ellipsis)
     }
 
     fn draw<R: GlyphRenderer>(
@@ -1059,14 +1111,12 @@ pub fn draw_text(
 
     let (horizontal_align, vertical_align) = text.alignment();
     let text_overflow = text.overflow();
-    let text_wrap = text.wrap();
 
     let layout = layout(
         &layout_builder,
         &mut font_ctx,
         guard.paragraphs.take().unwrap_or_default(),
         scale_factor,
-        text_wrap,
         LayoutOptions {
             horizontal_align,
             vertical_align,
@@ -1152,7 +1202,6 @@ pub fn link_under_cursor(
         font_context,
         guard.paragraphs.take().unwrap_or_default(),
         scale_factor,
-        text.wrap(),
         LayoutOptions {
             horizontal_align,
             vertical_align,
@@ -1238,7 +1287,7 @@ pub fn draw_text_input(
         scale_factor,
     );
 
-    let text: SharedString = visual_representation.text.into();
+    let text = visual_representation.text.clone();
 
     // When a piece of text is first selected, it gets an empty range like `Some(1..1)`.
     // If the text starts with a multi-byte character then this selection will be within
@@ -1264,7 +1313,6 @@ pub fn draw_text_input(
         &mut font_ctx,
         paragraphs_without_linebreaks,
         scale_factor,
-        text_input.wrap(),
         LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
     );
 
@@ -1272,7 +1320,7 @@ pub fn draw_text_input(
 
     layout.selection_geometry(selection_range, |selection_rect| {
         item_renderer
-            .fill_rectange_with_color(selection_rect, text_input.selection_background_color());
+            .fill_rectangle_with_color(selection_rect, text_input.selection_background_color());
     });
 
     item_renderer.save_state();
@@ -1313,7 +1361,8 @@ pub fn draw_text_input(
                 cursor_pos,
                 text_input.text_cursor_width() * scale_factor,
             );
-            item_renderer.fill_rectange_with_color(cursor_rect, visual_representation.cursor_color);
+            item_renderer
+                .fill_rectangle_with_color(cursor_rect, visual_representation.cursor_color);
         }
     }
 
@@ -1330,17 +1379,17 @@ pub fn text_size(
 ) -> Option<LogicalSize> {
     let scale_factor = renderer.scale_factor()?;
 
+    // Evaluate properties before borrowing font_context: both font_request()
+    // and text() can trigger property bindings that re-enter text_size for
+    // other elements, which would panic on a second borrow_mut().
+    let font_request = text_item.font_request(item_rc);
+    let text = text_item.text();
+
     let ctx = renderer.slint_context()?;
     let mut font_ctx = ctx.font_context().borrow_mut();
 
-    let layout_builder = LayoutWithoutLineBreaksBuilder::new(
-        Some(text_item.font_request(item_rc)),
-        text_wrap,
-        None,
-        scale_factor,
-    );
-
-    let text = text_item.text();
+    let layout_builder =
+        LayoutWithoutLineBreaksBuilder::new(Some(font_request), text_wrap, None, scale_factor);
 
     let paragraphs_without_linebreaks =
         create_text_paragraphs(&layout_builder, &mut font_ctx, text, None, Color::default());
@@ -1350,7 +1399,6 @@ pub fn text_size(
         &mut font_ctx,
         paragraphs_without_linebreaks,
         scale_factor,
-        text_wrap,
         LayoutOptions {
             max_width,
             max_height: None,
@@ -1444,23 +1492,23 @@ pub fn text_input_byte_offset_for_position(
         return 0;
     }
 
-    let Some(ctx) = renderer.slint_context() else {
-        return 0;
-    };
-    let mut font_ctx = ctx.font_context().borrow_mut();
-
     let layout_builder = LayoutWithoutLineBreaksBuilder::new(
         Some(text_input.font_request(item_rc)),
         text_input.wrap(),
         None,
         scale_factor,
     );
+    let visual_representation = text_input.visual_representation(None);
 
-    let text = text_input.text();
+    let Some(ctx) = renderer.slint_context() else {
+        return 0;
+    };
+    let mut font_ctx = ctx.font_context().borrow_mut();
+
     let paragraphs_without_linebreaks = create_text_paragraphs(
         &layout_builder,
         &mut font_ctx,
-        PlainOrStyledText::Plain(text),
+        PlainOrStyledText::Plain(visual_representation.text.clone()),
         None,
         Color::default(),
     );
@@ -1470,12 +1518,10 @@ pub fn text_input_byte_offset_for_position(
         &mut font_ctx,
         paragraphs_without_linebreaks,
         scale_factor,
-        text_input.wrap(),
         LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
     );
     let byte_offset = layout.byte_offset_from_point(pos);
-    let visual_representation = text_input.visual_representation(None);
-    visual_representation.map_byte_offset_from_byte_offset_in_visual_text(byte_offset)
+    visual_representation.map_byte_offset_from_visual_text_to_actual_text(byte_offset)
 }
 
 pub fn text_input_cursor_rect_for_byte_offset(
@@ -1504,16 +1550,21 @@ pub fn text_input_cursor_rect_for_byte_offset(
         );
     }
 
+    let visual_representation = text_input.visual_representation(None);
+    let cursor_width = text_input.text_cursor_width() * scale_factor;
+
     let Some(ctx) = renderer.slint_context() else {
         return LogicalRect::default();
     };
+
     let mut font_ctx = ctx.font_context().borrow_mut();
 
-    let text = text_input.text();
+    let byte_offset = visual_representation.map_byte_offset_from_actual_to_visual_text(byte_offset);
+
     let paragraphs_without_linebreaks = create_text_paragraphs(
         &layout_builder,
         &mut font_ctx,
-        PlainOrStyledText::Plain(text),
+        PlainOrStyledText::Plain(visual_representation.text),
         None,
         Color::default(),
     );
@@ -1523,10 +1574,8 @@ pub fn text_input_cursor_rect_for_byte_offset(
         &mut font_ctx,
         paragraphs_without_linebreaks,
         scale_factor,
-        text_input.wrap(),
         LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
     );
-    let cursor_rect = layout
-        .cursor_rect_for_byte_offset(byte_offset, text_input.text_cursor_width() * scale_factor);
+    let cursor_rect = layout.cursor_rect_for_byte_offset(byte_offset, cursor_width);
     cursor_rect / scale_factor
 }

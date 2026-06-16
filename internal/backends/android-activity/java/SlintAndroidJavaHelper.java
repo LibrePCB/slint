@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell:ignore Spannable tbstart tbend
+
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import android.view.ActionMode;
@@ -224,6 +226,7 @@ class SlintInputView extends View {
         super.onConfigurationChanged(newConfig);
         int currentNightMode = newConfig.uiMode & Configuration.UI_MODE_NIGHT_MASK;
         SlintAndroidJavaHelper.setNightMode(currentNightMode);
+        SlintAndroidJavaHelper.setFontScale(newConfig.fontScale);
     }
 
     private InputHandle mCursorHandle;
@@ -408,36 +411,25 @@ public class SlintAndroidJavaHelper {
                         FrameLayout.LayoutParams.MATCH_PARENT);
                 mActivity.addContentView(mInputView, params);
                 mInputView.setVisibility(View.VISIBLE);
-            }
-        });
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            activity.getWindow().getDecorView().getRootView()
-                    .setWindowInsetsAnimationCallback(
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    mActivity.getWindow().getDecorView().getRootView()
+                            .setOnApplyWindowInsetsListener((v, insets) -> dispatchInsets(insets));
+                    // Attach the IME animation callback to the input view rather than the
+                    // decor root: some OEM ROMs fail to render the IME surface when an
+                    // animation callback is installed on the window's root view.
+                    mInputView.setWindowInsetsAnimationCallback(
                             new WindowInsetsAnimation.Callback(
                                     WindowInsetsAnimation.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
                                 @Override
                                 public WindowInsets onProgress(WindowInsets insets,
                                         java.util.List<WindowInsetsAnimation> runningAnimations) {
-                                    mActivity.runOnUiThread(new Runnable() {
-                                        @Override
-                                        public void run() {
-                                            Insets safeAreaInsets = insets.getInsets(WindowInsets.Type.systemBars());
-                                            Insets keyboardAreaInsets = insets.getInsets(WindowInsets.Type.ime());
-                                            Rect windowRect = get_view_rect();
-
-                                            SlintAndroidJavaHelper.setInsets(
-                                                    windowRect.top, windowRect.left,
-                                                    windowRect.bottom, windowRect.right,
-                                                    safeAreaInsets.top, safeAreaInsets.left,
-                                                    safeAreaInsets.bottom, safeAreaInsets.right,
-                                                    keyboardAreaInsets.top, keyboardAreaInsets.left,
-                                                    keyboardAreaInsets.bottom, keyboardAreaInsets.right);
-                                        }
-                                    });
-                                    return insets;
+                                    return dispatchInsets(insets);
                                 }
                             });
-        } else {
+                }
+            }
+        });
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             activity.getWindow().getDecorView().getRootView().getViewTreeObserver()
                     .addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
                         @Override
@@ -493,6 +485,20 @@ public class SlintAndroidJavaHelper {
         }
     }
 
+    private WindowInsets dispatchInsets(WindowInsets insets) {
+        Insets safeAreaInsets = insets.getInsets(WindowInsets.Type.systemBars());
+        Insets keyboardAreaInsets = insets.getInsets(WindowInsets.Type.ime());
+        Rect windowRect = get_view_rect();
+        SlintAndroidJavaHelper.setInsets(
+                windowRect.top, windowRect.left,
+                windowRect.bottom, windowRect.right,
+                safeAreaInsets.top, safeAreaInsets.left,
+                safeAreaInsets.bottom, safeAreaInsets.right,
+                keyboardAreaInsets.top, keyboardAreaInsets.left,
+                keyboardAreaInsets.bottom, keyboardAreaInsets.right);
+        return insets;
+    }
+
     public void show_keyboard() {
         mActivity.runOnUiThread(new Runnable() {
             @Override
@@ -520,6 +526,8 @@ public class SlintAndroidJavaHelper {
             int preeditOffset);
 
     static public native void setNightMode(int nightMode);
+
+    static public native void setFontScale(float fontScale);
 
     static public native void moveCursorHandle(int id, int pos_x, int pos_y);
 
@@ -565,6 +573,10 @@ public class SlintAndroidJavaHelper {
     public int color_scheme() {
         int nightModeFlags = mActivity.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
         return nightModeFlags;
+    }
+
+    public float font_scale() {
+        return mActivity.getResources().getConfiguration().fontScale;
     }
 
     public int accent_color() {

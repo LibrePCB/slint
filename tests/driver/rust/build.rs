@@ -66,10 +66,10 @@ fn generated_file_for_test<'a>(
     // parallelizing the compilation.
     if base.map(|path| case_root_dir.join(path).is_dir()).unwrap_or_default() {
         let mut base = base.unwrap().to_owned();
-        if base.starts_with("widgets")
-            && let Some(style) = testcase.requested_style
-        {
-            base = PathBuf::from(format!("{}-{}", base.display(), style));
+        if base.starts_with("widgets") {
+            if let Some(style) = testcase.requested_style {
+                base = PathBuf::from(format!("{}-{}", base.display(), style));
+            }
         }
 
         let base = base.into_os_string();
@@ -117,8 +117,6 @@ fn main() -> std::io::Result<()> {
             "#[ignore = \"testcase ignored in live-preview mode\"]"
         } else if live_preview && source.contains("#3464") {
             "#[ignore = \"issue #3464 not fixed with the interpreter\"]"
-        } else if live_preview && module_name.contains("widgets_menubar") {
-            "#[ignore = \"issue #8454 causes crashes\"]"
         } else if live_preview && module_name.contains("write_to_model") {
             "#[ignore = \"Interpreted model don't forward to underlying models for anonymous structs\"]"
         } else {

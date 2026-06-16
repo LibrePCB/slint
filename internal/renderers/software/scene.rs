@@ -57,7 +57,7 @@ impl Scene {
         items.retain(|i| i.pos.y_length() + i.size.height_length() > current_line);
         items.sort_unstable_by(compare_scene_item);
         let current_items_index = items.partition_point(|i| i.pos.y_length() <= current_line);
-        items[..current_items_index].sort_unstable_by(|a, b| b.z.cmp(&a.z));
+        items[..current_items_index].sort_unstable_by_key(|b| core::cmp::Reverse(b.z));
         let mut r = Self {
             items,
             current_line,
@@ -116,7 +116,7 @@ impl Scene {
                 self.items[i] = item;
                 i += 1;
             }
-            self.items[0..i].sort_unstable_by(|a, b| b.z.cmp(&a.z));
+            self.items[0..i].sort_unstable_by_key(|b| core::cmp::Reverse(b.z));
             self.current_items_index = i;
             return;
         }
@@ -197,7 +197,7 @@ impl Scene {
                     self.items[i] = item;
                     i += 1;
                 }
-                self.items[sort_begin..i].sort_unstable_by(|a, b| b.z.cmp(&a.z));
+                self.items[sort_begin..i].sort_unstable_by_key(|b| core::cmp::Reverse(b.z));
                 break;
             }
             self.items[i] = item;
@@ -537,9 +537,12 @@ pub struct LinearGradientCommand {
 pub struct RadialGradientCommand {
     /// The gradient stops (colors and positions)
     pub stops: i_slint_core::SharedVector<i_slint_core::graphics::GradientStop>,
-    /// Center of the gradient relative to the item position
-    pub center_x: PhysicalLength,
-    pub center_y: PhysicalLength,
+    /// Center in physical pixels, relative to the clipped rect's top-left corner.
+    /// Stored as f32 to avoid i16 saturation for off-bbox centers at high scale factors.
+    pub center_x: f32,
+    pub center_y: f32,
+    /// Explicit radius in physical pixels. Always resolved (non-negative) before command construction.
+    pub radius: f32,
 }
 
 /// Conic gradient that interpolates colors around a center point
@@ -553,4 +556,8 @@ pub struct ConicGradientCommand {
     /// The gradient stops (colors and normalized angle positions)
     /// Position 0 = 0 degrees (north), 1 = 360 degrees
     pub stops: i_slint_core::SharedVector<i_slint_core::graphics::GradientStop>,
+    /// Center in physical pixels, relative to the clipped rect's top-left corner.
+    /// Stored as f32 to avoid i16 saturation for off-bbox centers at high scale factors.
+    pub center_x: f32,
+    pub center_y: f32,
 }

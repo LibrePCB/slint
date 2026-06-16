@@ -1,7 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-// cSpell: ignore rfind
+// cSpell: ignore rfind barbar funi
 
 use crate::common::component_catalog::all_exported_components;
 use crate::common::{self, DocumentCache};
@@ -25,6 +25,47 @@ use smol_str::SmolStr;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+/// For multi-word keywords like "in property", compute a replacement range that covers
+/// the already-typed prefix. Without this, some editors (not VS Code) insert the full
+/// keyword without removing the prefix, producing duplicates like "in in property".
+/// See also #8962 and #11816.
+fn multi_word_keyword_replace_range(
+    t: &SyntaxToken,
+    offset: TextSize,
+    completion_label: &str,
+    format: common::ByteFormat,
+) -> Option<Range> {
+    let mut replace_start_offset = t.token.text_range().start();
+    let mut current_search_token = t.token.clone();
+    let label_words: Vec<&str> = completion_label.split_whitespace().collect();
+
+    if label_words.len() > 1 {
+        let mut accumulated_text = current_search_token.text().to_string();
+        while let Some(prev_token) = current_search_token.prev_token() {
+            if prev_token.kind() == SyntaxKind::Whitespace {
+                accumulated_text = format!("{}{}", prev_token.text(), accumulated_text);
+                current_search_token = prev_token;
+                continue;
+            }
+
+            let potential_prefix = format!("{}{}", prev_token.text(), accumulated_text);
+
+            if completion_label.starts_with(potential_prefix.trim()) {
+                replace_start_offset = prev_token.text_range().start();
+                accumulated_text = potential_prefix;
+                current_search_token = prev_token;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let start_pos = text_size_to_lsp_position(t.source_file()?, replace_start_offset, format);
+    let end_pos = text_size_to_lsp_position(t.source_file()?, offset, format);
+
+    Some(Range::new(start_pos, end_pos))
+}
 
 pub(crate) fn completion_at(
     document_cache: &mut DocumentCache,
@@ -86,9 +127,17 @@ pub(crate) fn completion_at(
                 ]
                 .iter()
                 .map(|(kw, ins_tex)| {
-                    CompletionItem::new_simple(kw.to_string(), String::new())
+                    let mut c = CompletionItem::new_simple(kw.to_string(), String::new())
                         .with_kind(CompletionItemKind::KEYWORD)
-                        .with_insert_text(ins_tex, snippet_support)
+                        .with_insert_text(ins_tex, snippet_support);
+                    if let Some(range) =
+                        multi_word_keyword_replace_range(&token, offset, kw, document_cache.format)
+                    {
+                        let text = c.insert_text.take().unwrap_or_else(|| c.label.clone());
+                        c.text_edit =
+                            Some(lsp_types::CompletionTextEdit::Edit(TextEdit::new(range, text)));
+                    }
+                    c
                 }),
             );
 
@@ -200,26 +249,8 @@ pub(crate) fn completion_at(
             | SyntaxKind::StringTemplate
             | SyntaxKind::IndexExpression
     ) {
-        if token.kind() == SyntaxKind::At
-            || (token.kind() == SyntaxKind::Identifier
-                && token.prev_token().is_some_and(|t| t.kind() == SyntaxKind::At))
-        {
-            return Some(
-                [
-                    ("tr(..)", "tr(\"$1\")"),
-                    ("keys(..)", "keys($1)"),
-                    ("image-url(..)", "image-url(\"$1\")"),
-                    ("linear-gradient(..)", "linear-gradient($1)"),
-                    ("radial-gradient(..)", "radial-gradient(circle, $1)"),
-                    ("conic-gradient(..)", "conic-gradient($1)"),
-                ]
-                .into_iter()
-                .map(|(label, insert)| {
-                    CompletionItem::new_simple(label.into(), String::new())
-                        .with_insert_text(insert, snippet_support)
-                })
-                .collect::<Vec<_>>(),
-            );
+        if let Some(completions) = macro_completions(token, snippet_support) {
+            return Some(completions);
         }
 
         return with_lookup_ctx(document_cache, node, Some(offset), |ctx| {
@@ -340,10 +371,12 @@ pub(crate) fn completion_at(
                 .with_insert_text(ins_tex, snippet_support)
         })
         .collect();
-        if let Some(component) = token
-            .prev_sibling_or_token()
-            .filter(|x| x.kind() == SyntaxKind::Component)
-            .and_then(|x| x.into_node())
+        if let Some(component) =
+            token.prev_sibling_or_token().and_then(|x| x.into_node()).and_then(|n| match n.kind() {
+                SyntaxKind::Component => Some(n),
+                SyntaxKind::ExportsList => n.children().find(|c| c.kind() == SyntaxKind::Component),
+                _ => None,
+            })
         {
             let has_child = |kind| {
                 !component.children().find(|n| n.kind() == kind).unwrap().text_range().is_empty()
@@ -439,6 +472,44 @@ impl CompletionItemExt for CompletionItem {
     }
 }
 
+/// Decide whether a reserved property should be offered as a completion in the given context.
+/// Reserved properties like row/col, flex-*, clip and drop-shadow-* are materialized on every
+/// item even though they only make sense on specific layout children or element types.
+fn is_reserved_prop_valid(
+    prop: &str,
+    element_type: &ElementType,
+    parent_element_type: Option<&ElementType>,
+) -> bool {
+    let name_of = |t: &ElementType| -> Option<SmolStr> {
+        match t {
+            ElementType::Builtin(b) => Some(b.name.clone()),
+            ElementType::Component(c) => {
+                c.root_element.borrow().builtin_type().map(|b| b.name.clone())
+            }
+            _ => None,
+        }
+    };
+    let parent_name = parent_element_type.and_then(name_of);
+    let parent_name = parent_name.as_deref();
+    let name_in = |list: &[(&str, Type)]| list.iter().any(|(n, _)| *n == prop);
+    if name_in(i_slint_compiler::typeregister::RESERVED_GRIDLAYOUT_PROPERTIES) {
+        return matches!(parent_name, Some("GridLayout" | "Row"));
+    }
+    if prop == "flex-align-self"
+        || name_in(i_slint_compiler::typeregister::RESERVED_FLEXBOXLAYOUT_PROPERTIES)
+    {
+        return parent_name == Some("FlexboxLayout");
+    }
+    if name_in(i_slint_compiler::typeregister::RESERVED_DROP_SHADOW_PROPERTIES) {
+        return name_of(element_type).as_deref() == Some("Rectangle");
+    }
+    match prop {
+        "dialog-button-role" => parent_name == Some("Dialog"),
+        "clip" => matches!(name_of(element_type).as_deref(), Some("Rectangle" | "Path")),
+        _ => true,
+    }
+}
+
 /// This is different than the properties in resolve_element_scope, because it also include the "out" properties
 fn properties_for_changed_callbacks(
     mut node: SyntaxNode,
@@ -457,6 +528,7 @@ fn properties_for_changed_callbacks(
         .map(|doc| &doc.local_registry)
         .unwrap_or(&global_tr);
     let element_type = lookup_current_element_type((*element).clone(), tr).unwrap_or_default();
+    let parent_element_type = element.parent().and_then(|p| lookup_current_element_type(p, tr));
     let result = element_type
         .property_list()
         .into_iter()
@@ -477,6 +549,9 @@ fn properties_for_changed_callbacks(
         }))
         .chain(i_slint_compiler::typeregister::reserved_properties().filter_map(|(k, ty, _)| {
             if !ty.is_property_type() {
+                return None;
+            }
+            if !is_reserved_prop_valid(k, &element_type, parent_element_type.as_ref()) {
                 return None;
             }
             let mut c = CompletionItem::new_simple(k.into(), ty.to_string());
@@ -515,6 +590,7 @@ fn resolve_element_scope(
         .map(|doc| &doc.local_registry)
         .unwrap_or(&global_tr);
     let element_type = lookup_current_element_type((*element).clone(), tr).unwrap_or_default();
+    let parent_element_type = element.parent().and_then(|p| lookup_current_element_type(p, tr));
     let mut result = element_type
         .property_list()
         .into_iter()
@@ -607,6 +683,9 @@ fn resolve_element_scope(
             result.extend(i_slint_compiler::typeregister::reserved_properties().filter_map(
                 |(k, ty, _)| {
                     if matches!(ty, Type::Function { .. }) {
+                        return None;
+                    }
+                    if !is_reserved_prop_valid(k, &element_type, parent_element_type.as_ref()) {
                         return None;
                     }
                     let c = CompletionItem::new_simple(k.into(), ty.to_string());
@@ -1050,7 +1129,7 @@ fn create_import_edit_impl(
 }
 
 /// Creates a text edit
-#[cfg(any(feature = "preview-external", feature = "preview-engine"))]
+#[cfg(feature = "preview-engine")]
 pub fn create_import_edit(
     document: &i_slint_compiler::object_tree::Document,
     component: &str,
@@ -1126,6 +1205,33 @@ fn is_followed_by_brace(token: &SyntaxToken) -> bool {
         next_token = t.next_token();
     }
     next_token.is_some_and(|x| x.kind() == SyntaxKind::LBrace)
+}
+
+fn macro_completions(token: SyntaxToken, snippet_support: bool) -> Option<Vec<CompletionItem>> {
+    if token.kind() == SyntaxKind::At
+        || (token.kind() == SyntaxKind::Identifier
+            && token.prev_token().is_some_and(|t| t.kind() == SyntaxKind::At))
+    {
+        Some(
+            [
+                ("tr(..)", "tr(\"$1\")"),
+                ("keys(..)", "keys($1)"),
+                ("markdown(..)", "markdown(\"$1\")"),
+                ("image-url(..)", "image-url(\"$1\")"),
+                ("linear-gradient(..)", "linear-gradient($1)"),
+                ("radial-gradient(..)", "radial-gradient(circle, $1)"),
+                ("conic-gradient(..)", "conic-gradient($1)"),
+            ]
+            .into_iter()
+            .map(|(label, insert)| {
+                CompletionItem::new_simple(label.into(), String::new())
+                    .with_insert_text(insert, snippet_support)
+            })
+            .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    }
 }
 
 fn at_keys_completions(ctx: &mut LookupCtx) -> Vec<CompletionItem> {
@@ -1275,6 +1381,7 @@ mod tests {
             assert!(!res.iter().any(|ci| ci.label == "Clip"));
             assert!(!res.iter().any(|ci| ci.label == "NativeStyleMetrics"));
             assert!(!res.iter().any(|ci| ci.label == "SlintInternal"));
+            assert!(!res.iter().any(|ci| ci.label == "init"));
         }
     }
 
@@ -1328,6 +1435,10 @@ mod tests {
         assert_eq!(res.iter().find(|ci| ci.label == "pub_func" || ci.label == "pub-func"), None);
         assert_eq!(res.iter().find(|ci| ci.label == "pressed"), None);
         assert_eq!(res.iter().find(|ci| ci.label == "pressed-x"), None);
+        assert!(!res.iter().any(|ci| ci.label == "row"));
+        assert!(!res.iter().any(|ci| ci.label == "flex-grow"));
+        assert!(!res.iter().any(|ci| ci.label == "clip"));
+        assert!(!res.iter().any(|ci| ci.label == "drop-shadow-blur"));
 
         // elements
         let class = Some(CompletionItemKind::CLASS);
@@ -1396,6 +1507,10 @@ mod tests {
         // no functions, no private stuff
         assert_eq!(res.iter().find(|ci| ci.label == "has-focus"), None);
         assert_eq!(res.iter().find(|ci| ci.label == "func"), None);
+        assert!(!res.iter().any(|ci| ci.label == "row"));
+        assert!(!res.iter().any(|ci| ci.label == "flex-grow"));
+        assert!(!res.iter().any(|ci| ci.label == "clip"));
+        assert!(!res.iter().any(|ci| ci.label == "drop-shadow-blur"));
 
         // elements
         let class = Some(CompletionItemKind::CLASS);
@@ -1403,6 +1518,26 @@ mod tests {
         assert_eq!(res.iter().find(|ci| ci.label == "Rectangle").unwrap().kind, class);
         assert_eq!(res.iter().find(|ci| ci.label == "HorizontalLayout").unwrap().kind, class);
         assert!(!res.iter().any(|ci| ci.label == "MenuItem"));
+    }
+
+    #[test]
+    fn reserved_property_filtering() {
+        let res = get_completions(
+            r#"
+            component Foo {
+                GridLayout {
+                    🔺
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        assert!(res.iter().any(|ci| ci.label == "spacing"));
+        assert!(res.iter().any(|ci| ci.label == "spacing-horizontal"));
+        assert!(res.iter().any(|ci| ci.label == "spacing-vertical"));
+        assert!(res.iter().any(|ci| ci.label == "padding"));
+        assert!(!res.iter().any(|ci| ci.label == "flex-grow"));
+        assert!(!res.iter().any(|ci| ci.label == "flex-align-self"));
     }
 
     #[test]
@@ -1699,7 +1834,7 @@ mod tests {
             ("add(..)", "add(${1:a}, ${2:b})"),
             ("caller()", "caller()"),
             ("clear-focus()", "clear-focus()"),
-            ("set-selection-offsets(..)", "set-selection-offsets(${1:int}, ${2:int})"),
+            ("set-selection-offsets(..)", "set-selection-offsets(${1:start}, ${2:end})"),
             ("my-callback(..)", "my-callback(${1:hello}, ${2:world})"),
         ]
         .map(|(label, insert_text)| CompletionItem {
@@ -1711,6 +1846,7 @@ mod tests {
         assert_completions_found(expected, &res);
 
         assert!(!res.iter().any(|item| item.label.contains("test")));
+        assert!(!res.iter().any(|item| item.label.contains("init")));
     }
 
     #[test]
@@ -1869,7 +2005,7 @@ mod tests {
         let source6 = "{ property<int> xyz; changed t🔺 \n enabled: true; }  ";
         let source7 = "{ changed t🔺 => {} property<int> xyz; ";
         for s in [source1, source2, source3, source4, source5, source6, source7] {
-            eprintln!("changed_completion: {s:?}");
+            tracing::debug!("changed_completion: {s:?}");
             let s = format!(
                 "component Bar inherits TextInput {{ property <int> nope; out property <int> from_bar; }} component Foo {{ Bar {s} }}"
             );
@@ -1971,9 +2107,13 @@ mod tests {
             "component Bar in🔺",
             "component Bar 🔺 {}",
             "component Bar in🔺 Window {}",
+            "export component Bar 🔺",
+            "export component Bar in🔺",
+            "export component Bar 🔺 {}",
+            "export component Bar in🔺 Window {}",
         ];
         for source in sources {
-            eprintln!("Test for inherits in {source:?}");
+            tracing::debug!("Test for inherits in {source:?}");
             let res = get_completions(source).unwrap();
             res.iter().find(|ci| ci.label == "inherits").unwrap();
         }
@@ -1997,7 +2137,7 @@ mod tests {
             "component X { property<string> prop; elem := Text{} prop <=> e🔺; }",
         ];
         for source in sources {
-            eprintln!("Test for two ways in {source:?}");
+            tracing::debug!("Test for two ways in {source:?}");
             let res = get_completions(source).unwrap();
             res.iter().find(|ci| ci.label == "prop").unwrap();
             res.iter().find(|ci| ci.label == "self").unwrap();
@@ -2013,7 +2153,7 @@ mod tests {
             "component X { elem := Text{ property<string> prop; } title <=> elem.🔺; }",
         ];
         for source in sources {
-            eprintln!("Test for two ways in {source:?}");
+            tracing::debug!("Test for two ways in {source:?}");
             let res = get_completions(source).unwrap();
             res.iter().find(|ci| ci.label == "text").unwrap();
             res.iter().find(|ci| ci.label == "prop").unwrap();
@@ -2075,6 +2215,45 @@ mod tests {
             res.iter().find(|ci| ci.label == "cb3").unwrap().insert_text,
             Some("cb3 => {$1}".into())
         );
+    }
+
+    #[test]
+    fn multi_word_keyword_completion() {
+        // Completing a multi-word keyword after typing a prefix must replace the
+        // prefix via text_edit so we don't get duplicates like "in in property".
+        let col = 16u32; // typed prefix starts at this column in the template
+        for (typed, expected_label) in [
+            ("in ", "in property"),
+            ("out ", "out property"),
+            ("private ", "private property"),
+            ("public ", "public function"),
+            ("in-out ", "in-out property"),
+            ("in-out prop", "in-out property"),
+            ("in-o", "in-out property"),
+        ] {
+            let source = format!("component Foo {{\n                {typed}🔺\n            }}");
+            let res =
+                get_completions(&source).unwrap_or_else(|| panic!("no completions for '{typed}'"));
+            let item = res
+                .iter()
+                .find(|ci| ci.label == expected_label)
+                .unwrap_or_else(|| panic!("'{expected_label}' not found after typing '{typed}'"));
+            let edit = match item.text_edit.as_ref() {
+                Some(lsp_types::CompletionTextEdit::Edit(e)) => e,
+                other => panic!("'{typed}' → '{expected_label}': expected TextEdit, got {other:?}"),
+            };
+            assert_eq!(
+                edit.range,
+                Range::new(Position::new(1, col), Position::new(1, col + typed.len() as u32)),
+                "'{typed}' → '{expected_label}': wrong replacement range",
+            );
+            assert!(
+                edit.new_text.starts_with(expected_label),
+                "'{typed}' → '{expected_label}': edit text '{}' doesn't start with label",
+                edit.new_text,
+            );
+            assert!(item.insert_text.is_none());
+        }
     }
 
     #[test]

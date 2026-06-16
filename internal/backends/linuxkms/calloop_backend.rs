@@ -1,6 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore CLOEXEC GETFL NOCTTY NONBLOCK
 use std::cell::RefCell;
 #[cfg(not(feature = "libseat"))]
 use std::fs::OpenOptions;
@@ -86,11 +87,13 @@ impl Backend {
         let (user_event_sender, user_event_receiver) = calloop::channel::channel();
 
         let renderer_factory = match builder.renderer_name.as_deref() {
-            #[cfg(feature = "renderer-skia-vulkan")]
-            Some("skia-vulkan") => crate::renderer::skia::SkiaRendererAdapter::new_vulkan,
+            #[cfg(enable_skia_wgpu)]
+            Some("skia-vulkan") | Some("skia-wgpu") => {
+                crate::renderer::skia::SkiaRendererAdapter::new_wgpu
+            }
             #[cfg(feature = "renderer-skia-opengl")]
             Some("skia-opengl") => crate::renderer::skia::SkiaRendererAdapter::new_opengl,
-            #[cfg(any(feature = "renderer-skia-opengl", feature = "renderer-skia-vulkan"))]
+            #[cfg(enable_skia)]
             Some("skia-software") => crate::renderer::skia::SkiaRendererAdapter::new_software,
             #[cfg(feature = "renderer-femtovg")]
             Some("femtovg") => crate::renderer::femtovg::FemtoVGRendererAdapter::new,

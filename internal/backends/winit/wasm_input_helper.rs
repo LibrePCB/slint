@@ -1,6 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore autocapitalize compositionend compositionupdate keyup
 //! Helper for wasm that adds a hidden `<input>`  and process its events
 //!
 //! Without it, the key event are sent to the canvas and processed by winit.
@@ -221,8 +222,12 @@ impl WasmInputHelper {
         h.add_event_listener("compositionend", move |e: web_sys::CompositionEvent| {
             if let (Some(window_adapter), Some(data)) = (win.upgrade(), e.data()) {
                 let window_inner = WindowInner::from_pub(window_adapter.window());
+
+                let mut key_event = KeyEvent::default();
+                key_event.text = data.into();
+
                 window_inner.process_key_input(InternalKeyEvent {
-                    key_event: KeyEvent { text: data.into(), ..Default::default() },
+                    key_event,
                     event_type: KeyEventType::CommitComposition,
                     ..Default::default()
                 });
@@ -290,7 +295,7 @@ fn event_text(e: &web_sys::KeyboardEvent, is_apple: bool) -> Option<SharedString
     use i_slint_core::platform::Key;
 
     macro_rules! check_non_printable_code {
-        ($($char:literal # $name:ident # $($shifted:ident)? # $($_muda:ident)? $(=> $($qt:ident)|* # $($_winit:ident $(($_pos:ident))?)|* # $($_xkb:ident)|* )? ;)*) => {
+        ($($char:literal # $name:ident # $($shifted:ident)? $(=> $($_muda:ident)? # $($qt:ident)|* # $($_winit:ident $(($_pos:ident))?)|* # $($_xkb:ident)|* )? ;)*) => {
             match key.as_str() {
                 "Tab" if e.shift_key() => return Some(Key::Backtab.into()),
                 "Meta" if is_apple => return Some(Key::Control.into()),

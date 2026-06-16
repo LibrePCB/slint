@@ -70,15 +70,15 @@ impl PrettyPrinter<'_> {
                 DisplayExpression(&f.code, &ctx)
             )?;
         }
-        for (p1, p2, fields) in &sc.two_way_bindings {
+        for twb in &sc.two_way_bindings {
             self.indent()?;
             writeln!(
                 self.writer,
                 "{} <=> {}{}{};",
-                DisplayPropertyRef(p1, &ctx),
-                DisplayPropertyRef(p2, &ctx),
-                if fields.is_empty() { "" } else { "." },
-                fields.join(".")
+                DisplayLocalRef(&twb.prop1, &ctx),
+                DisplayPropertyRef(&twb.prop2, &ctx),
+                if twb.field_access.is_empty() { "" } else { "." },
+                twb.field_access.join(".")
             )?
         }
         for (p, init) in &sc.property_init {
@@ -386,17 +386,30 @@ impl<'a, T> Display for DisplayExpression<'a, T> {
                 e(angle),
                 stops.iter().map(|(e1, e2)| format!("{} {}", e(e1), e(e2))).join(", ")
             ),
-            Expression::RadialGradient { stops } => write!(
-                f,
-                "@radial-gradient(circle, {})",
-                stops.iter().map(|(e1, e2)| format!("{} {}", e(e1), e(e2))).join(", ")
-            ),
-            Expression::ConicGradient { from_angle, stops } => write!(
-                f,
-                "@conic-gradient(from {}, {})",
-                e(from_angle),
-                stops.iter().map(|(e1, e2)| format!("{} {}", e(e1), e(e2))).join(", ")
-            ),
+            Expression::RadialGradient { center, radius, stops } => {
+                let center_str = center
+                    .as_ref()
+                    .map(|(cx, cy)| format!(" at {} {}", e(cx), e(cy)))
+                    .unwrap_or_default();
+                let radius_str = radius.as_ref().map(|r| format!(" {}", e(r))).unwrap_or_default();
+                write!(
+                    f,
+                    "@radial-gradient(circle{radius_str}{center_str}, {})",
+                    stops.iter().map(|(e1, e2)| format!("{} {}", e(e1), e(e2))).join(", ")
+                )
+            }
+            Expression::ConicGradient { from_angle, center, stops } => {
+                let center_str = center
+                    .as_ref()
+                    .map(|(cx, cy)| format!(" at {} {}", e(cx), e(cy)))
+                    .unwrap_or_default();
+                write!(
+                    f,
+                    "@conic-gradient(from {}{center_str}, {})",
+                    e(from_angle),
+                    stops.iter().map(|(e1, e2)| format!("{} {}", e(e1), e(e2))).join(", ")
+                )
+            }
             Expression::EnumerationValue(x) => write!(f, "{x}"),
             Expression::LayoutCacheAccess {
                 layout_cache_prop,
@@ -458,12 +471,16 @@ impl<'a, T> Display for DisplayExpression<'a, T> {
             Expression::WithFlexboxLayoutItemInfo { .. } => {
                 write!(f, "WithFlexboxLayoutItemInfo(TODO)",)
             }
+            Expression::SolveFlexboxLayoutWithMeasure { .. } => {
+                write!(f, "SolveFlexboxLayoutWithMeasure(TODO)",)
+            }
             Expression::WithGridInputData { .. } => write!(f, "WithGridInputData(TODO)",),
             Expression::MinMax { ty: _, op, lhs, rhs } => match op {
                 MinMaxOp::Min => write!(f, "min({}, {})", e(lhs), e(rhs)),
                 MinMaxOp::Max => write!(f, "max({}, {})", e(lhs), e(rhs)),
             },
             Expression::EmptyComponentFactory => write!(f, "<empty-component-factory>",),
+            Expression::EmptyDataTransfer => write!(f, "<empty-data-transfer>",),
             Expression::TranslationReference { format_args, string_index, plural } => {
                 match plural {
                     Some(plural) => write!(

@@ -14,7 +14,7 @@ use super::lower_layout_expression::{
 use super::lower_to_item_tree::{LoweredSubComponentMapping, LoweringState};
 use super::{Animation, LocalMemberReference, MemberReference, PropertyIdx};
 use crate::expression_tree::{BuiltinFunction, Callable, Expression as tree_Expression};
-use crate::langtype::{BuiltinPrivateStruct, Struct, StructName, Type};
+use crate::langtype::{BuiltinStruct, Struct, StructName, Type};
 use crate::llr::ArrayOutput as llr_ArrayOutput;
 use crate::llr::Expression as llr_Expression;
 use crate::namedreference::NamedReference;
@@ -237,19 +237,30 @@ pub fn lower_expression(
                 .map(|(a, b)| (lower_expression(a, ctx), lower_expression(b, ctx)))
                 .collect::<_>(),
         },
-        tree_Expression::RadialGradient { stops } => llr_Expression::RadialGradient {
-            stops: stops
-                .iter()
-                .map(|(a, b)| (lower_expression(a, ctx), lower_expression(b, ctx)))
-                .collect::<_>(),
-        },
-        tree_Expression::ConicGradient { from_angle, stops } => llr_Expression::ConicGradient {
-            from_angle: Box::new(lower_expression(from_angle, ctx)),
-            stops: stops
-                .iter()
-                .map(|(a, b)| (lower_expression(a, ctx), lower_expression(b, ctx)))
-                .collect::<_>(),
-        },
+        tree_Expression::RadialGradient { center, radius, stops } => {
+            llr_Expression::RadialGradient {
+                center: center.as_ref().map(|(cx, cy)| {
+                    (Box::new(lower_expression(cx, ctx)), Box::new(lower_expression(cy, ctx)))
+                }),
+                radius: radius.as_ref().map(|r| Box::new(lower_expression(r, ctx))),
+                stops: stops
+                    .iter()
+                    .map(|(a, b)| (lower_expression(a, ctx), lower_expression(b, ctx)))
+                    .collect::<_>(),
+            }
+        }
+        tree_Expression::ConicGradient { from_angle, center, stops } => {
+            llr_Expression::ConicGradient {
+                from_angle: Box::new(lower_expression(from_angle, ctx)),
+                center: center.as_ref().map(|(cx, cy)| {
+                    (Box::new(lower_expression(cx, ctx)), Box::new(lower_expression(cy, ctx)))
+                }),
+                stops: stops
+                    .iter()
+                    .map(|(a, b)| (lower_expression(a, ctx), lower_expression(b, ctx)))
+                    .collect::<_>(),
+            }
+        }
         tree_Expression::EnumerationValue(e) => llr_Expression::EnumerationValue(e.clone()),
         tree_Expression::Keys(ks) => llr_Expression::KeysLiteral(ks.clone()),
         tree_Expression::ReturnStatement(..) => {
@@ -286,18 +297,29 @@ pub fn lower_expression(
             entries_per_item: *entries_per_item,
         },
         tree_Expression::OrganizeGridLayout(l) => organize_grid_layout(l, ctx),
-        tree_Expression::ComputeBoxLayoutInfo(l, o) => compute_box_layout_info(l, *o, ctx),
+        tree_Expression::ComputeBoxLayoutInfo { layout, orientation, cross_axis_size } => {
+            compute_box_layout_info(layout, *orientation, ctx, cross_axis_size.as_deref())
+        }
         tree_Expression::ComputeGridLayoutInfo {
             layout_organized_data_prop,
             layout,
             orientation,
-        } => compute_grid_layout_info(layout_organized_data_prop, layout, *orientation, ctx),
+            cross_axis_size,
+        } => compute_grid_layout_info(
+            layout_organized_data_prop,
+            layout,
+            *orientation,
+            ctx,
+            cross_axis_size.as_deref(),
+        ),
         tree_Expression::SolveBoxLayout(l, o) => solve_box_layout(l, *o, ctx),
         tree_Expression::SolveGridLayout { layout_organized_data_prop, layout, orientation } => {
             solve_grid_layout(layout_organized_data_prop, layout, *orientation, ctx)
         }
         tree_Expression::SolveFlexboxLayout(l) => solve_flexbox_layout(l, ctx),
-        tree_Expression::ComputeFlexboxLayoutInfo(l, o) => compute_flexbox_layout_info(l, *o, ctx),
+        tree_Expression::ComputeFlexboxLayoutInfo { layout, orientation, cross_axis_size } => {
+            compute_flexbox_layout_info(layout, *orientation, ctx, cross_axis_size.as_deref())
+        }
         tree_Expression::MinMax { ty, op, lhs, rhs } => llr_Expression::MinMax {
             ty: ty.clone(),
             op: *op,
@@ -305,6 +327,7 @@ pub fn lower_expression(
             rhs: Box::new(lower_expression(rhs, ctx)),
         },
         tree_Expression::EmptyComponentFactory => llr_Expression::EmptyComponentFactory,
+        tree_Expression::EmptyDataTransfer => llr_Expression::EmptyDataTransfer,
         tree_Expression::DebugHook { expression, .. } => lower_expression(expression, ctx),
     }
 }
@@ -481,13 +504,20 @@ fn lower_show_popup_window(
             ctx,
         );
 
+        let mut arguments = vec![
+            llr_Expression::NumberLiteral(popup_index as _),
+            llr_Expression::EnumerationValue(popup.close_policy.clone()),
+            item_ref,
+        ];
+        // Map `is-open` here, at the show site, so it resolves in the same frame as `item_ref`. The
+        // popup struct is shared across all show sites and was lowered in a different frame, so this
+        // reference must not be cached on it (see the `is_open` handling in the generators).
+        if let Some(is_open) = &popup.is_open {
+            arguments.push(llr_Expression::PropertyReference(ctx.map_property_reference(is_open)));
+        }
         llr_Expression::BuiltinFunctionCall {
             function: BuiltinFunction::ShowPopupWindow,
-            arguments: vec![
-                llr_Expression::NumberLiteral(popup_index as _),
-                llr_Expression::EnumerationValue(popup.close_policy.clone()),
-                item_ref,
-            ],
+            arguments,
         }
     } else {
         panic!("invalid arguments to ShowPopupWindow");
@@ -532,7 +562,13 @@ pub fn lower_animation(a: &PropertyAnimation, ctx: &mut ExpressionLoweringCtx<'_
             values: animation_fields()
                 .map(|(k, ty)| {
                     let e = a.borrow().bindings.get(&k).map_or_else(
-                        || llr_Expression::default_value_for_type(&ty).unwrap(),
+                        || {
+                            if k == "enabled" {
+                                llr_Expression::BoolLiteral(true)
+                            } else {
+                                llr_Expression::default_value_for_type(&ty).unwrap()
+                            }
+                        },
                         |v| lower_expression(&v.borrow().expression, ctx),
                     );
                     (k, e)
@@ -552,13 +588,14 @@ pub fn lower_animation(a: &PropertyAnimation, ctx: &mut ExpressionLoweringCtx<'_
             ),
             (SmolStr::new_static("easing"), Type::Easing),
             (SmolStr::new_static("delay"), Type::Int32),
+            (SmolStr::new_static("enabled"), Type::Bool),
         ])
     }
 
     fn animation_ty() -> Rc<Struct> {
         Rc::new(Struct {
             fields: animation_fields().collect(),
-            name: BuiltinPrivateStruct::PropertyAnimation.into(),
+            name: BuiltinStruct::PropertyAnimation.into(),
         })
     }
 
@@ -569,8 +606,21 @@ pub fn lower_animation(a: &PropertyAnimation, ctx: &mut ExpressionLoweringCtx<'_
                 name: "state".into(),
                 value: Box::new(lower_expression(state_ref, ctx)),
             };
-            let animation_ty = Type::Struct(animation_ty());
-            let mut get_anim = llr_Expression::default_value_for_type(&animation_ty).unwrap();
+            let anim_struct_ty = animation_ty();
+            let animation_ty = Type::Struct(anim_struct_ty.clone());
+            let mut get_anim = llr_Expression::Struct {
+                ty: anim_struct_ty,
+                values: animation_fields()
+                    .map(|(k, ty)| {
+                        let e = if k == "enabled" {
+                            llr_Expression::BoolLiteral(true)
+                        } else {
+                            llr_Expression::default_value_for_type(&ty).unwrap()
+                        };
+                        (k, e)
+                    })
+                    .collect(),
+            };
             for tr in animations.iter().rev() {
                 let condition = lower_expression(
                     &tr.condition(tree_Expression::ReadLocalVariable {
@@ -645,7 +695,7 @@ fn compile_path(
                             .iter()
                             .map(|(k, v)| (k.clone(), v.ty.clone()))
                             .collect(),
-                        name: StructName::BuiltinPrivate(
+                        name: StructName::Builtin(
                             element
                                 .element_type
                                 .native_class

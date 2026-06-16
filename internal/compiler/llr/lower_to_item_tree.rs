@@ -6,9 +6,7 @@ use by_address::ByAddress;
 use super::lower_expression::{ExpressionLoweringCtx, ExpressionLoweringCtxInner};
 use crate::CompilerConfiguration;
 use crate::expression_tree::Expression as tree_Expression;
-use crate::langtype::{
-    BuiltinPrivateStruct, BuiltinPublicStruct, ElementType, Struct, StructName, Type,
-};
+use crate::langtype::{BuiltinStruct, ElementType, Struct, StructName, Type};
 use crate::llr::item_tree::*;
 use crate::namedreference::NamedReference;
 use crate::object_tree::{self, Component, ElementRc, PropertyAnalysis, PropertyVisibility};
@@ -46,6 +44,11 @@ pub fn lower_to_item_tree(
     let public_components = document
         .exported_roots()
         .map(|component| {
+            let top_level_type = if component.inherits_system_tray_icon() {
+                TopLevelComponentType::SystemTrayIcon
+            } else {
+                TopLevelComponentType::Window
+            };
             let mut sc = lower_sub_component(&component, &mut state, None, compiler_config);
             let public_properties = public_properties(&component, &sc.mapping, &state);
             sc.sub_component.name = component.id.clone();
@@ -59,6 +62,7 @@ pub fn lower_to_item_tree(
                 public_properties,
                 private_properties: component.private_properties.borrow().clone(),
                 name: component.id.clone(),
+                top_level_type,
             }
         })
         .collect();
@@ -74,7 +78,7 @@ pub fn lower_to_item_tree(
             &state,
         );
         let close = sc.mapping.map_property_reference(
-            &NamedReference::new(&c.root_element, SmolStr::new_static("close")),
+            &NamedReference::new(&c.root_element, SmolStr::new_static("close-popup")),
             &state,
         );
         let entries = sc.mapping.map_property_reference(
@@ -351,6 +355,7 @@ fn lower_sub_component(
                     args: callback.args.clone(),
                     ty: Type::Callback(callback.clone()),
                     use_count: 0.into(),
+                    needs_tracker: x.expose_in_public_api,
                 });
                 index.into()
             } else {
@@ -476,11 +481,29 @@ fn lower_sub_component(
         }
 
         for tw in &binding.two_way_bindings {
-            sub_component.two_way_bindings.push((
-                prop.clone(),
-                ctx.map_property_reference(&tw.property),
-                tw.field_access.clone(),
-            ));
+            sub_component.two_way_bindings.push(match tw {
+                crate::expression_tree::TwoWayBinding::Property { property, field_access } => {
+                    TwoWayBinding {
+                        prop1: prop.local(),
+                        prop2: ctx.map_property_reference(property),
+                        field_access: field_access.clone(),
+                        is_model: None,
+                    }
+                }
+                crate::expression_tree::TwoWayBinding::ModelData {
+                    repeated_element,
+                    field_access,
+                } => TwoWayBinding {
+                    prop1: prop.local(),
+                    prop2: super::lower_expression::repeater_special_property(
+                        repeated_element,
+                        component,
+                        PropertyIdx::REPEATER_DATA,
+                    ),
+                    field_access: field_access.clone(),
+                    is_model: Some(PropertyIdx::REPEATER_INDEX),
+                },
+            });
         }
         if !matches!(binding.expression, tree_Expression::Invalid) {
             let expression =
@@ -503,7 +526,7 @@ fn lower_sub_component(
 
             let is_state_info = matches!(
                 e.borrow().lookup_property(p).property_type,
-                Type::Struct(s) if matches!(s.name, StructName::BuiltinPrivate(BuiltinPrivateStruct::StateInfo))
+                Type::Struct(s) if matches!(s.name, StructName::Builtin(BuiltinStruct::StateInfo))
             );
 
             sub_component.property_init.push((
@@ -580,6 +603,7 @@ fn lower_sub_component(
         &mut ctx,
         &component.root_constraints.borrow(),
         crate::layout::Orientation::Horizontal,
+        None,
     )
     .into();
     sub_component.layout_info_v = super::lower_layout_expression::get_layout_info(
@@ -587,6 +611,7 @@ fn lower_sub_component(
         &mut ctx,
         &component.root_constraints.borrow(),
         crate::layout::Orientation::Vertical,
+        None,
     )
     .into();
     // For repeated elements in a FlexboxLayout, generate code to read flex properties
@@ -627,12 +652,14 @@ fn lower_sub_component(
                             &mut ctx,
                             &layout_item.constraints,
                             crate::layout::Orientation::Horizontal,
+                            None,
                         );
                         let layout_info_v = super::lower_layout_expression::get_layout_info(
                             &layout_item.element,
                             &mut ctx,
                             &layout_item.constraints,
                             crate::layout::Orientation::Vertical,
+                            None,
                         );
                         let child_index = sub_component.grid_layout_children.push_and_get_key(
                             super::GridLayoutChildLayoutInfo {
@@ -678,9 +705,13 @@ fn lower_sub_component(
                     to: Type::String,
                 },
                 Type::String => super::Expression::PropertyReference(prop),
-                Type::Enumeration(e) if e.name == "AccessibleRole" => {
+                Type::Enumeration(ref e) if e.name == "AccessibleRole" => {
                     super::Expression::PropertyReference(prop)
                 }
+                Type::Enumeration(_) => super::Expression::Cast {
+                    from: super::Expression::PropertyReference(prop).into(),
+                    to: Type::String,
+                },
                 Type::Callback(callback) => super::Expression::CallBackCall {
                     callback: prop,
                     arguments: (0..callback.args.len())
@@ -749,10 +780,8 @@ fn get_property_analysis(elem: &ElementRc, p: &str) -> crate::object_tree::Prope
         }
         let base = elem.borrow().base_type.clone();
         match base {
-            ElementType::Native(n) => {
-                if n.properties.get(p).is_some_and(|p| p.is_native_output()) {
-                    a.is_set = true;
-                }
+            ElementType::Native(n) if n.properties.get(p).is_some_and(|p| p.is_native_output()) => {
+                a.is_set = true;
             }
             ElementType::Component(c) => {
                 elem = c.root_element.clone();
@@ -821,7 +850,7 @@ fn lower_popup_component(
     let sc = lower_sub_component(&popup.component, ctx.state, Some(&ctx.inner), compiler_config);
     use super::Expression::PropertyReference as PR;
     let position = super::lower_expression::make_struct(
-        BuiltinPublicStruct::LogicalPosition,
+        BuiltinStruct::LogicalPosition,
         [
             ("x", Type::LogicalLength, PR(sc.mapping.map_property_reference(&popup.x, ctx.state))),
             ("y", Type::LogicalLength, PR(sc.mapping.map_property_reference(&popup.y, ctx.state))),
@@ -832,7 +861,7 @@ fn lower_popup_component(
         tree: make_tree(ctx.state, &popup.component.root_element, &sc, &[]),
         root: ctx.state.push_sub_component(sc),
     };
-    PopupWindow { item_tree, position: position.into() }
+    PopupWindow { item_tree, position: position.into(), is_tooltip: popup.is_tooltip }
 }
 
 fn lower_timer(timer: &object_tree::Timer, ctx: &ExpressionLoweringCtx) -> Timer {
@@ -889,6 +918,7 @@ fn lower_global(
                 args: cb.args.clone(),
                 ty: x.property_type.clone(),
                 use_count: 0.into(),
+                needs_tracker: x.expose_in_public_api,
             });
             state.global_properties.insert(
                 nr.clone(),

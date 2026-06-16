@@ -1,7 +1,7 @@
 # Copyright © SixtyFPS GmbH <info@slint.dev>
 # SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-from . import slint as native
+from ._native import native
 from collections.abc import Iterable
 from abc import abstractmethod
 import typing
@@ -76,6 +76,7 @@ class ListModel[T](Model[T]):
         the iterable produces are stored in a list."""
 
         super().__init__()
+        self.list: list[T]
         if iterable is not None:
             self.list = list(iterable)
         else:
@@ -106,6 +107,13 @@ class ListModel[T](Model[T]):
         index = len(self.list)
         self.list.append(value)
         super().notify_row_added(index, 1)
+
+    def insert(self, index: int, value: T) -> None:
+        """Inserts the value at the given index. Negative indices and indices
+        past the end of the list behave like `list.insert`."""
+        clamped = max(0, min(index, len(self.list)))
+        self.list.insert(clamped, value)
+        super().notify_row_added(clamped, 1)
 
 
 class ModelIterator[T](Iterator[T]):

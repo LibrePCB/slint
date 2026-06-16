@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 #![cfg(target_arch = "wasm32")]
+#![deny(clippy::print_stderr, clippy::print_stdout, clippy::disallowed_methods)]
 
 pub mod common;
 mod fmt;
@@ -10,10 +11,16 @@ mod language;
 mod preview;
 pub mod util;
 
-use common::{DocumentCache, LspToPreview, LspToPreviewMessage, Result, VersionedUrl};
+use common::LspToPreviews;
+use common::{DocumentCache, Result};
+use i_slint_live_preview::{
+    file_watcher::FileChangeKind,
+    protocol::{LspToPreviewMessage, PreviewToLspMessage, VersionedUrl},
+};
 use js_sys::Function;
 pub use language::{Context, RequestHandler};
 use lsp_types::Url;
+
 use std::cell::RefCell;
 use std::future::Future;
 use std::io::ErrorKind;
@@ -177,6 +184,35 @@ type SendRequestFunction = (method: string, r: any) => Promise<any>;
 type HighlightInPreviewFunction = (file: string, offset: number) => void;
 "#;
 
+thread_local! {
+    static PANIC_CALLBACK: RefCell<Option<Function>> = const { RefCell::new(None) };
+}
+
+/// Chains `console_error_panic_hook` (so panics still show up in the browser
+/// console) with an optional JS callback registered via `set_panic_hook`.
+/// Idempotent — safe to call from multiple wasm entry points.
+pub(crate) fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            console_error_panic_hook::hook(info);
+            PANIC_CALLBACK.with(|c| {
+                if let Some(cb) = c.borrow().as_ref() {
+                    let _ = cb.call1(&JsValue::UNDEFINED, &JsValue::from_str(&info.to_string()));
+                }
+            });
+        }));
+    });
+}
+
+/// Register a JS callback that receives the formatted panic message whenever
+/// the Rust side panics. Used by SlintPad to surface a user-visible dialog.
+#[wasm_bindgen]
+pub fn set_panic_hook(callback: Function) {
+    install_panic_hook();
+    PANIC_CALLBACK.with(|c| *c.borrow_mut() = Some(callback));
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(typescript_type = "ImportCallbackFunction")]
@@ -211,7 +247,7 @@ pub fn create(
     send_request: SendRequestFunction,
     load_file: ImportCallbackFunction,
 ) -> JsResult<SlintServer> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
 
     let send_request = Function::from(send_request.clone());
     let server_notifier = ServerNotifier { send_notification, send_request };
@@ -220,10 +256,10 @@ pub fn create(
     let mut compiler_config = crate::common::document_cache::CompilerConfiguration::default();
 
     #[cfg(not(feature = "preview-engine"))]
-    let to_preview: Rc<dyn LspToPreview> = Rc::new(common::DummyLspToPreview::default());
+    let to_preview = LspToPreviews::with_one(common::DummyLspToPreview::default());
     #[cfg(feature = "preview-engine")]
-    let to_preview: Rc<dyn LspToPreview> =
-        Rc::new(preview::connector::WasmLspToPreview::new(server_notifier.clone()));
+    let to_preview =
+        LspToPreviews::with_one(preview::connector::WasmLspToPreview::new(server_notifier.clone()));
 
     let to_preview_clone = to_preview.clone();
     compiler_config.open_import_callback = Some(Rc::new(move |path| {
@@ -237,7 +273,7 @@ pub fn create(
             if let Ok(contents) = &contents {
                 to_preview.send(&LspToPreviewMessage::SetContents {
                     url: VersionedUrl::new(url, None),
-                    contents: contents.clone(),
+                    contents: contents.clone().into(),
                 });
             }
             Some(contents.map(|c| (None, c)))
@@ -247,6 +283,8 @@ pub fn create(
 
     let mut rh = RequestHandler::default();
     language::register_request_handlers(&mut rh);
+
+    let (preview_to_lsp_sender, _preview_to_lsp_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     Ok(SlintServer {
         ctx: ReentryGuard::new(Context {
@@ -258,6 +296,7 @@ pub fn create(
             open_urls: Default::default(),
             to_preview,
             pending_recompile: Default::default(),
+            preview_to_lsp_sender,
         }),
         rh: Rc::new(rh),
     })
@@ -289,17 +328,21 @@ fn forward_workspace_edit(
 
 #[wasm_bindgen]
 impl SlintServer {
-    #[cfg(all(feature = "preview-engine", feature = "preview-external"))]
+    #[cfg(all(
+        feature = "preview-engine",
+        feature = "preview-external",
+        feature = "preview-remote"
+    ))]
     #[wasm_bindgen]
     pub async fn process_preview_to_lsp_message(
         &self,
         value: JsValue,
     ) -> std::result::Result<(), JsValue> {
-        use crate::common::PreviewToLspMessage as M;
+        use PreviewToLspMessage as M;
 
         let ctx = self.ctx.lock().await;
 
-        let Ok(message) = serde_wasm_bindgen::from_value::<M>(value) else {
+        let Ok(message) = serde_wasm_bindgen::from_value(value) else {
             return Err(JsValue::from("Failed to convert value to PreviewToLspMessage"));
         };
 
@@ -321,8 +364,10 @@ impl SlintServer {
                     .await
                 });
             }
-            M::PreviewTypeChanged { is_external: _ } => {
-                // Nothing to do!
+            M::PreviewTypeChanged { target } => {
+                ctx.to_preview
+                    .set_local_target(target)
+                    .map_err(|err| js_sys::Error::new(&format!("{err}")))?;
             }
             M::RequestState { .. } => {
                 crate::language::send_state_to_preview(&ctx);
@@ -342,6 +387,12 @@ impl SlintServer {
                         lsp_types::OneOf::Left(object),
                     );
             }
+            M::DebugMessage { location, message } => {
+                log(&common::preview_log_message_to_string(&location, &message));
+            }
+            M::ConnectRemote { .. } | M::DisconnectRemote => {
+                tracing::debug!("Ignoring remote-preview control message in WASM LSP");
+            }
         }
         Ok(())
     }
@@ -359,16 +410,21 @@ impl SlintServer {
     }
 
     #[wasm_bindgen]
-    pub async fn trigger_file_watcher(&self, url: JsValue, typ: JsValue) -> JsResult<JsValue> {
+    pub async fn trigger_file_watcher(&mut self, url: JsValue, typ: JsValue) -> JsResult<JsValue> {
         let mut ctx = self.ctx.lock().await;
-        let url: lsp_types::Url = serde_wasm_bindgen::from_value(url)?;
+        let url: Url = serde_wasm_bindgen::from_value(url)?;
         let typ: lsp_types::FileChangeType = serde_wasm_bindgen::from_value(typ)?;
+        let typ = match typ {
+            lsp_types::FileChangeType::CREATED => FileChangeKind::Created,
+            lsp_types::FileChangeType::CHANGED => FileChangeKind::Changed,
+            lsp_types::FileChangeType::DELETED => FileChangeKind::Deleted,
+            _ => return Err(JsError::new("Unknown FileChangeType")),
+        };
         language::trigger_file_watcher(&mut ctx, url, typ)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(JsValue::UNDEFINED)
     }
-
     #[wasm_bindgen]
     pub async fn open_document(
         &self,
@@ -377,7 +433,7 @@ impl SlintServer {
         version: i32,
     ) -> JsResult<JsValue> {
         let mut ctx = self.ctx.lock().await;
-        let uri: lsp_types::Url = serde_wasm_bindgen::from_value(uri)?;
+        let uri: Url = serde_wasm_bindgen::from_value(uri)?;
         language::open_document(&mut ctx, content, uri.clone(), Some(version))
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
@@ -392,7 +448,7 @@ impl SlintServer {
         version: i32,
     ) -> JsResult<JsValue> {
         let mut ctx = self.ctx.lock().await;
-        let uri: lsp_types::Url = serde_wasm_bindgen::from_value(uri)?;
+        let uri: Url = serde_wasm_bindgen::from_value(uri)?;
         language::load_document(&mut ctx, content, uri.clone(), Some(version))
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
@@ -400,9 +456,9 @@ impl SlintServer {
     }
 
     #[wasm_bindgen]
-    pub async fn close_document(&self, uri: JsValue) -> JsResult<JsValue> {
+    pub async fn close_document(&mut self, uri: JsValue) -> JsResult<JsValue> {
         let mut ctx = self.ctx.lock().await;
-        let uri: lsp_types::Url = serde_wasm_bindgen::from_value(uri)?;
+        let uri: Url = serde_wasm_bindgen::from_value(uri)?;
         language::close_document(&mut ctx, uri).await.map_err(|e| JsError::new(&e.to_string()))?;
         Ok(JsValue::UNDEFINED)
     }

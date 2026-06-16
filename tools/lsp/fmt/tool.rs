@@ -1,15 +1,13 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore inplace
 /*!
     Work in progress for a formatter.
     Use like this to format a file:
     ```sh
         cargo run --bin slint-lsp -- format -i some_file.slint
     ```
-
-    Some code in this main.rs file is duplicated with the slint-updater, i guess it could
-    be refactored in a separate utility crate or module or something.
 
     The [`writer::TokenWriter`] trait is meant to be able to support the LSP later as the
     LSP wants just the edits, not the full file
@@ -36,7 +34,6 @@ pub fn run(files: &[std::path::PathBuf], inplace: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-/// FIXME! this is duplicated with the updater
 fn process_rust_file(source: String, mut file: impl Write) -> std::io::Result<()> {
     let mut last = 0;
     for range in i_slint_compiler::lexer::locate_slint_macro(&source) {
@@ -57,7 +54,6 @@ fn process_rust_file(source: String, mut file: impl Write) -> std::io::Result<()
     file.flush()
 }
 
-/// FIXME! this is duplicated with the updater
 fn process_markdown_file(source: String, mut file: impl Write) -> std::io::Result<()> {
     let mut source_slice = &source[..];
     const CODE_FENCE_START: &str = "```slint\n";

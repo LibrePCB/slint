@@ -1,6 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore fsdm msdf msdfgen
 use crate::CompilerConfiguration;
 use crate::diagnostics::BuildDiagnostics;
 #[cfg(not(target_arch = "wasm32"))]
@@ -119,11 +120,13 @@ pub fn embed_glyphs<'a>(
 
     let mut custom_face_error = false;
 
-    let default_fonts = if !collection.default_fonts.is_empty() {
+    let default_fonts: Vec<(std::path::PathBuf, fontique::QueryFont)> = if !collection
+        .default_fonts
+        .is_empty()
+    {
         collection.default_fonts.as_ref().clone()
     } else {
-        let mut default_fonts: HashMap<std::path::PathBuf, fontique::QueryFont> =
-            Default::default();
+        let mut default_fonts: Vec<(std::path::PathBuf, fontique::QueryFont)> = Vec::new();
 
         for c in doc.exported_roots() {
             let (family, source_location) = c
@@ -197,7 +200,7 @@ pub fn embed_glyphs<'a>(
                             }
                         };
                         font_paths.insert(query_font.family.0, path.clone());
-                        default_fonts.insert(path.clone(), query_font);
+                        default_fonts.push((path.clone(), query_font));
                     }
                 }
             }
@@ -293,6 +296,8 @@ pub fn embed_glyphs<'a>(
         }
     };
 
+    // default_fonts is in primary-first order (set up by sharedfontique from
+    // SLINT_DEFAULT_FONT then SLINT_FONT_PATH); preserve it.
     for (path, font) in default_fonts.iter() {
         custom_fonts.remove(path);
         embed_font_by_path(path, font);

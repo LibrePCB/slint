@@ -34,6 +34,7 @@ use fixed::Fixed;
 use i_slint_core::api::PlatformError;
 use i_slint_core::graphics::rendering_metrics_collector::{RefreshMode, RenderingMetricsCollector};
 use i_slint_core::graphics::{BorderRadius, Rgba8Pixel, SharedImageBuffer, SharedPixelBuffer};
+use i_slint_core::item_rendering::HasFont;
 use i_slint_core::item_rendering::{
     CachedRenderingData, ItemRenderer, PlainOrStyledText, RenderBorderRectangle, RenderImage,
     RenderRectangle,
@@ -603,6 +604,7 @@ impl SoftwareRenderer {
                 buffer,
                 dirty_range_cache: Vec::new(),
                 dirty_region: Default::default(),
+                scale_factor: factor,
             },
             rotation,
             #[cfg(feature = "systemfonts")]
@@ -612,7 +614,7 @@ impl SoftwareRenderer {
         let window_adapter = renderer.window_adapter.clone();
 
         window_inner
-            .draw_contents(|components| {
+            .draw_contents(|components, post_render| {
                 let logical_size = (size.cast() / factor).cast();
 
                 match self.repaint_buffer_type.get() {
@@ -685,6 +687,12 @@ impl SoftwareRenderer {
                             &window_adapter,
                         );
                     }
+                }
+
+                if partial {
+                    post_render(&mut renderer);
+                } else {
+                    post_render(&mut renderer.actual_renderer);
                 }
 
                 self.measure_frame_rendered(&mut renderer);
@@ -786,22 +794,27 @@ impl RendererSealed for SoftwareRenderer {
             return LogicalSize::default();
         };
         let font_request = text_item.font_request(item_rc);
+        // Evaluate text() before borrowing font_context: the binding can
+        // re-enter text_size for other elements and would panic on a second
+        // borrow_mut().
+        let content = text_item.text();
         #[cfg(feature = "systemfonts")]
         let Some(slint_ctx) = self.slint_context() else {
             return Default::default();
         };
-        #[cfg(feature = "systemfonts")]
-        let mut font_ctx = slint_ctx.font_context().borrow_mut();
-        let font = fonts::match_font(
-            &font_request,
-            scale_factor,
+        let font = {
             #[cfg(feature = "systemfonts")]
-            &mut font_ctx,
-        );
+            let mut font_ctx = slint_ctx.font_context().borrow_mut();
+            fonts::match_font(
+                &font_request,
+                scale_factor,
+                #[cfg(feature = "systemfonts")]
+                &mut font_ctx,
+            )
+        };
 
         #[cfg(feature = "systemfonts")]
         if matches!(font, fonts::Font::VectorFont(_)) && !parley_disabled() {
-            drop(font_ctx);
             return sharedparley::text_size(
                 self,
                 text_item,
@@ -813,7 +826,6 @@ impl RendererSealed for SoftwareRenderer {
             .unwrap_or_default();
         }
 
-        let content = text_item.text();
         let string = match &content {
             PlainOrStyledText::Plain(string) => alloc::borrow::Cow::Borrowed(string.as_str()),
             PlainOrStyledText::Styled(styled_text) => {
@@ -856,18 +868,21 @@ impl RendererSealed for SoftwareRenderer {
         let Some(slint_ctx) = self.slint_context() else {
             return Default::default();
         };
-        #[cfg(feature = "systemfonts")]
-        let mut font_ctx = slint_ctx.font_context().borrow_mut();
-        let font = fonts::match_font(
-            &font_request,
-            scale_factor,
+        let font = {
             #[cfg(feature = "systemfonts")]
-            &mut font_ctx,
-        );
+            let mut font_ctx = slint_ctx.font_context().borrow_mut();
+            fonts::match_font(
+                &font_request,
+                scale_factor,
+                #[cfg(feature = "systemfonts")]
+                &mut font_ctx,
+            )
+        };
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
+                let mut font_ctx = slint_ctx.font_context().borrow_mut();
                 sharedparley::char_size(&mut font_ctx, text_item, item_rc, ch).unwrap_or_default()
             }
             #[cfg(feature = "systemfonts")]
@@ -959,19 +974,20 @@ impl RendererSealed for SoftwareRenderer {
         let Some(slint_ctx) = self.slint_context() else {
             return Default::default();
         };
-        #[cfg(feature = "systemfonts")]
-        let mut font_ctx = slint_ctx.font_context().borrow_mut();
-        let font = fonts::match_font(
-            &font_request,
-            scale_factor,
+        let font = {
             #[cfg(feature = "systemfonts")]
-            &mut font_ctx,
-        );
+            let mut font_ctx = slint_ctx.font_context().borrow_mut();
+            fonts::match_font(
+                &font_request,
+                scale_factor,
+                #[cfg(feature = "systemfonts")]
+                &mut font_ctx,
+            )
+        };
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
-                drop(font_ctx);
                 sharedparley::text_input_byte_offset_for_position(self, text_input, item_rc, pos)
             }
             #[cfg(feature = "systemfonts")]
@@ -999,7 +1015,7 @@ impl RendererSealed for SoftwareRenderer {
                     single_line: false,
                 };
 
-                visual_representation.map_byte_offset_from_byte_offset_in_visual_text(
+                visual_representation.map_byte_offset_from_visual_text_to_actual_text(
                     paragraph.byte_offset_for_position((pos.x_length(), pos.y_length())),
                 )
             }
@@ -1027,7 +1043,7 @@ impl RendererSealed for SoftwareRenderer {
                     single_line: false,
                 };
 
-                visual_representation.map_byte_offset_from_byte_offset_in_visual_text(
+                visual_representation.map_byte_offset_from_visual_text_to_actual_text(
                     paragraph.byte_offset_for_position((pos.x_length(), pos.y_length())),
                 )
             }
@@ -1048,19 +1064,20 @@ impl RendererSealed for SoftwareRenderer {
         let Some(slint_ctx) = self.slint_context() else {
             return Default::default();
         };
-        #[cfg(feature = "systemfonts")]
-        let mut font_ctx = slint_ctx.font_context().borrow_mut();
-        let font = fonts::match_font(
-            &font_request,
-            scale_factor,
+        let font = {
             #[cfg(feature = "systemfonts")]
-            &mut font_ctx,
-        );
+            let mut font_ctx = slint_ctx.font_context().borrow_mut();
+            fonts::match_font(
+                &font_request,
+                scale_factor,
+                #[cfg(feature = "systemfonts")]
+                &mut font_ctx,
+            )
+        };
 
         match (font, parley_disabled()) {
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
-                drop(font_ctx);
                 sharedparley::text_input_cursor_rect_for_byte_offset(
                     self,
                     text_input,
@@ -1165,10 +1182,8 @@ impl RendererSealed for SoftwareRenderer {
         data: &'static [u8],
     ) -> Result<(), std::boxed::Box<dyn std::error::Error>> {
         let ctx = self.slint_context().ok_or("slint platform not initialized")?;
-        self::fonts::systemfonts::register_font_from_memory(
-            &mut ctx.font_context().borrow_mut().collection,
-            data,
-        )
+        ctx.font_context().borrow_mut().register_static_font(data);
+        Ok(())
     }
 
     #[cfg(all(feature = "systemfonts", not(target_arch = "wasm32")))]
@@ -1181,10 +1196,6 @@ impl RendererSealed for SoftwareRenderer {
             &mut ctx.font_context().borrow_mut().collection,
             path,
         )
-    }
-
-    fn default_font_size(&self) -> LogicalLength {
-        self::fonts::DEFAULT_FONT_SIZE
     }
 
     fn set_window_adapter(&self, window_adapter: &Rc<dyn WindowAdapter>) {
@@ -1218,23 +1229,37 @@ impl RendererSealed for SoftwareRenderer {
             return Err("take_snapshot() called on window with invalid size".into());
         };
 
-        let mut target_buffer =
-            SharedPixelBuffer::<i_slint_core::graphics::Rgb8Pixel>::new(size.width, size.height);
+        // Render into a premultiplied buffer so that windows with a transparent
+        // or semi-transparent background end up with the right alpha in the
+        // snapshot. PremultipliedRgbaColor::background() is (0,0,0,0), so
+        // anything the window doesn't paint stays fully transparent.
+        let mut premul = SharedPixelBuffer::<PremultipliedRgbaColor>::new(size.width, size.height);
 
         let old_repaint_buffer_type = self.repaint_buffer_type();
         // ensure that caches are clear
         self.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
-        self.render(target_buffer.make_mut_slice(), size.width as usize);
+        self.render(premul.make_mut_slice(), size.width as usize);
         self.set_repaint_buffer_type(old_repaint_buffer_type);
 
         let mut target_buffer_with_alpha =
-            SharedPixelBuffer::<Rgba8Pixel>::new(target_buffer.width(), target_buffer.height());
-        for (target_pixel, source_pixel) in target_buffer_with_alpha
-            .make_mut_slice()
-            .iter_mut()
-            .zip(target_buffer.as_slice().iter())
+            SharedPixelBuffer::<Rgba8Pixel>::new(premul.width(), premul.height());
+        for (target_pixel, source_pixel) in
+            target_buffer_with_alpha.make_mut_slice().iter_mut().zip(premul.as_slice().iter())
         {
-            *target_pixel.rgb_mut() = *source_pixel;
+            // Un-premultiply: straight RGBA is what the public API exposes (and
+            // what PNG encoders expect). Round half up to keep `255 * a / a == 255`.
+            let a = source_pixel.alpha;
+            if a == 0 {
+                *target_pixel = Rgba8Pixel::new(0, 0, 0, 0);
+            } else {
+                let unp = |c: u8| ((c as u32 * 255 + (a as u32 / 2)) / a as u32).min(255) as u8;
+                *target_pixel = Rgba8Pixel::new(
+                    unp(source_pixel.red),
+                    unp(source_pixel.green),
+                    unp(source_pixel.blue),
+                    a,
+                );
+            }
         }
         Ok(target_buffer_with_alpha)
     }
@@ -1395,7 +1420,7 @@ fn prepare_scene(
         size,
         factor,
         window,
-        PrepareScene::default(),
+        PrepareScene { scale_factor: factor, ..Default::default() },
         software_renderer.rotation.get(),
         #[cfg(feature = "systemfonts")]
         &software_renderer.text_layout_cache,
@@ -1405,7 +1430,7 @@ fn prepare_scene(
     let window_adapter = renderer.window_adapter.clone();
 
     let mut dirty_region = PhysicalRegion::default();
-    window.draw_contents(|components| {
+    window.draw_contents(|components, post_render| {
         let logical_size = (size.cast() / factor).cast();
 
         match software_renderer.repaint_buffer_type.get() {
@@ -1463,6 +1488,12 @@ fn prepare_scene(
                     &window_adapter,
                 );
             }
+        }
+
+        if partial {
+            post_render(&mut renderer);
+        } else {
+            post_render(&mut renderer.actual_renderer);
         }
     });
 
@@ -1531,9 +1562,15 @@ fn process_rectangle_impl(
     processor: &mut dyn ProcessScene,
     args: &target_pixel_buffer::DrawRectangleArgs,
     clip: &PhysicalRect,
+    scale_factor: ScaleFactor,
 ) {
     let geom = args.geometry();
     let Some(clipped) = geom.intersection(&clip.cast()) else { return };
+    let geom_w = geom.width();
+    let geom_h = geom.height();
+    let to_clipped_center = |cx: f32, cy: f32| {
+        (geom.min_x() + cx - clipped.min_x(), geom.min_y() + cy - clipped.min_y())
+    };
 
     let color = if let Brush::LinearGradient(g) = &args.background {
         let angle = g.angle() + args.rotation.angle();
@@ -1625,13 +1662,9 @@ fn process_rectangle_impl(
         }
         Color::default()
     } else if let Brush::RadialGradient(g) = &args.background {
-        // Calculate absolute center position of the original geometry
-        let absolute_center_x = geom.min_x() + geom.width() / 2.0;
-        let absolute_center_y = geom.min_y() + geom.height() / 2.0;
-
-        // Convert to coordinates relative to the clipped rectangle
-        let center_x = PhysicalLength::new((absolute_center_x - clipped.min_x()) as i16);
-        let center_y = PhysicalLength::new((absolute_center_y - clipped.min_y()) as i16);
+        let (cx, cy) = g.center_or_default_scaled(geom_w, geom_h, scale_factor.get());
+        let (center_x, center_y) = to_clipped_center(cx, cy);
+        let radius = g.radius_or_default_scaled(geom_w, geom_h, scale_factor.get());
 
         let radial_grad = RadialGradientCommand {
             stops: g
@@ -1644,11 +1677,14 @@ fn process_rectangle_impl(
                 .collect(),
             center_x,
             center_y,
+            radius,
         };
 
         processor.process_radial_gradient(clipped.cast(), radial_grad);
         Color::default()
     } else if let Brush::ConicGradient(g) = &args.background {
+        let (cx, cy) = g.center_or_default_scaled(geom_w, geom_h, scale_factor.get());
+        let (center_x, center_y) = to_clipped_center(cx, cy);
         let conic_grad = ConicGradientCommand {
             stops: g
                 .stops()
@@ -1658,6 +1694,8 @@ fn process_rectangle_impl(
                     stop
                 })
                 .collect(),
+            center_x,
+            center_y,
         };
 
         processor.process_conic_gradient(clipped.cast(), conic_grad);
@@ -1746,6 +1784,7 @@ struct RenderToBuffer<'a, TargetPixelBuffer> {
     buffer: &'a mut TargetPixelBuffer,
     dirty_range_cache: Vec<core::ops::Range<i16>>,
     dirty_region: PhysicalRegion,
+    scale_factor: ScaleFactor,
 }
 
 impl<B: target_pixel_buffer::TargetPixelBuffer> RenderToBuffer<'_, B> {
@@ -1837,7 +1876,8 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
             return;
         }
 
-        process_rectangle_impl(self, args, &clip);
+        let scale_factor = self.scale_factor;
+        process_rectangle_impl(self, args, &clip, scale_factor);
     }
 
     fn process_rounded_rectangle(&mut self, geometry: PhysicalRect, rr: RoundedRectangle) {
@@ -1936,6 +1976,7 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
 struct PrepareScene {
     items: Vec<SceneItem>,
     vectors: SceneVectors,
+    scale_factor: ScaleFactor,
 }
 
 impl ProcessScene for PrepareScene {
@@ -1998,7 +2039,8 @@ impl ProcessScene for PrepareScene {
         args: &target_pixel_buffer::DrawRectangleArgs,
         clip: PhysicalRect,
     ) {
-        process_rectangle_impl(self, args, &clip);
+        let scale_factor = self.scale_factor;
+        process_rectangle_impl(self, args, &clip, scale_factor);
     }
 
     fn process_simple_rectangle(&mut self, geometry: PhysicalRect, color: PremultipliedRgbaColor) {
@@ -3090,8 +3132,9 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         self.current_state.clip = self.current_state.clip.translate(-distance)
     }
 
-    fn translation(&self) -> LogicalVector {
-        self.current_state.offset.to_vector()
+    fn current_transform(&self) -> i_slint_core::lengths::ItemTransform {
+        let v = self.current_state.offset.to_vector().cast::<f32>();
+        i_slint_core::lengths::ItemTransform::translation(v.x, v.y)
     }
 
     fn rotate(&mut self, _angle_in_degrees: f32) {
@@ -3218,8 +3261,24 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         }
     }
 
-    fn draw_image_direct(&mut self, _image: i_slint_core::graphics::Image) {
-        todo!()
+    fn draw_image_direct(&mut self, image: i_slint_core::graphics::Image) {
+        let image_inner: &ImageInner = (&image).into();
+        let source_size = image.size();
+        if source_size.is_empty() {
+            return;
+        }
+        let target_size = euclid::Size2D::<f32, i_slint_core::lengths::LogicalPx>::from_untyped(
+            source_size.cast(),
+        ) * self.scale_factor;
+        let fit = i_slint_core::graphics::fit(
+            i_slint_core::items::ImageFit::Fill,
+            target_size,
+            i_slint_core::graphics::IntRect::from_size(source_size.cast()),
+            self.scale_factor,
+            Default::default(),
+            Default::default(),
+        );
+        self.draw_image_impl(image_inner, fit, i_slint_core::Color::default());
     }
 
     fn window(&self) -> &i_slint_core::window::WindowInner {

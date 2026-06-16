@@ -1,6 +1,7 @@
 # Copyright © SixtyFPS GmbH <info@slint.dev>
 # SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+# cSpell: ignore generativity
 [package]
 name = "slint-interpreter"
 description = "Interpreter library for Slint"
@@ -60,11 +61,11 @@ backend-qt = ["i-slint-backend-selector/backend-qt", "std"]
 ## this feature and select one of the other specific `backend-winit-XX` features.
 backend-winit = ["i-slint-backend-selector/backend-winit", "std"]
 
-## Simliar to `backend-winit` this enables the winit based event loop but only
+## Similar to `backend-winit` this enables the winit based event loop but only
 ## with support for the X Window System on Unix.
 backend-winit-x11 = ["i-slint-backend-selector/backend-winit-x11", "std"]
 
-## Simliar to `backend-winit` this enables the winit based event loop but only
+## Similar to `backend-winit` this enables the winit based event loop but only
 ## with support for the Wayland window system on Unix.
 backend-winit-wayland = ["i-slint-backend-selector/backend-winit-wayland", "std"]
 
@@ -130,9 +131,6 @@ internal-highlight = []
 # NOTE: this is not a semver compatible feature
 internal-json = ["dep:serde_json"]
 
-# (internal)
-internal-live-preview = ["dep:notify", "display-diagnostics"]
-
 
 [dependencies]
 i-slint-compiler = { workspace = true }
@@ -155,7 +153,6 @@ itertools = { workspace = true }
 smol_str = { workspace = true }
 unicode-segmentation = { workspace = true }
 
-notify = { version = "8.0.0", default-features = false, features = ["macos_kqueue"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 i-slint-backend-winit = { workspace = true }
@@ -166,7 +163,7 @@ web-sys = { workspace = true, features = ["Navigator"] }
 i-slint-backend-qt = { workspace = true, features = ["enable"], optional = true }
 
 [dev-dependencies]
-i-slint-backend-testing = { path = "../../internal/backends/testing" }
+i-slint-backend-testing = { path = "../../internal/backends/testing", features = ["internal"] }
 spin_on = { workspace = true }
 
 [lints.rust]

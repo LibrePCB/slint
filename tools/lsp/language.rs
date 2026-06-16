@@ -12,6 +12,7 @@ mod signature_help;
 #[cfg(test)]
 pub mod test;
 
+use crate::common::LspToPreviews;
 use crate::common::uri_to_file;
 use crate::{common, util};
 
@@ -22,19 +23,30 @@ use i_slint_compiler::parser::{
     NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, syntax_nodes,
 };
 use i_slint_compiler::{diagnostics::BuildDiagnostics, langtype::Type};
-use itertools::Itertools;
-use lsp_types::request::{
-    CodeActionRequest, CodeLensRequest, ColorPresentationRequest, Completion, DocumentColor,
-    DocumentHighlightRequest, DocumentSymbolRequest, ExecuteCommand, Formatting, GotoDefinition,
-    HoverRequest, PrepareRenameRequest, Rename, SemanticTokensFullRequest, SignatureHelpRequest,
+#[cfg(any(feature = "preview-external", feature = "preview-engine"))]
+use i_slint_live_preview::protocol::PreviewComponent;
+use i_slint_live_preview::{
+    file_watcher::FileChangeKind,
+    protocol::{
+        LspToPreviewMessage, PreviewConfig, PreviewToLspMessage, SourceFileVersion, VersionedUrl,
+    },
 };
+
+use itertools::Itertools;
+use lsp_types::TextDocumentPositionParams;
 use lsp_types::{
     ClientCapabilities, CodeActionOrCommand, CodeActionProviderCapability, CodeLens,
     CodeLensOptions, Color, ColorInformation, ColorPresentation, Command, CompletionOptions,
-    DocumentSymbol, DocumentSymbolResponse, FileChangeType, InitializeParams, InitializeResult,
-    OneOf, Position, PrepareRenameResponse, RenameOptions, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextEdit, Url, WorkDoneProgressOptions,
+    DocumentSymbol, DocumentSymbolResponse, InitializeParams, InitializeResult, OneOf, Position,
+    PrepareRenameResponse, RenameOptions, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextEdit,
+    Url, WorkDoneProgressOptions,
+    request::{
+        CodeActionRequest, CodeLensRequest, ColorPresentationRequest, Completion, DocumentColor,
+        DocumentHighlightRequest, DocumentSymbolRequest, ExecuteCommand, Formatting,
+        GotoDefinition, HoverRequest, PrepareRenameRequest, Rename, SemanticTokensFullRequest,
+        SignatureHelpRequest,
+    },
 };
 
 use std::collections::HashMap;
@@ -69,7 +81,7 @@ fn create_show_preview_command(
 
 fn create_populate_command(
     uri: lsp_types::Url,
-    version: common::SourceFileVersion,
+    version: SourceFileVersion,
     title: String,
     text: String,
 ) -> Command {
@@ -84,31 +96,118 @@ fn create_populate_command(
 #[cfg(any(feature = "preview-external", feature = "preview-engine"))]
 pub fn send_state_to_preview(ctx: &Context) {
     let mut doc_count = 0;
+    #[cfg(all(not(target_arch = "wasm32"), feature = "preview-remote"))]
+    let mut fonts_sent = HashSet::<PathBuf>::new();
     for (url, node) in ctx.document_cache.all_url_documents() {
         if url.scheme() == "builtin" {
             continue;
         }
         let version = ctx.document_cache.document_version(&url);
 
-        ctx.to_preview.send(&common::LspToPreviewMessage::SetContents {
-            url: common::VersionedUrl::new(url, version),
-            contents: node.text().to_string(),
+        ctx.to_preview.send(&LspToPreviewMessage::SetContents {
+            url: VersionedUrl::new(url.clone(), version),
+            contents: node.text().to_string().into(),
         });
+        #[cfg(all(not(target_arch = "wasm32"), feature = "preview-remote"))]
+        send_referenced_fonts(ctx, &url, &mut fonts_sent);
         doc_count += 1;
     }
 
-    ctx.to_preview.send(&common::LspToPreviewMessage::SetConfiguration {
-        config: ctx.preview_config.clone(),
-    });
+    ctx.to_preview
+        .send(&LspToPreviewMessage::SetConfiguration { config: ctx.preview_config.clone() });
 
     if let Some(c) = ctx.to_show.clone() {
         tracing::debug!("Sending state to preview: {} documents, showing {}", doc_count, c.url);
-        ctx.to_preview.send(&common::LspToPreviewMessage::ShowPreview(c));
+        ctx.to_preview.send(&LspToPreviewMessage::ShowPreview(c));
     } else {
         tracing::debug!(
             "Sending state to preview: {} documents, showing default component",
             doc_count
         );
+    }
+}
+
+// Callers live in the native LSP (main.rs / editor.rs); not used from WASM.
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "preview-external", feature = "preview-engine", feature = "preview-remote"),
+))]
+pub fn send_files_to_preview(ctx: &Context, files: &[lsp_types::Url]) {
+    #[cfg(feature = "preview-remote")]
+    let mut fonts_sent = HashSet::<PathBuf>::new();
+    for url in files {
+        if let Some(node) = ctx.document_cache.get_document(url).and_then(|doc| doc.node.as_ref()) {
+            let version = ctx.document_cache.document_version_by_path(node.source_file.path());
+            let contents = node.text().to_string().into();
+            tracing::debug!("Sending cached file {} to preview", url);
+            ctx.to_preview.send(&LspToPreviewMessage::SetContents {
+                url: VersionedUrl::new(url.clone(), version),
+                contents,
+            });
+            #[cfg(feature = "preview-remote")]
+            send_referenced_fonts(ctx, url, &mut fonts_sent);
+            continue;
+        }
+        let Some(path) = url.to_file_path().ok() else {
+            tracing::warn!("Cannot convert URL to file path: {url}");
+            continue;
+        };
+        match std::fs::read(&path) {
+            Ok(contents) => {
+                tracing::debug!("Sending file {} ({} bytes) to preview", url, contents.len());
+                ctx.to_preview.send(&LspToPreviewMessage::SetContents {
+                    url: VersionedUrl::new(url.clone(), None),
+                    contents,
+                });
+            }
+            Err(err) => {
+                tracing::warn!("Failed to read file {}: {err}", path.display());
+                ctx.to_preview.send(&LspToPreviewMessage::ForgetFile { url: url.clone() });
+            }
+        }
+    }
+}
+
+/// Read each font file imported by the `.slint` at `doc_url` and push it
+/// to the remote viewer via `SetContents`. Only the remote viewer needs
+/// font bytes pushed: local previews read fonts from disk. Fonts in `sent`
+/// are skipped: callers seed it with fonts that were already transferred
+/// (e.g. referenced by an earlier document in the same batch, or sent
+/// before the current edit).
+#[cfg(all(not(target_arch = "wasm32"), feature = "preview-remote"))]
+fn send_referenced_fonts(ctx: &Context, doc_url: &Url, sent: &mut HashSet<PathBuf>) {
+    let Some(remote) = ctx.to_preview.remote() else { return };
+    let Some(doc) = ctx.document_cache.get_document(doc_url) else { return };
+    // `custom_fonts` holds the resolved path of every font import that
+    // passed the compiler's existence check, plus remote URLs.
+    for (font_path, _) in &doc.custom_fonts {
+        let font_path = PathBuf::from(font_path.as_str());
+        if i_slint_compiler::pathutils::is_url(&font_path) {
+            continue;
+        }
+        if !sent.insert(font_path.clone()) {
+            continue;
+        }
+        let Ok(font_url) = Url::from_file_path(&font_path) else {
+            tracing::warn!("Cannot convert font path to URL: {}", font_path.display());
+            continue;
+        };
+        match std::fs::read(&font_path) {
+            Ok(contents) => {
+                tracing::debug!(
+                    "Sending font {} ({} bytes) to remote viewer",
+                    font_url,
+                    contents.len()
+                );
+                remote.send(&LspToPreviewMessage::SetContents {
+                    url: VersionedUrl::new(font_url, None),
+                    contents,
+                });
+            }
+            Err(err) => {
+                tracing::warn!("Failed to read font {}: {err}", font_path.display());
+            }
+        }
     }
 }
 
@@ -124,6 +223,9 @@ async fn register_file_watcher(ctx: &Context) -> common::Result<()> {
         .and_then(|wf| wf.dynamic_registration)
         .unwrap_or(false)
     {
+        tracing::trace!(
+            "Client supports dynamic file watcher registration, registering for all files"
+        );
         let fs_watcher = lsp_types::DidChangeWatchedFilesRegistrationOptions {
             watchers: vec![lsp_types::FileSystemWatcher {
                 glob_pattern: lsp_types::GlobPattern::String("**/*".to_string()),
@@ -153,27 +255,39 @@ async fn register_file_watcher(ctx: &Context) -> common::Result<()> {
 
 pub struct Context {
     pub document_cache: common::DocumentCache,
-    pub preview_config: common::PreviewConfig,
+    pub preview_config: PreviewConfig,
     pub server_notifier: crate::ServerNotifier,
     pub init_param: InitializeParams,
     /// The last component for which the user clicked "show preview"
     #[cfg(any(feature = "preview-external", feature = "preview-engine"))]
-    pub to_show: Option<common::PreviewComponent>,
+    pub to_show: Option<PreviewComponent>,
     /// File currently open in the editor
     pub open_urls: HashSet<lsp_types::Url>,
-    pub to_preview: Rc<dyn common::LspToPreview>,
+    pub to_preview: Rc<LspToPreviews>,
     /// Files to recompile after all other operations are done
     /// (i.e. recompilations triggered by updates to unopened files)
     pub pending_recompile: HashSet<lsp_types::Url>,
+    #[cfg_attr(not(feature = "preview-remote"), allow(dead_code))]
+    pub preview_to_lsp_sender: tokio::sync::mpsc::UnboundedSender<PreviewToLspMessage>,
 }
 
 /// An error from a LSP request
+#[derive(Debug, Clone)]
 pub struct LspError {
     pub code: LspErrorCode,
     pub message: String,
 }
 
+impl std::fmt::Display for LspError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.message, self.code)
+    }
+}
+
+impl std::error::Error for LspError {}
+
 /// The code of a LspError. Correspond to the lsp_server::ErrorCode
+#[derive(Debug, Clone, Copy)]
 pub enum LspErrorCode {
     /// Invalid method parameter(s).
     InvalidParameter,
@@ -197,6 +311,17 @@ pub enum LspErrorCode {
     /// the client should cancel the request.
     #[allow(unused)]
     ContentModified = -32801,
+}
+
+impl std::fmt::Display for LspErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LspErrorCode::InvalidParameter => write!(f, "Invalid Parameter"),
+            LspErrorCode::InternalError => write!(f, "Internal Error"),
+            LspErrorCode::RequestFailed => write!(f, "Request Failed"),
+            LspErrorCode::ContentModified => write!(f, "Content Modified"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -333,14 +458,24 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
         Ok(result)
     });
     rh.register::<HoverRequest>(|params, ctx| {
-        let result = token_descr(
+        let Some((token, _text_size)) = token_descr(
             &ctx.document_cache,
             &params.text_document_position_params.text_document.uri,
             &params.text_document_position_params.position,
-        )
-        .and_then(|(token, _)| hover::get_tooltip(&mut ctx.document_cache, token));
+        ) else {
+            return Ok(None);
+        };
 
-        Ok(result)
+        let hover = hover::get_tooltip(&mut ctx.document_cache, token.clone());
+
+        // we will show a tooltip in the editor, also update the highlight in the live preview
+        if hover.is_some() {
+            let (_document, preview) =
+                get_highlights_for_position(ctx, &params.text_document_position_params);
+            ctx.to_preview.send(&preview);
+        }
+
+        Ok(hover)
     });
     rh.register::<SignatureHelpRequest>(|params, ctx| {
         let result = token_descr(
@@ -361,16 +496,26 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
         Ok(result)
     });
     rh.register::<ExecuteCommand>(|params, ctx| {
-        if params.command.as_str() == SHOW_PREVIEW_COMMAND {
-            #[cfg(any(feature = "preview-builtin", feature = "preview-external"))]
-            {
-                show_preview_command(&params.arguments, ctx)?;
+        match params.command.as_str() {
+            SHOW_PREVIEW_COMMAND => {
+                #[cfg(any(feature = "preview-builtin", feature = "preview-external"))]
+                {
+                    show_preview_command(&params.arguments, ctx)?;
+                }
+                return Ok(None::<serde_json::Value>);
             }
-            return Ok(None::<serde_json::Value>);
-        }
-        if params.command.as_str() == POPULATE_COMMAND {
-            tokio::task::spawn_local(populate_command(&params.arguments, ctx)?);
-            return Ok(None::<serde_json::Value>);
+            POPULATE_COMMAND => {
+                let future = populate_command(&params.arguments, ctx)?;
+                crate::common::spawn_local(async move {
+                    if let Err(err) = future.await {
+                        tracing::error!("Error executing populate command: {err}");
+                    }
+                });
+                return Ok(None::<serde_json::Value>);
+            }
+            _ => {
+                tracing::error!("Received unknown command {}", params.command.as_str());
+            }
         }
         Ok(None::<serde_json::Value>)
     });
@@ -411,70 +556,21 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
         Ok(semantic_tokens::get_semantic_tokens(&mut ctx.document_cache, &params.text_document))
     });
     rh.register::<DocumentHighlightRequest>(|params, ctx| {
-        let uri = params.text_document_position_params.text_document.uri;
-        if let Some((tk, _)) =
-            token_descr(&ctx.document_cache, &uri, &params.text_document_position_params.position)
-        {
-            let p = tk.parent();
-            let gp = p.parent();
+        tracing::trace!(
+            "DocumentHighlightRequest for {} at {:?}",
+            params.text_document_position_params.text_document.uri,
+            params.text_document_position_params.position
+        );
 
-            if p.kind() == SyntaxKind::DeclaredIdentifier
-                && gp.as_ref().is_some_and(|n| n.kind() == SyntaxKind::Component)
-            {
-                let element = gp.as_ref().unwrap().child_node(SyntaxKind::Element).unwrap();
+        let (document_highlights, preview) =
+            get_highlights_for_position(ctx, &params.text_document_position_params);
 
-                ctx.to_preview.send(&common::LspToPreviewMessage::HighlightFromEditor {
-                    url: Some(uri),
-                    offset: element.text_range().start().into(),
-                });
+        // Update the highlight in the live preview.
+        // We do this even if there are no highlights to clear any previous highlights.
+        ctx.to_preview.send(&preview);
 
-                let range = util::node_to_lsp_range(&p, ctx.document_cache.format);
-                return Ok(Some(vec![lsp_types::DocumentHighlight { range, kind: None }]));
-            }
-
-            if p.kind() == SyntaxKind::QualifiedName
-                && gp.as_ref().is_some_and(|n| n.kind() == SyntaxKind::Element)
-            {
-                let range = util::node_to_lsp_range(&p, ctx.document_cache.format);
-
-                if gp
-                    .as_ref()
-                    .unwrap()
-                    .parent()
-                    .as_ref()
-                    .is_some_and(|n| n.kind() != SyntaxKind::Component)
-                {
-                    ctx.to_preview.send(&common::LspToPreviewMessage::HighlightFromEditor {
-                        url: Some(uri),
-                        offset: gp.unwrap().text_range().start().into(),
-                    });
-                }
-                return Ok(Some(vec![lsp_types::DocumentHighlight { range, kind: None }]));
-            }
-
-            if let Some(value) = common::rename_element_id::find_element_ids(&tk, &p) {
-                ctx.to_preview.send(&common::LspToPreviewMessage::HighlightFromEditor {
-                    url: None,
-                    offset: 0,
-                });
-                return Ok(Some(
-                    value
-                        .into_iter()
-                        .map(|r| lsp_types::DocumentHighlight {
-                            range: util::text_range_to_lsp_range(
-                                &p.source_file,
-                                r,
-                                ctx.document_cache.format,
-                            ),
-                            kind: None,
-                        })
-                        .collect(),
-                ));
-            }
-        }
-        ctx.to_preview
-            .send(&common::LspToPreviewMessage::HighlightFromEditor { url: None, offset: 0 });
-        Ok(None)
+        let not_empty = !document_highlights.is_empty();
+        Ok(not_empty.then_some(document_highlights))
     });
     rh.register::<Rename>(|params, ctx| {
         let uri = params.text_document_position.text_document.uri;
@@ -575,11 +671,17 @@ pub fn show_preview_command(
         params.get(1).and_then(|v| v.as_str()).filter(|v| !v.is_empty()).map(|v| v.to_string());
 
     tracing::debug!("Show preview: url={}, component={:?}", url, component);
-    let c = common::PreviewComponent { url, component };
-    ctx.to_show = Some(c.clone());
-    ctx.to_preview.send(&common::LspToPreviewMessage::ShowPreview(c));
+    let c = PreviewComponent { url, component };
+    show_preview(c, ctx);
 
     Ok(())
+}
+
+#[cfg(any(feature = "preview-builtin", feature = "preview-external"))]
+pub fn show_preview(component: PreviewComponent, ctx: &mut Context) {
+    ctx.pending_recompile.insert(component.url.clone());
+    ctx.to_show = Some(component.clone());
+    ctx.to_preview.send(&LspToPreviewMessage::ShowPreview(component));
 }
 
 fn populate_command_range(
@@ -749,17 +851,30 @@ pub(crate) async fn load_document_impl(
 
     let dependencies = match action {
         FileAction::ProcessContent(content) => {
-            ctx.to_preview.send(&common::LspToPreviewMessage::SetContents {
-                url: common::VersionedUrl::new(url.clone(), version),
-                contents: content.clone(),
+            ctx.to_preview.send(&LspToPreviewMessage::SetContents {
+                url: VersionedUrl::new(url.clone(), version),
+                contents: content.clone().into(),
             });
+            // Fonts imported before this edit were pushed to the remote viewer
+            // already; seed the sent set with them so only fonts added by this
+            // edit are transferred.
+            #[cfg(all(not(target_arch = "wasm32"), feature = "preview-remote"))]
+            let mut fonts_sent: HashSet<PathBuf> = ctx
+                .document_cache
+                .get_document(&url)
+                .map(|doc| {
+                    doc.custom_fonts.iter().map(|(p, _)| PathBuf::from(p.as_str())).collect()
+                })
+                .unwrap_or_default();
             let dependencies: HashSet<Url> = ctx.document_cache.invalidate_url(&url);
             let _ = ctx.document_cache.load_url(&url, version, content, &mut diag).await;
+            #[cfg(all(not(target_arch = "wasm32"), feature = "preview-remote"))]
+            send_referenced_fonts(ctx, &url, &mut fonts_sent);
             dependencies
         }
         FileAction::IgnoreFile => return Default::default(),
         FileAction::InvalidateFile => {
-            ctx.to_preview.send(&common::LspToPreviewMessage::ForgetFile { url: url.clone() });
+            ctx.to_preview.send(&LspToPreviewMessage::ForgetFile { url: url.clone() });
             ctx.document_cache.invalidate_url(&url)
         }
     };
@@ -863,7 +978,10 @@ pub fn convert_diagnostics(
             continue;
         }
         let uri = Url::from_file_path(d.source_file().unwrap()).unwrap();
-        lsp_diags.entry(uri).or_default().push(util::to_lsp_diag(&d, format));
+        lsp_diags
+            .entry(uri)
+            .or_default()
+            .push(i_slint_live_preview::protocol::to_lsp_diagnostic(&d, format));
     }
 
     lsp_diags
@@ -899,7 +1017,7 @@ fn drop_document_impl(ctx: &mut Context, url: lsp_types::Url) -> common::Result<
 
     #[cfg(any(feature = "preview-external", feature = "preview-engine"))]
     if let Some(preview_url) = ctx.to_show.as_ref().map(|c| c.url.clone()) {
-        // The external preview only has access to the files the LSP recompiles, so we need to
+        // The external preview only has access to the files the LSP recompiled, so we need to
         // ensure the preview file is recompiled if anything it depends on changes, even if it's
         // not in the open_urls.
         if preview_url == url || dependencies.contains(&preview_url) {
@@ -913,7 +1031,7 @@ fn drop_document_impl(ctx: &mut Context, url: lsp_types::Url) -> common::Result<
 pub async fn drop_document(ctx: &mut Context, url: lsp_types::Url) -> common::Result<()> {
     tracing::debug!("Dropping document: {url}");
     // The preview cares about resources and slint files, so forward everything
-    ctx.to_preview.send(&common::LspToPreviewMessage::InvalidateContents { url: url.clone() });
+    ctx.to_preview.send(&LspToPreviewMessage::InvalidateContents { url: url.clone() });
 
     drop_document_impl(ctx, url)
 }
@@ -921,26 +1039,37 @@ pub async fn drop_document(ctx: &mut Context, url: lsp_types::Url) -> common::Re
 pub async fn delete_document(ctx: &mut Context, url: lsp_types::Url) -> common::Result<()> {
     tracing::debug!("Deleting document: {url}");
     // The preview cares about resources and slint files, so forward everything
-    ctx.to_preview.send(&common::LspToPreviewMessage::ForgetFile { url: url.clone() });
+    ctx.to_preview.send(&LspToPreviewMessage::ForgetFile { url: url.clone() });
 
-    drop_document_impl(ctx, url)
+    #[cfg(feature = "preview-engine")]
+    let version = ctx.document_cache.document_version(&url);
+
+    let result = drop_document_impl(ctx, url.clone());
+
+    // make sure to clear the diagnostics on this file.
+    // This is especially important for deleted files, but also for renamed files to clear the diagnostics on the old file.
+    // Otherwise they will stick around forever (e.g. in VS Code).
+    #[cfg(feature = "preview-engine")]
+    let _ =
+        common::lsp_to_editor::notify_lsp_diagnostics(&ctx.server_notifier, url, version, vec![]);
+
+    result
 }
 
 pub async fn trigger_file_watcher(
     ctx: &mut Context,
     url: lsp_types::Url,
-    typ: lsp_types::FileChangeType,
+    typ: FileChangeKind,
 ) -> common::Result<()> {
     if !ctx.open_urls.contains(&url) {
         tracing::debug!("File watcher triggered for {url} (type: {:?})", typ);
         match typ {
-            FileChangeType::DELETED => delete_document(ctx, url).await?,
+            FileChangeKind::Deleted => delete_document(ctx, url).await?,
             // If the file was newly created, we still need to drop it as another file may
             // already depend on it by trying to import it before it exists.
             // This is especially common on file renames.
             // See also #11304
-            FileChangeType::CHANGED | FileChangeType::CREATED => drop_document(ctx, url).await?,
-            _ => tracing::warn!("Unknown file change type: {:?} for {url}", typ),
+            FileChangeKind::Changed | FileChangeKind::Created => drop_document(ctx, url).await?,
         }
     } else {
         tracing::trace!("Ignoring file watcher event for open document: {url}");
@@ -1372,7 +1501,7 @@ fn get_document_symbols(
         (!r.is_empty()).then_some(r)
     }
 
-    r.sort_by(|a, b| a.range.start.cmp(&b.range.start));
+    r.sort_by_key(|a| a.range.start);
 
     #[cfg(debug_assertions)]
     fn check_ranges(r: &[DocumentSymbol]) {
@@ -1454,6 +1583,68 @@ export component MainWindow inherits Window {
     }
 
     (!result.is_empty()).then_some(result)
+}
+
+/// Returns the list of DocumentHighlights, plus a LspToPreviewMessage::HighlightFromEditor  for the
+/// given position
+/// The list of DocumentHighlights will be empty if there is no highlight to show in the editor
+/// The HighlightFromEditor will have url=None if there is no highlight to show in the preview
+fn get_highlights_for_position(
+    ctx: &Context,
+    params: &TextDocumentPositionParams,
+) -> (Vec<lsp_types::DocumentHighlight>, LspToPreviewMessage) {
+    let uri = params.text_document.uri.clone();
+    if let Some((token, _)) = token_descr(&ctx.document_cache, &uri, &params.position) {
+        let parent = token.parent();
+        let grand_parent = parent.parent();
+
+        if parent.kind() == SyntaxKind::DeclaredIdentifier
+            && grand_parent.as_ref().is_some_and(|n| n.kind() == SyntaxKind::Component)
+        {
+            let element = grand_parent.as_ref().unwrap().child_node(SyntaxKind::Element).unwrap();
+
+            let preview_highlight = LspToPreviewMessage::HighlightFromEditor {
+                url: Some(uri),
+                offset: element.text_range().start().into(),
+            };
+
+            let range = util::node_to_lsp_range(&parent, ctx.document_cache.format);
+            return (vec![lsp_types::DocumentHighlight { range, kind: None }], preview_highlight);
+        }
+
+        if parent.kind() == SyntaxKind::QualifiedName
+            && grand_parent.as_ref().is_some_and(|n| n.kind() == SyntaxKind::Element)
+        {
+            let great_grand_parent = grand_parent.as_ref().unwrap().parent();
+            let should_highlight_preview =
+                great_grand_parent.as_ref().is_some_and(|n| n.kind() != SyntaxKind::Component);
+            let preview_highlight = LspToPreviewMessage::HighlightFromEditor {
+                url: should_highlight_preview.then_some(uri),
+                offset: grand_parent.unwrap().text_range().start().into(),
+            };
+            let range = util::node_to_lsp_range(&parent, ctx.document_cache.format);
+
+            return (vec![lsp_types::DocumentHighlight { range, kind: None }], preview_highlight);
+        }
+
+        if let Some(value) = common::rename_element_id::find_element_ids(&token, &parent) {
+            let preview_highlight =
+                LspToPreviewMessage::HighlightFromEditor { url: None, offset: 0 };
+            let document_highlight = value
+                .into_iter()
+                .map(|r| lsp_types::DocumentHighlight {
+                    range: util::text_range_to_lsp_range(
+                        &parent.source_file,
+                        r,
+                        ctx.document_cache.format,
+                    ),
+                    kind: None,
+                })
+                .collect();
+            return (document_highlight, preview_highlight);
+        }
+    }
+    (vec![], LspToPreviewMessage::HighlightFromEditor { url: None, offset: 0 })
 }
 
 pub async fn startup_lsp(ctx: &mut Context) -> common::Result<()> {
@@ -1559,7 +1750,7 @@ pub async fn load_configuration(ctx: &mut Context) -> common::Result<()> {
         );
     }
 
-    let config = common::PreviewConfig {
+    let config = PreviewConfig {
         hide_ui,
         style: cc.style.clone().unwrap_or_default(),
         include_paths: cc.include_paths.clone(),
@@ -1569,7 +1760,7 @@ pub async fn load_configuration(ctx: &mut Context) -> common::Result<()> {
     };
     {
         ctx.preview_config = config.clone();
-        ctx.to_preview.send(&common::LspToPreviewMessage::SetConfiguration { config });
+        ctx.to_preview.send(&LspToPreviewMessage::SetConfiguration { config });
     }
 
     tracing::debug!("Loaded configuration from client");

@@ -1,6 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore gbmdisplay swdisplay
 use i_slint_core::api::PhysicalSize;
 
 #[allow(unused)]
@@ -11,11 +12,7 @@ pub trait Presenter {
 
 #[cfg(any(feature = "renderer-skia-opengl", feature = "renderer-femtovg"))]
 pub mod gbmdisplay;
-#[cfg(any(
-    feature = "renderer-skia-opengl",
-    feature = "renderer-skia-vulkan",
-    feature = "renderer-software"
-))]
+#[cfg(any(enable_skia, feature = "renderer-software"))]
 pub mod swdisplay;
 
 /// This enum describes the way the output is supposed to be rotated to simulate
@@ -87,11 +84,7 @@ impl RenderingRotation {
     }
 }
 
-#[cfg(any(
-    feature = "renderer-skia-vulkan",
-    feature = "renderer-software",
-    feature = "renderer-skia-opengl"
-))]
+#[cfg(any(enable_skia, feature = "renderer-software"))]
 pub(crate) mod noop_presenter {
     use std::sync::Arc;
 

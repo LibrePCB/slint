@@ -3,7 +3,7 @@
 
 use crate::diagnostics::{BuildDiagnostics, SourceLocation, Spanned};
 use crate::langtype::{
-    BuiltinElement, BuiltinPublicStruct, EnumerationValue, Function, Keys, Struct, Type,
+    BuiltinElement, BuiltinStruct, EnumerationValue, Function, Keys, Struct, Type,
 };
 use crate::layout::Orientation;
 use crate::lookup::LookupCtx;
@@ -97,6 +97,11 @@ pub enum BuiltinFunction {
     /// `no_native_menu_bar` is a boolean literal that is true when we shouldn't try to setup the native menu bar.
     /// `condition` is an optional expression that is the expression to `if condition : MenuBar { ... }` for optional menu
     SetupMenuBar,
+    /// Setup the menu of a `SystemTrayIcon`.
+    ///
+    /// Arguments are `(system_tray_ref, menu_tree_root)` where `menu_tree_root` is an ElementReference to the root of
+    /// the MenuItem tree, lowered to a NumberLiteral index into [`crate::llr::SubComponent::menu_item_trees`] in the LLR.
+    SetupSystemTrayIcon,
     Use24HourFormat,
     MonthDayCount,
     MonthOffset,
@@ -118,8 +123,14 @@ pub enum BuiltinFunction {
     StopTimer,
     RestartTimer,
     OpenUrl,
+    MacosBringAllWindowsToFront,
     ParseMarkdown,
     StringToStyledText,
+    /// Converts a color to a hex string wrapped in StyledText.
+    /// Used for `<font color='\{expr}'>` interpolation in `@markdown`,
+    /// because `parse_interpolated` takes `StyledText` arguments.
+    ColorToStyledText,
+    DecimalSeparator,
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +206,7 @@ declare_builtin_function_types!(
     ASin: (Type::Float32) -> Type::Angle,
     ATan: (Type::Float32) -> Type::Angle,
     ATan2: (Type::Float32, Type::Float32) -> Type::Angle,
+    DecimalSeparator: () -> Type::String,
     Log: (Type::Float32, Type::Float32) -> Type::Float32,
     Ln: (Type::Float32) -> Type::Float32,
     Pow: (Type::Float32, Type::Float32) -> Type::Float32,
@@ -225,7 +237,7 @@ declare_builtin_function_types!(
             (SmolStr::new_static("alpha"), Type::Int32),
         ])
         .collect(),
-        name: BuiltinPublicStruct::Color.into(),
+        name: BuiltinStruct::Color.into(),
     })),
     ColorHsvaStruct: (Type::Color) -> Type::Struct(Rc::new(Struct {
         fields: IntoIterator::into_iter([
@@ -235,7 +247,7 @@ declare_builtin_function_types!(
             (SmolStr::new_static("alpha"), Type::Float32),
         ])
         .collect(),
-        name: BuiltinPublicStruct::Color.into(),
+        name: BuiltinStruct::Color.into(),
     })),
     ColorOklchStruct: (Type::Color) -> Type::Struct(Rc::new(Struct {
         fields: IntoIterator::into_iter([
@@ -245,7 +257,7 @@ declare_builtin_function_types!(
             (SmolStr::new_static("alpha"), Type::Float32),
         ])
         .collect(),
-        name: BuiltinPublicStruct::Color.into(),
+        name: BuiltinStruct::Color.into(),
     })),
     ColorBrighter: (Type::Brush, Type::Float32) -> Type::Brush,
     ColorDarker: (Type::Brush, Type::Float32) -> Type::Brush,
@@ -258,7 +270,7 @@ declare_builtin_function_types!(
             (SmolStr::new_static("height"), Type::Int32),
         ])
         .collect(),
-        name: crate::langtype::BuiltinPrivateStruct::Size.into(),
+        name: crate::langtype::BuiltinStruct::Size.into(),
     })),
     ArrayLength: (Type::Model) -> Type::Int32,
     Rgb: (Type::Int32, Type::Int32, Type::Int32, Type::Float32) -> Type::Color,
@@ -271,6 +283,8 @@ declare_builtin_function_types!(
     SupportsNativeMenuBar: () -> Type::Bool,
     // entries, sub-menu, activate. But the types here are not accurate.
     SetupMenuBar: (Type::Model, typeregister::noarg_callback_type(), typeregister::noarg_callback_type()) -> Type::Void,
+    // (system_tray_ref, menu_tree_ref) — types not accurate (menu_tree becomes an index in LLR)
+    SetupSystemTrayIcon: (Type::ElementReference, Type::ElementReference) -> Type::Void,
     MonthDayCount: (Type::Int32, Type::Int32) -> Type::Int32,
     MonthOffset: (Type::Int32, Type::Int32) -> Type::Int32,
     FormatDate: (Type::String, Type::Int32, Type::Int32, Type::Int32) -> Type::String,
@@ -294,8 +308,10 @@ declare_builtin_function_types!(
     StopTimer: (Type::ElementReference) -> Type::Void,
     RestartTimer: (Type::ElementReference) -> Type::Void,
     ParseMarkdown: (Type::String, Type::Array(Type::StyledText.into())) -> Type::StyledText,
-    StringToStyledText: (Type::String) -> Type::StyledText
+    StringToStyledText: (Type::String) -> Type::StyledText,
+    ColorToStyledText: (Type::Color) -> Type::StyledText
     OpenUrl: (Type::String) -> Type::Bool,
+    MacosBringAllWindowsToFront: () -> Type::Void,
 );
 
 impl Default for BuiltinFunctionTypes {
@@ -326,12 +342,14 @@ impl BuiltinFunction {
             BuiltinFunction::AccentColor => false,
             BuiltinFunction::SupportsNativeMenuBar => false,
             BuiltinFunction::SetupMenuBar => false,
+            BuiltinFunction::SetupSystemTrayIcon => false,
             BuiltinFunction::MonthDayCount => false,
             BuiltinFunction::MonthOffset => false,
             BuiltinFunction::FormatDate => false,
             BuiltinFunction::DateNow => false,
             BuiltinFunction::ValidDate => false,
             BuiltinFunction::ParseDate => false,
+            BuiltinFunction::DecimalSeparator => false,
             // Even if it is not pure, we optimize it away anyway
             BuiltinFunction::Debug => true,
             BuiltinFunction::Mod
@@ -350,9 +368,14 @@ impl BuiltinFunction {
             | BuiltinFunction::Pow
             | BuiltinFunction::Exp
             | BuiltinFunction::ATan
-            | BuiltinFunction::ATan2
-            | BuiltinFunction::ToFixed
-            | BuiltinFunction::ToPrecision => true,
+            | BuiltinFunction::ATan2 => true,
+            // The result depends on the locale's decimal separator, like DecimalSeparator.
+            // The constant propagation folds the locale-independent cases and promotes
+            // their binding back to constant.
+            BuiltinFunction::ToFixed
+            | BuiltinFunction::ToPrecision
+            | BuiltinFunction::StringToFloat
+            | BuiltinFunction::StringIsFloat => false,
             BuiltinFunction::SetFocusItem | BuiltinFunction::ClearFocusItem => false,
             BuiltinFunction::ShowPopupWindow
             | BuiltinFunction::ClosePopupWindow
@@ -360,9 +383,7 @@ impl BuiltinFunction {
             | BuiltinFunction::ShowPopupMenuInternal => false,
             BuiltinFunction::SetSelectionOffsets => false,
             BuiltinFunction::ItemFontMetrics => false, // depends also on Window's font properties
-            BuiltinFunction::StringToFloat
-            | BuiltinFunction::StringIsFloat
-            | BuiltinFunction::StringIsEmpty
+            BuiltinFunction::StringIsEmpty
             | BuiltinFunction::StringCharacterCount
             | BuiltinFunction::StringToLowercase
             | BuiltinFunction::StringToUppercase
@@ -403,7 +424,9 @@ impl BuiltinFunction {
             BuiltinFunction::RestartTimer => false,
             BuiltinFunction::ParseMarkdown => false,
             BuiltinFunction::StringToStyledText => true,
+            BuiltinFunction::ColorToStyledText => true,
             BuiltinFunction::OpenUrl => false,
+            BuiltinFunction::MacosBringAllWindowsToFront => false,
         }
     }
 
@@ -417,12 +440,14 @@ impl BuiltinFunction {
             BuiltinFunction::AccentColor => true,
             BuiltinFunction::SupportsNativeMenuBar => true,
             BuiltinFunction::SetupMenuBar => false,
+            BuiltinFunction::SetupSystemTrayIcon => false,
             BuiltinFunction::MonthDayCount => true,
             BuiltinFunction::MonthOffset => true,
             BuiltinFunction::FormatDate => true,
             BuiltinFunction::DateNow => true,
             BuiltinFunction::ValidDate => true,
             BuiltinFunction::ParseDate => true,
+            BuiltinFunction::DecimalSeparator => true,
             // Even if it has technically side effect, we still consider it as pure for our purpose
             BuiltinFunction::Debug => true,
             BuiltinFunction::Mod
@@ -487,7 +512,9 @@ impl BuiltinFunction {
             BuiltinFunction::RestartTimer => false,
             BuiltinFunction::ParseMarkdown => true,
             BuiltinFunction::StringToStyledText => true,
+            BuiltinFunction::ColorToStyledText => true,
             BuiltinFunction::OpenUrl => false,
+            BuiltinFunction::MacosBringAllWindowsToFront => false,
         }
     }
 }
@@ -764,6 +791,8 @@ pub enum Expression {
 
     EasingCurve(EasingCurve),
 
+    EmptyDataTransfer,
+
     LinearGradient {
         angle: Box<Expression>,
         /// First expression in the tuple is a color, second expression is the stop position
@@ -771,6 +800,12 @@ pub enum Expression {
     },
 
     RadialGradient {
+        /// Explicit gradient center in the element's local coordinate space (`at <x> <y>`).
+        /// `None` means use the element's bbox centre.
+        center: Option<(Box<Expression>, Box<Expression>)>,
+        /// Explicit radius in the element's local coordinate space (`circle <r>`).
+        /// `None` means use the element's bbox half-diagonal.
+        radius: Option<Box<Expression>>,
         /// First expression in the tuple is a color, second expression is the stop position
         stops: Vec<(Expression, Expression)>,
     },
@@ -778,6 +813,9 @@ pub enum Expression {
     ConicGradient {
         /// The starting angle (rotation) of the gradient, corresponding to CSS `from <angle>`
         from_angle: Box<Expression>,
+        /// Explicit gradient center in the element's local coordinate space (`at <x> <y>`).
+        /// `None` means use the element's bbox centre.
+        center: Option<(Box<Expression>, Box<Expression>)>,
         /// First expression in the tuple is a color, second expression is the stop angle
         stops: Vec<(Expression, Expression)>,
     },
@@ -828,14 +866,21 @@ pub enum Expression {
     OrganizeGridLayout(crate::layout::GridLayout),
 
     /// Compute the LayoutInfo for the given box layout.
-    /// The orientation is the orientation of the cache, not the orientation of the layout
-    ComputeBoxLayoutInfo(crate::layout::BoxLayout, crate::layout::Orientation),
+    /// The orientation is the orientation of the cache, not the orientation of the layout.
+    ComputeBoxLayoutInfo {
+        layout: crate::layout::BoxLayout,
+        orientation: crate::layout::Orientation,
+        /// only set in `layoutinfo-v-with-constraint`
+        cross_axis_size: Option<Box<Expression>>,
+    },
     ComputeGridLayoutInfo {
         layout_organized_data_prop: NamedReference,
         layout: crate::layout::GridLayout,
         orientation: crate::layout::Orientation,
+        /// only set in `layoutinfo-v-with-constraint`
+        cross_axis_size: Option<Box<Expression>>,
     },
-    /// Determine the coordinates of the items
+    /// Determine the coordinates of the items in the given orientation.
     SolveBoxLayout(crate::layout::BoxLayout, crate::layout::Orientation),
     SolveGridLayout {
         layout_organized_data_prop: NamedReference,
@@ -844,8 +889,13 @@ pub enum Expression {
     },
     /// Solve a FlexboxLayout - returns positions for all items (x, y, width, height per item)
     SolveFlexboxLayout(crate::layout::FlexboxLayout),
-    /// Compute the LayoutInfo for the given FlexboxLayout
-    ComputeFlexboxLayoutInfo(crate::layout::FlexboxLayout, crate::layout::Orientation),
+    /// Compute the LayoutInfo for the given FlexboxLayout.
+    ComputeFlexboxLayoutInfo {
+        layout: crate::layout::FlexboxLayout,
+        orientation: crate::layout::Orientation,
+        /// only set in `layoutinfo-v-with-constraint`
+        cross_axis_size: Option<Box<Expression>>,
+    },
 
     MinMax {
         ty: Type,
@@ -963,6 +1013,7 @@ impl Expression {
             Expression::Array { element_ty, .. } => Type::Array(Rc::new(element_ty.clone())),
             Expression::Struct { ty, .. } => ty.clone().into(),
             Expression::PathData { .. } => Type::PathData,
+            Expression::EmptyDataTransfer => Type::DataTransfer,
             Expression::StoreLocalVariable { .. } => Type::Void,
             Expression::ReadLocalVariable { ty, .. } => ty.clone(),
             Expression::EasingCurve(_) => Type::Easing,
@@ -976,12 +1027,12 @@ impl Expression {
             Expression::LayoutCacheAccess { .. } => Type::LogicalLength,
             Expression::GridRepeaterCacheAccess { .. } => Type::LogicalLength,
             Expression::OrganizeGridLayout(..) => Type::ArrayOfU16,
-            Expression::ComputeBoxLayoutInfo(..) => typeregister::layout_info_type().into(),
+            Expression::ComputeBoxLayoutInfo { .. } => typeregister::layout_info_type().into(),
             Expression::ComputeGridLayoutInfo { .. } => typeregister::layout_info_type().into(),
             Expression::SolveBoxLayout(..) => Type::LayoutCache,
             Expression::SolveGridLayout { .. } => Type::LayoutCache,
             Expression::SolveFlexboxLayout(..) => Type::LayoutCache,
-            Expression::ComputeFlexboxLayoutInfo(..) => typeregister::layout_info_type().into(),
+            Expression::ComputeFlexboxLayoutInfo { .. } => typeregister::layout_info_type().into(),
             Expression::MinMax { ty, .. } => ty.clone(),
             Expression::EmptyComponentFactory => Type::ComponentFactory,
             Expression::DebugHook { expression, .. } => expression.ty(),
@@ -1049,6 +1100,7 @@ impl Expression {
                 }
                 Path::Commands(commands) => visitor(commands),
             },
+            Expression::EmptyDataTransfer => {}
             Expression::StoreLocalVariable { value, .. } => visitor(value),
             Expression::ReadLocalVariable { .. } => {}
             Expression::EasingCurve(_) => {}
@@ -1059,14 +1111,25 @@ impl Expression {
                     visitor(s);
                 }
             }
-            Expression::RadialGradient { stops } => {
+            Expression::RadialGradient { center, radius, stops } => {
+                if let Some((cx, cy)) = center {
+                    visitor(cx);
+                    visitor(cy);
+                }
+                if let Some(r) = radius {
+                    visitor(r);
+                }
                 for (c, s) in stops {
                     visitor(c);
                     visitor(s);
                 }
             }
-            Expression::ConicGradient { from_angle, stops } => {
+            Expression::ConicGradient { from_angle, center, stops } => {
                 visitor(from_angle);
+                if let Some((cx, cy)) = center {
+                    visitor(cx);
+                    visitor(cy);
+                }
                 for (c, s) in stops {
                     visitor(c);
                     visitor(s);
@@ -1091,12 +1154,16 @@ impl Expression {
                 inner_repeater_index.as_deref().map(visitor);
             }
             Expression::OrganizeGridLayout(..) => {}
-            Expression::ComputeBoxLayoutInfo(..) => {}
-            Expression::ComputeGridLayoutInfo { .. } => {}
+            Expression::ComputeBoxLayoutInfo { cross_axis_size, .. }
+            | Expression::ComputeGridLayoutInfo { cross_axis_size, .. }
+            | Expression::ComputeFlexboxLayoutInfo { cross_axis_size, .. } => {
+                if let Some(cas) = cross_axis_size {
+                    visitor(cas);
+                }
+            }
             Expression::SolveBoxLayout(..) => {}
             Expression::SolveGridLayout { .. } => {}
             Expression::SolveFlexboxLayout(..) => {}
-            Expression::ComputeFlexboxLayoutInfo(..) => {}
             Expression::MinMax { lhs, rhs, .. } => {
                 visitor(lhs);
                 visitor(rhs);
@@ -1169,6 +1236,7 @@ impl Expression {
                 }
                 Path::Commands(commands) => visitor(commands),
             },
+            Expression::EmptyDataTransfer => {}
             Expression::StoreLocalVariable { value, .. } => visitor(value),
             Expression::ReadLocalVariable { .. } => {}
             Expression::EasingCurve(_) => {}
@@ -1179,14 +1247,25 @@ impl Expression {
                     visitor(s);
                 }
             }
-            Expression::RadialGradient { stops } => {
+            Expression::RadialGradient { center, radius, stops } => {
+                if let Some((cx, cy)) = center {
+                    visitor(cx);
+                    visitor(cy);
+                }
+                if let Some(r) = radius {
+                    visitor(r);
+                }
                 for (c, s) in stops {
                     visitor(c);
                     visitor(s);
                 }
             }
-            Expression::ConicGradient { from_angle, stops } => {
+            Expression::ConicGradient { from_angle, center, stops } => {
                 visitor(from_angle);
+                if let Some((cx, cy)) = center {
+                    visitor(cx);
+                    visitor(cy);
+                }
                 for (c, s) in stops {
                     visitor(c);
                     visitor(s);
@@ -1211,12 +1290,16 @@ impl Expression {
                 inner_repeater_index.as_deref_mut().map(visitor);
             }
             Expression::OrganizeGridLayout(..) => {}
-            Expression::ComputeBoxLayoutInfo(..) => {}
-            Expression::ComputeGridLayoutInfo { .. } => {}
+            Expression::ComputeBoxLayoutInfo { cross_axis_size, .. }
+            | Expression::ComputeGridLayoutInfo { cross_axis_size, .. }
+            | Expression::ComputeFlexboxLayoutInfo { cross_axis_size, .. } => {
+                if let Some(cas) = cross_axis_size {
+                    visitor(cas);
+                }
+            }
             Expression::SolveBoxLayout(..) => {}
             Expression::SolveGridLayout { .. } => {}
             Expression::SolveFlexboxLayout(..) => {}
-            Expression::ComputeFlexboxLayoutInfo(..) => {}
             Expression::MinMax { lhs, rhs, .. } => {
                 visitor(lhs);
                 visitor(rhs);
@@ -1255,7 +1338,20 @@ impl Expression {
             Expression::ArrayIndex { array, index } => {
                 array.is_constant(ga) && index.is_constant(ga)
             }
-            Expression::Cast { from, .. } => from.is_constant(ga),
+            Expression::Cast { from, to } => {
+                // Converting a float to string depends on the locale's decimal separator,
+                // unless the result contains none, like for integer literals.
+                // The constant propagation folds the remaining constant cases and
+                // promotes their binding back to constant.
+                if *to == Type::String
+                    && from.ty() == Type::Float32
+                    && !matches!(&**from, Expression::NumberLiteral(n, Unit::None)
+                        if locale_independent_number_to_string(*n).is_some())
+                {
+                    return false;
+                }
+                from.is_constant(ga)
+            }
             // This is conservative: the return value is the last expression in the block, but
             // we kind of mean "pure" here too, so ensure the whole body is OK.
             Expression::CodeBlock(sub) => sub.iter().all(|s| s.is_constant(ga)),
@@ -1288,19 +1384,25 @@ impl Expression {
                 Path::Events(_, _) => true,
                 Path::Commands(_) => false,
             },
+            Expression::EmptyDataTransfer => true,
             Expression::StoreLocalVariable { value, .. } => value.is_constant(ga),
-            // We only load what we store, and stores are alredy checked
+            // We only load what we store, and stores are already checked
             Expression::ReadLocalVariable { .. } => true,
             Expression::EasingCurve(_) => true,
             Expression::LinearGradient { angle, stops } => {
                 angle.is_constant(ga)
                     && stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
             }
-            Expression::RadialGradient { stops } => {
-                stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
+            Expression::RadialGradient { center, radius, stops } => {
+                center.as_ref().is_none_or(|(cx, cy)| cx.is_constant(ga) && cy.is_constant(ga))
+                    && radius.as_ref().is_none_or(|r| r.is_constant(ga))
+                    && stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
             }
-            Expression::ConicGradient { from_angle, stops } => {
+            Expression::ConicGradient { from_angle, center, stops } => {
                 from_angle.is_constant(ga)
+                    && center
+                        .as_ref()
+                        .is_none_or(|(cx, cy)| cx.is_constant(ga) && cy.is_constant(ga))
                     && stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
             }
             Expression::EnumerationValue(_) => true,
@@ -1312,12 +1414,12 @@ impl Expression {
             Expression::LayoutCacheAccess { .. } => false,
             Expression::GridRepeaterCacheAccess { .. } => false,
             Expression::OrganizeGridLayout { .. } => false,
-            Expression::ComputeBoxLayoutInfo(..) => false,
+            Expression::ComputeBoxLayoutInfo { .. } => false,
             Expression::ComputeGridLayoutInfo { .. } => false,
             Expression::SolveBoxLayout(..) => false,
             Expression::SolveGridLayout { .. } => false,
             Expression::SolveFlexboxLayout(..) => false,
-            Expression::ComputeFlexboxLayoutInfo(..) => false,
+            Expression::ComputeFlexboxLayoutInfo { .. } => false,
             Expression::MinMax { lhs, rhs, .. } => lhs.is_constant(ga) && rhs.is_constant(ga),
             Expression::EmptyComponentFactory => true,
             Expression::DebugHook { .. } => false,
@@ -1491,6 +1593,10 @@ impl Expression {
                     message =
                         format!("{message}. Divide by 1{from_unit} to convert to a plain number");
                 }
+            } else if matches!(target_type, Type::StyledText) && ty.can_convert(&Type::String) {
+                message = format!(
+                    "{message}. Wrap the expression in `@markdown(\"\\{{...}}\")` to convert it explicitly"
+                );
             } else if let Some(to_unit) = target_type.default_unit()
                 && matches!(ty, Type::Int32 | Type::Float32)
             {
@@ -1521,6 +1627,7 @@ impl Expression {
             | Type::LayoutCache
             | Type::ArrayOfU16 => Expression::Invalid,
             Type::Void => Expression::CodeBlock(Vec::new()),
+            Type::DataTransfer => Expression::EmptyDataTransfer,
             Type::Float32 => Expression::NumberLiteral(0., Unit::None),
             Type::String => Expression::StringLiteral(SmolStr::default()),
             Type::Int32 | Type::Color | Type::UnitProduct(_) => Expression::Cast {
@@ -1562,7 +1669,11 @@ impl Expression {
             }
             Type::Keys => Expression::Keys(Keys::default()),
             Type::ComponentFactory => Expression::EmptyComponentFactory,
-            Type::StyledText => Expression::Invalid,
+            Type::StyledText => Expression::FunctionCall {
+                function: Callable::Builtin(BuiltinFunction::StringToStyledText),
+                arguments: vec![Self::default_value_for_type(&Type::String)],
+                source_location: None,
+            },
         }
     }
 
@@ -1653,19 +1764,41 @@ fn model_inner_type(model: &Expression) -> Type {
     }
 }
 
+/// Converts a float to a string when the result contains no decimal separator,
+/// and is therefore the same in every locale.
+pub fn locale_independent_number_to_string(n: f64) -> Option<SmolStr> {
+    let string = format_smolstr!("{}", i_slint_common::FormattedNumber(n));
+    (!string.contains('.')).then_some(string)
+}
+
 /// The right hand side of a two way binding
 #[derive(Clone, Debug)]
-pub struct TwoWayBinding {
-    /// The property being linked
-    pub property: NamedReference,
-    /// If property is a struct, this is the fields.
-    /// So if you have `foo <=> element.property.baz.xyz`, then `field_access` is `vec!["baz", "xyz"]`
-    pub field_access: Vec<SmolStr>,
+pub enum TwoWayBinding {
+    Property {
+        /// The property being linked
+        property: NamedReference,
+        /// If property is a struct, this is the fields.
+        /// So if you have `foo <=> element.property.baz.xyz`, then `field_access` is `vec!["baz", "xyz"]`
+        field_access: Vec<SmolStr>,
+    },
+    ModelData {
+        /// The model being linked
+        repeated_element: ElementWeak,
+        /// same as `Self::Property::field_access`
+        field_access: Vec<SmolStr>,
+    },
 }
 impl TwoWayBinding {
     pub fn ty(&self) -> Type {
-        let mut ty = self.property.ty();
-        for x in &self.field_access {
+        let (mut ty, field_access) = match self {
+            Self::Property { property, field_access } => (property.ty(), field_access),
+            Self::ModelData { repeated_element, field_access } => {
+                let ty =
+                    Expression::RepeaterModelReference { element: repeated_element.clone() }.ty();
+                (ty, field_access)
+            }
+        };
+        for x in field_access {
             ty = match ty {
                 Type::InferredProperty | Type::InferredCallback => return ty,
                 Type::Struct(s) => s.fields.get(x).cloned().unwrap_or_default(),
@@ -1674,11 +1807,25 @@ impl TwoWayBinding {
         }
         ty
     }
+
+    pub fn is_constant(&self) -> bool {
+        match self {
+            Self::Property { property, .. } => property.is_constant(),
+            Self::ModelData { .. } => false,
+        }
+    }
+
+    pub fn property(&self) -> Option<&NamedReference> {
+        match self {
+            Self::Property { property, .. } => Some(property),
+            Self::ModelData { .. } => None,
+        }
+    }
 }
 
 impl From<NamedReference> for TwoWayBinding {
     fn from(nr: NamedReference) -> Self {
-        Self { property: nr, field_access: Vec::new() }
+        Self::Property { property: nr, field_access: Vec::new() }
     }
 }
 
@@ -1945,6 +2092,7 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             write!(f, " }}")
         }
         Expression::PathData(data) => write!(f, "{data:?}"),
+        Expression::EmptyDataTransfer => write!(f, "{{ }}"),
         Expression::EasingCurve(e) => write!(f, "{e:?}"),
         Expression::LinearGradient { angle, stops } => {
             write!(f, "@linear-gradient(")?;
@@ -1957,8 +2105,18 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             }
             write!(f, ")")
         }
-        Expression::RadialGradient { stops } => {
+        Expression::RadialGradient { center, radius, stops } => {
             write!(f, "@radial-gradient(circle")?;
+            if let Some(r) = radius {
+                write!(f, " ")?;
+                pretty_print(f, r)?;
+            }
+            if let Some((cx, cy)) = center {
+                write!(f, " at ")?;
+                pretty_print(f, cx)?;
+                write!(f, " ")?;
+                pretty_print(f, cy)?;
+            }
             for (c, s) in stops {
                 write!(f, ", ")?;
                 pretty_print(f, c)?;
@@ -1967,9 +2125,15 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             }
             write!(f, ")")
         }
-        Expression::ConicGradient { from_angle, stops } => {
+        Expression::ConicGradient { from_angle, center, stops } => {
             write!(f, "@conic-gradient(from ")?;
             pretty_print(f, from_angle)?;
+            if let Some((cx, cy)) = center {
+                write!(f, " at ")?;
+                pretty_print(f, cx)?;
+                write!(f, " ")?;
+                pretty_print(f, cy)?;
+            }
             for (c, s) in stops {
                 write!(f, ", ")?;
                 pretty_print(f, c)?;
@@ -2029,12 +2193,12 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             }
         }
         Expression::OrganizeGridLayout(..) => write!(f, "organize_grid_layout(..)"),
-        Expression::ComputeBoxLayoutInfo(..) => write!(f, "layout_info(..)"),
+        Expression::ComputeBoxLayoutInfo { .. } => write!(f, "layout_info(..)"),
         Expression::ComputeGridLayoutInfo { .. } => write!(f, "grid_layout_info(..)"),
         Expression::SolveBoxLayout(..) => write!(f, "solve_box_layout(..)"),
         Expression::SolveGridLayout { .. } => write!(f, "solve_grid_layout(..)"),
         Expression::SolveFlexboxLayout(..) => write!(f, "solve_flexbox_layout(..)"),
-        Expression::ComputeFlexboxLayoutInfo(..) => write!(f, "flexbox_layout_info(..)"),
+        Expression::ComputeFlexboxLayoutInfo { .. } => write!(f, "flexbox_layout_info(..)"),
         Expression::MinMax { ty: _, op, lhs, rhs } => {
             match op {
                 MinMaxOp::Min => write!(f, "min(")?,

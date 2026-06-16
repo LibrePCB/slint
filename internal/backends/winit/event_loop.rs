@@ -89,6 +89,10 @@ pub struct EventLoopState {
     /// Set to true when pumping events for the shortest amount of time possible.
     pumping_events_instantly: bool,
 
+    /// Allocates small i32 finger ids for iOS's pointer-valued touch ids.
+    #[cfg(target_os = "ios")]
+    touch_finger_ids: crate::ios::TouchFingerIdAllocator,
+
     custom_application_handler: Option<Box<dyn crate::CustomApplicationHandler>>,
 }
 
@@ -105,6 +109,8 @@ impl EventLoopState {
             current_resize_direction: Default::default(),
             pending_mouse_move: Default::default(),
             pumping_events_instantly: Default::default(),
+            #[cfg(target_os = "ios")]
+            touch_finger_ids: Default::default(),
             custom_application_handler,
         }
     }
@@ -131,7 +137,7 @@ impl EventLoopState {
             && let Some(window) = self.shared_backend_data.window_by_id(window_id)
         {
             let runtime_window = WindowInner::from_pub(window.window());
-            runtime_window.process_mouse_input(MouseEvent::Moved { position, is_touch: false });
+            runtime_window.process_mouse_input(MouseEvent::Moved { position, touch_finger_id: 0 });
         }
     }
 }
@@ -152,6 +158,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
         }
     }
 
+    #[allow(clippy::collapsible_match)]
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -203,7 +210,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
         }
 
         let runtime_window = WindowInner::from_pub(window.window());
-        if !matches!(event, WindowEvent::CursorMoved { .. }) {
+        if !matches!(event, WindowEvent::CursorMoved { .. } | WindowEvent::AxisMotion { .. }) {
             self.flush_pending_mouse_move();
         }
 
@@ -268,7 +275,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
 
                 fn to_slint_key(event: &winit::event::KeyEvent, key_code: &Key) -> SharedString {
                     macro_rules! winit_key_to_char {
-                        ($($char:literal # $name:ident # $($shifted:ident)? # $($_muda:ident)? $(=> $($_qt:ident)|* # $($winit:ident $(($pos:ident))?)|* # $($_xkb:ident)|* )? ;)*) => {
+                        ($($char:literal # $name:ident # $($shifted:ident)? $(=> $($_muda:ident)? # $($_qt:ident)|* # $($winit:ident $(($pos:ident))?)|* # $($_xkb:ident)|* )? ;)*) => {
                             #[cfg_attr(slint_nightly_test, allow(non_exhaustive_omitted_patterns))]
                             match key_code {
                                 $( $( $(
@@ -336,9 +343,11 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                         corelib::input::KeyEventType::KeyReleased
                     }
                 };
+                let mut key_event = KeyEvent::default();
+                key_event.text = text;
 
                 let event = corelib::input::InternalKeyEvent {
-                    key_event: corelib::input::KeyEvent { text, ..Default::default() },
+                    key_event,
                     event_type,
                     #[cfg(target_os = "windows")]
                     text_without_modifiers,
@@ -357,9 +366,11 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 runtime_window.process_key_input(event);
             }
             WindowEvent::Ime(winit::event::Ime::Commit(string)) => {
+                let mut key_event = KeyEvent::default();
+                key_event.text = string.into();
                 let event = InternalKeyEvent {
                     event_type: KeyEventType::CommitComposition,
-                    key_event: KeyEvent { text: string.into(), ..Default::default() },
+                    key_event,
                     ..Default::default()
                 };
                 runtime_window.process_key_input(event);
@@ -434,7 +445,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                             position: self.cursor_pos,
                             button,
                             click_count: 0,
-                            is_touch: false,
+                            touch_finger_id: 0,
                         }
                     }
                     winit::event::ElementState::Released => {
@@ -443,7 +454,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                             position: self.cursor_pos,
                             button,
                             click_count: 0,
-                            is_touch: false,
+                            touch_finger_id: 0,
                         }
                     }
                 };
@@ -452,11 +463,29 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
             WindowEvent::Touch(touch) => {
                 let location = touch.location.to_logical(runtime_window.scale_factor() as f64);
                 let position = euclid::point2(location.x, location.y);
-                runtime_window.process_touch_input(
-                    touch.id,
-                    position,
-                    winit_touch_phase(touch.phase),
-                );
+                // winit types the touch id as u64, but on all platforms except
+                // iOS it is in fact a small integer that fits in i32. Only iOS
+                // stores a UITouch pointer address in it, which
+                // TouchFingerIdAllocator maps to a small id instead.
+                #[cfg(not(target_os = "ios"))]
+                let finger_id =
+                    Some(i32::try_from(touch.id).expect("winit touch id out of i32 range"));
+                #[cfg(target_os = "ios")]
+                let finger_id = match touch.phase {
+                    winit::event::TouchPhase::Started | winit::event::TouchPhase::Moved => {
+                        self.touch_finger_ids.id_for(touch.id)
+                    }
+                    winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled => {
+                        self.touch_finger_ids.take(touch.id)
+                    }
+                };
+                if let Some(finger_id) = finger_id {
+                    runtime_window.process_touch_input(
+                        finger_id,
+                        position,
+                        winit_touch_phase(touch.phase),
+                    );
+                }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, inner_size_writer: _ } => {
                 if std::env::var("SLINT_SCALE_FACTOR").is_err() {
@@ -503,6 +532,9 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 });
             }
 
+            WindowEvent::AxisMotion { .. } => {
+                // Ignored, but happens often and is also ignored for the purpose of bundling CursorMoved.
+            }
             _ => {}
         }
 
@@ -600,8 +632,8 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 .shared_backend_data
                 .active_windows
                 .borrow()
-                .iter()
-                .filter_map(|(_, w)| w.upgrade())
+                .values()
+                .filter_map(|w| w.upgrade())
             {
                 if w.window().has_active_animations() {
                     w.request_redraw();

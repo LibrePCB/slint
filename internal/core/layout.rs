@@ -6,7 +6,7 @@
 // cspell:ignore coord
 
 use crate::items::{
-    DialogButtonRole, FlexboxLayoutAlignContent, FlexboxLayoutAlignItems, FlexboxLayoutAlignSelf,
+    CrossAxisAlignment, DialogButtonRole, FlexboxLayoutAlignContent, FlexboxLayoutAlignSelf,
     FlexboxLayoutDirection, FlexboxLayoutWrap, LayoutAlignment,
 };
 use crate::{Coord, SharedVector, slice::Slice};
@@ -1125,6 +1125,16 @@ pub struct BoxLayoutData<'a> {
     pub cells: Slice<'a, LayoutItemInfo>,
 }
 
+/// Input for `solve_box_layout_ortho`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct BoxLayoutOrthoData<'a> {
+    pub size: Coord,
+    pub padding: Padding,
+    pub cross_axis_alignment: CrossAxisAlignment,
+    pub cells: Slice<'a, LayoutItemInfo>,
+}
+
 #[repr(C)]
 #[derive(Debug)]
 /// The FlexboxLayoutData is used for a flex layout.
@@ -1138,7 +1148,7 @@ pub struct FlexboxLayoutData<'a> {
     pub alignment: LayoutAlignment,
     pub direction: FlexboxLayoutDirection,
     pub align_content: FlexboxLayoutAlignContent,
-    pub align_items: FlexboxLayoutAlignItems,
+    pub cross_axis_alignment: CrossAxisAlignment,
     pub flex_wrap: FlexboxLayoutWrap,
     /// Horizontal constraints (width) for each cell
     pub cells_h: Slice<'a, FlexboxLayoutItemInfo>,
@@ -1164,7 +1174,7 @@ pub struct FlexboxLayoutItemInfo {
     pub flex_shrink: f32,
     /// Flex basis in logical pixels (-1 = auto, meaning use preferred size; default)
     pub flex_basis: Coord,
-    /// Per-item cross-axis alignment override (Auto = use container's align-items)
+    /// Per-item cross-axis alignment override (Auto = use container's cross-axis-alignment)
     pub flex_align_self: FlexboxLayoutAlignSelf,
     /// Visual ordering of flex items (lower values appear first, default 0)
     pub flex_order: i32,
@@ -1275,6 +1285,41 @@ pub fn solve_box_layout(data: &BoxLayoutData, repeater_indices: Slice<u32>) -> S
     result
 }
 
+/// Cross-axis solve: returns (position, size) per cell, like [`solve_box_layout`].
+pub fn solve_box_layout_ortho(
+    data: &BoxLayoutOrthoData,
+    repeater_indices: Slice<u32>,
+) -> SharedVector<Coord> {
+    let mut result = SharedVector::<Coord>::default();
+    result.resize(data.cells.len() * 2 + repeater_indices.len(), 0 as _);
+    if data.cells.is_empty() {
+        return result;
+    }
+    let size_without_padding = data.size - data.padding.begin - data.padding.end;
+    let mut generator = LayoutCacheGenerator::new(&repeater_indices, &mut result);
+    for c in data.cells.iter() {
+        let min =
+            c.constraint.min.max(c.constraint.min_percent * size_without_padding / 100 as Coord);
+        let max =
+            c.constraint.max.min(c.constraint.max_percent * size_without_padding / 100 as Coord);
+        let size = match data.cross_axis_alignment {
+            CrossAxisAlignment::Stretch => size_without_padding,
+            _ => c.constraint.preferred,
+        }
+        .min(max)
+        .max(min);
+        let pos = match data.cross_axis_alignment {
+            CrossAxisAlignment::Stretch | CrossAxisAlignment::Start => data.padding.begin,
+            CrossAxisAlignment::End => data.padding.begin + size_without_padding - size,
+            CrossAxisAlignment::Center => {
+                data.padding.begin + (size_without_padding - size) / 2 as Coord
+            }
+        };
+        generator.add(pos, size);
+    }
+    result
+}
+
 /// Return the LayoutInfo for a BoxLayout with the given cells.
 pub fn box_layout_info(
     cells: Slice<LayoutItemInfo>,
@@ -1316,13 +1361,17 @@ pub fn box_layout_info_ortho(cells: Slice<LayoutItemInfo>, padding: &Padding) ->
     fold.min += extra_w;
     fold.max = Saturating::add(fold.max, extra_w);
     fold.preferred += extra_w;
+    // Don't propagate children's percentage constraints to the parent.
+    // Percentages are relative to the layout's own size, not the grandparent's.
+    fold.min_percent = 0 as _;
+    fold.max_percent = 100 as _;
     fold
 }
 
 /// Helper module for taffy-based flexbox layout
 mod flexbox_taffy {
     use super::{
-        Coord, FlexboxLayoutAlignContent, FlexboxLayoutAlignItems, FlexboxLayoutAlignSelf,
+        Coord, CrossAxisAlignment, FlexboxLayoutAlignContent, FlexboxLayoutAlignSelf,
         FlexboxLayoutItemInfo, FlexboxLayoutWrap as SlintFlexboxLayoutWrap, LayoutAlignment,
         Padding, Slice,
     };
@@ -1340,7 +1389,7 @@ mod flexbox_taffy {
         pub padding_v: &'a Padding,
         pub alignment: LayoutAlignment,
         pub align_content: FlexboxLayoutAlignContent,
-        pub align_items: FlexboxLayoutAlignItems,
+        pub cross_axis_alignment: CrossAxisAlignment,
         pub flex_wrap: SlintFlexboxLayoutWrap,
         pub flex_direction: TaffyFlexDirection,
         pub container_width: Option<Coord>,
@@ -1402,8 +1451,12 @@ mod flexbox_taffy {
                                     width: match params.flex_direction {
                                         TaffyFlexDirection::Column
                                         | TaffyFlexDirection::ColumnReverse => {
+                                            // Cross-axis for column
                                             if let Some(cw) = params.container_width {
-                                                Dimension::length(cw as _)
+                                                // Fit inside the container's content box (subtract padding)
+                                                let pad =
+                                                    params.padding_h.begin + params.padding_h.end;
+                                                Dimension::length((cw - pad).max(0 as Coord) as _)
                                             } else if preferred_width > 0 as Coord {
                                                 Dimension::length(preferred_width as _)
                                             } else {
@@ -1503,11 +1556,11 @@ mod flexbox_taffy {
                             LayoutAlignment::SpaceAround => AlignContent::SpaceAround,
                             LayoutAlignment::SpaceEvenly => AlignContent::SpaceEvenly,
                         }),
-                        align_items: Some(match params.align_items {
-                            FlexboxLayoutAlignItems::Stretch => AlignItems::Stretch,
-                            FlexboxLayoutAlignItems::Start => AlignItems::FlexStart,
-                            FlexboxLayoutAlignItems::End => AlignItems::FlexEnd,
-                            FlexboxLayoutAlignItems::Center => AlignItems::Center,
+                        align_items: Some(match params.cross_axis_alignment {
+                            CrossAxisAlignment::Stretch => AlignItems::Stretch,
+                            CrossAxisAlignment::Start => AlignItems::FlexStart,
+                            CrossAxisAlignment::End => AlignItems::FlexEnd,
+                            CrossAxisAlignment::Center => AlignItems::Center,
                         }),
                         align_content: Some(match params.align_content {
                             FlexboxLayoutAlignContent::Stretch => AlignContent::Stretch,
@@ -1757,7 +1810,7 @@ pub fn solve_flexbox_layout_with_measure(
         padding_v: &data.padding_v,
         alignment: data.alignment,
         align_content: data.align_content,
-        align_items: data.align_items,
+        cross_axis_alignment: data.cross_axis_alignment,
         flex_wrap: data.flex_wrap,
         flex_direction: taffy_direction,
         container_width,
@@ -1893,16 +1946,10 @@ pub fn flexbox_layout_info_cross_axis(
     }
 
     // Determine which axis is cross
-    let (cross_cells, cross_padding) = match direction {
-        FlexboxLayoutDirection::Row | FlexboxLayoutDirection::RowReverse => (&cells_v, padding_v),
-        FlexboxLayoutDirection::Column | FlexboxLayoutDirection::ColumnReverse => {
-            (&cells_h, padding_h)
-        }
+    let cross_cells = match direction {
+        FlexboxLayoutDirection::Row | FlexboxLayoutDirection::RowReverse => &cells_v,
+        FlexboxLayoutDirection::Column | FlexboxLayoutDirection::ColumnReverse => &cells_h,
     };
-    let cross_extra_pad = cross_padding.begin + cross_padding.end;
-
-    let min = cross_cells.iter().map(|c| c.constraint.min).fold(0.0 as Coord, |a, b| a.max(b))
-        + cross_extra_pad;
 
     // Compute the main-axis preferred size to use as the constraint for taffy,
     // using the same heuristic as flexbox_layout_info_main_axis.
@@ -1918,7 +1965,13 @@ pub fn flexbox_layout_info_cross_axis(
     let main_axis_constraint = if constraint_size > 0 as Coord && constraint_size < Coord::MAX {
         // Use the actual container main-axis dimension (accurate)
         constraint_size
-    } else if matches!(flex_wrap, FlexboxLayoutWrap::NoWrap) {
+    } else if matches!(flex_wrap, FlexboxLayoutWrap::NoWrap) || constraint_size >= Coord::MAX {
+        // No-wrap mode, or caller signalled "unconstrained" via MAX
+        // (used when no real main-axis dimension is in scope, e.g.
+        // a nested perpendicular flex queried via vtable): treat the
+        // main axis as unbounded so items don't wrap. This gives the
+        // natural max-cell-cross-axis result rather than the
+        // sqrt(item-areas) heuristic.
         Coord::MAX
     } else {
         // Use actual item areas (main * cross) for the heuristic, since both
@@ -1959,7 +2012,7 @@ pub fn flexbox_layout_info_cross_axis(
         padding_v,
         alignment: LayoutAlignment::Start,
         align_content: FlexboxLayoutAlignContent::Stretch,
-        align_items: FlexboxLayoutAlignItems::Stretch,
+        cross_axis_alignment: CrossAxisAlignment::Stretch,
         flex_wrap,
         flex_direction: taffy_direction,
         container_width,
@@ -1979,23 +2032,17 @@ pub fn flexbox_layout_info_cross_axis(
     builder.compute_layout(available_width, available_height, None);
 
     let (total_width, total_height) = builder.container_size();
-    let cross_orientation = match direction {
-        FlexboxLayoutDirection::Row | FlexboxLayoutDirection::RowReverse => Orientation::Vertical,
-        FlexboxLayoutDirection::Column | FlexboxLayoutDirection::ColumnReverse => {
-            Orientation::Horizontal
-        }
-    };
-    let preferred = match cross_orientation {
-        Orientation::Horizontal => total_width,
-        Orientation::Vertical => total_height,
+    let cross_size = match direction {
+        FlexboxLayoutDirection::Row | FlexboxLayoutDirection::RowReverse => total_height,
+        FlexboxLayoutDirection::Column | FlexboxLayoutDirection::ColumnReverse => total_width,
     };
 
     LayoutInfo {
-        min,
+        min: cross_size,
         max: Coord::MAX,
         min_percent: 0 as _,
         max_percent: 100 as _,
-        preferred,
+        preferred: cross_size,
         stretch: 0.0,
     }
 }
@@ -2071,6 +2118,15 @@ pub(crate) mod ffi {
         result: &mut SharedVector<Coord>,
     ) {
         *result = super::solve_box_layout(data, repeater_indices)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn slint_solve_box_layout_ortho(
+        data: &BoxLayoutOrthoData,
+        repeater_indices: Slice<u32>,
+        result: &mut SharedVector<Coord>,
+    ) {
+        *result = super::solve_box_layout_ortho(data, repeater_indices)
     }
 
     #[unsafe(no_mangle)]

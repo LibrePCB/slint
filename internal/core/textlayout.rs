@@ -1,6 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore sharedparley
 //! module for basic text layout
 //!
 //! The basic algorithm for breaking text into multiple lines:
@@ -27,6 +28,12 @@ use alloc::vec::Vec;
 use euclid::num::{One, Zero};
 
 use crate::items::{TextHorizontalAlignment, TextOverflow, TextVerticalAlignment, TextWrap};
+
+/// The font size to lay text out with when neither the `.slint` code nor the platform
+/// provide one. Last level of the precedence chain in
+/// [`crate::items::WindowItem::resolved_default_font_size`].
+pub const DEFAULT_FONT_SIZE: crate::lengths::LogicalLength =
+    crate::lengths::LogicalLength::new(12 as crate::Coord);
 
 #[cfg(feature = "unicode-linebreak")]
 mod linebreak_unicode;

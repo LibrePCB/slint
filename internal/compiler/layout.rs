@@ -19,6 +19,15 @@ pub enum Orientation {
     Vertical,
 }
 
+impl Orientation {
+    pub fn orthogonal(self) -> Self {
+        match self {
+            Orientation::Horizontal => Orientation::Vertical,
+            Orientation::Vertical => Orientation::Horizontal,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Copy, Eq, PartialEq, Default)]
 pub enum FlexboxLayoutDirection {
     /// Items are laid out in rows (horizontal primary axis)
@@ -606,6 +615,8 @@ pub struct BoxLayout {
     pub orientation: Orientation,
     pub elems: Vec<LayoutItem>,
     pub geometry: LayoutGeometry,
+    /// The `cross-axis-alignment` property, if set.
+    pub cross_alignment: Option<NamedReference>,
 }
 
 impl BoxLayout {
@@ -614,6 +625,9 @@ impl BoxLayout {
             cell.constraints.visit_named_references(visitor);
         }
         self.geometry.visit_named_references(visitor);
+        if let Some(e) = self.cross_alignment.as_mut() {
+            visitor(&mut *e);
+        }
     }
 }
 
@@ -624,7 +638,7 @@ pub struct FlexboxLayout {
     pub geometry: LayoutGeometry,
     pub direction: Option<NamedReference>,
     pub align_content: Option<NamedReference>,
-    pub align_items: Option<NamedReference>,
+    pub cross_axis_alignment: Option<NamedReference>,
     pub flex_wrap: Option<NamedReference>,
 }
 
@@ -698,7 +712,7 @@ impl FlexboxLayout {
         if let Some(e) = self.align_content.as_mut() {
             visitor(&mut *e)
         }
-        if let Some(e) = self.align_items.as_mut() {
+        if let Some(e) = self.cross_axis_alignment.as_mut() {
             visitor(&mut *e)
         }
         if let Some(e) = self.flex_wrap.as_mut() {
@@ -718,18 +732,9 @@ pub enum BuiltinFilter {
 }
 
 /// Get the implicit layout info of a particular element.
+/// When `constraint` is `Some`, it's passed as the `cross_axis_constraint`
+/// parameter to `Item::layout_info` for height-for-width support.
 pub fn implicit_layout_info_call(
-    elem: &ElementRc,
-    orientation: Orientation,
-    filter: BuiltinFilter,
-) -> Option<Expression> {
-    implicit_layout_info_call_with_constraint(elem, orientation, filter, None)
-}
-
-/// Like `implicit_layout_info_call`, but with an optional cross-axis constraint.
-/// When `constraint` is Some, it's passed as the cross_axis_constraint parameter
-/// to Item::layout_info for height-for-width support.
-pub fn implicit_layout_info_call_with_constraint(
     elem: &ElementRc,
     orientation: Orientation,
     filter: BuiltinFilter,
@@ -739,6 +744,30 @@ pub fn implicit_layout_info_call_with_constraint(
     loop {
         return match &elem_it.clone().borrow().base_type {
             ElementType::Component(base_comp) => {
+                // Flexbox supplies a cross-axis constraint to break its
+                // h/v cache cycle; call the base component's parametrized
+                // layout-info function when present.
+                let parametrized_nr = constraint.as_ref().and_then(|_| match orientation {
+                    Orientation::Vertical => {
+                        base_comp.root_element.borrow().layout_info_v_with_constraint.clone()
+                    }
+                    Orientation::Horizontal => {
+                        base_comp.root_element.borrow().layout_info_h_with_constraint.clone()
+                    }
+                });
+                if let Some(nr) = parametrized_nr
+                    && let Some(c) = &constraint
+                {
+                    debug_assert!(Rc::ptr_eq(&nr.element(), &base_comp.root_element));
+                    return Some(Expression::FunctionCall {
+                        function: crate::expression_tree::Callable::Function(NamedReference::new(
+                            elem,
+                            nr.name().clone(),
+                        )),
+                        arguments: vec![c.clone()],
+                        source_location: None,
+                    });
+                }
                 match base_comp.root_element.borrow().layout_info_prop(orientation) {
                     Some(nr) => {
                         // We cannot take nr as is because it is relative to the elem's component. We therefore need to

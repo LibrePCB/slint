@@ -1,9 +1,10 @@
 # Copyright © 2025 David Haig
 # SPDX-License-Identifier: MIT
 
+# cSpell: ignore tinybmp
 [package]
 name = "mcu-embassy"
-version = "1.16.0"
+version = "1.17.0"
 edition.workspace = true
 authors = ["David Haig <david@ninjametal.com>"]
 readme = "README.md"

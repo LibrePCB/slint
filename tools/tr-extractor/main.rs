@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell:ignore poedit nctx nplurals xgettext
+
 use clap::Parser;
 use i_slint_compiler::diagnostics::{BuildDiagnostics, Spanned};
 use i_slint_compiler::parser::{SyntaxKind, SyntaxNode, syntax_nodes};
@@ -80,7 +82,7 @@ fn main() -> std::io::Result<()> {
         file.metadata.insert("Content-Type".into(), "text/plain; charset=UTF-8".into());
         file.metadata.insert("Content-Transfer-Encoding".into(), "8bit".into());
         file.metadata.insert("Language".into(), String::new());
-        file.metadata.insert("Plural-Forms".into(), String::new());
+        file.metadata.insert("Plural-Forms".into(), "nplurals=1; plural=0;".into());
 
         file
     };

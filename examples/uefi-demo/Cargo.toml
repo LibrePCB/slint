@@ -1,9 +1,10 @@
 # Copyright © SixtyFPS GmbH <info@slint.dev>
 # SPDX-License-Identifier: MIT
 
+# cSpell: ignore minipng
 [package]
 name = "uefi-demo"
-version = "1.16.0"
+version = "1.17.0"
 edition.workspace = true
 license = "MIT"
 build = "build.rs"
@@ -14,8 +15,8 @@ path = "main.rs"
 name = "uefi-demo"
 
 [target.'cfg(target_os = "uefi")'.dependencies]
-uefi = { version = "0.33", features = ["panic_handler", "global_allocator"] }
-minipng = "=0.1.1"
+uefi = { version = "0.37", features = ["panic_handler", "global_allocator"] }
+minipng = "1.0"
 
 slint = { path = "../../api/rs/slint", default-features = false, features = ["compat-1-2", "renderer-software", "libm", "log", "unsafe-single-threaded"] }
 log = "0.4.21"

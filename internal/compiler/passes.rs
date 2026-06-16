@@ -4,6 +4,8 @@
 mod apply_default_properties_from_style;
 mod binding_analysis;
 mod border_radius;
+mod check_builtin_shadowing;
+mod check_drag_area;
 mod check_expressions;
 mod check_public_api;
 mod clip;
@@ -36,12 +38,14 @@ mod lower_menus;
 mod lower_platform;
 mod lower_popups;
 mod lower_property_to_element;
+mod lower_radiogroup;
 mod lower_repeated_rows;
 mod lower_shadows;
 mod lower_states;
 mod lower_tabwidget;
 mod lower_text_input_interface;
 mod lower_timers;
+mod lower_tooltips;
 pub mod materialize_fake_properties;
 pub mod move_declarations;
 mod optimize_useless_rectangles;
@@ -110,7 +114,9 @@ pub async fn run_passes(
 
     collect_libraries::collect_libraries(doc);
     collect_subcomponents::collect_subcomponents(doc);
+    lower_tooltips::lower_tooltips(doc, type_loader, diag).await;
     lower_tabwidget::lower_tabwidget(doc, type_loader, diag).await;
+    lower_radiogroup::lower_radiogroup(doc, type_loader, diag).await;
     lower_menus::lower_menus(doc, type_loader, diag).await;
     lower_component_container::lower_component_container(doc, type_loader, diag);
     collect_subcomponents::collect_subcomponents(doc);
@@ -149,10 +155,13 @@ pub async fn run_passes(
 
     doc.visit_all_used_components(|component| {
         border_radius::handle_border_radius(component, diag);
+        check_drag_area::check_drag_area(component, diag);
         deprecated_rotation_origin::handle_rotation_origin(component, diag);
         flickable::handle_flickable(component, &global_type_registry.borrow());
         lower_layout::lower_layouts(component, type_loader, &style_metrics, diag);
         default_geometry::default_geometry(component, diag);
+        lower_layout::synthesize_layoutinfo_v_with_constraint(component);
+        lower_layout::synthesize_layoutinfo_h_with_constraint(component);
         lower_absolute_coordinates::lower_absolute_coordinates(component);
         z_order::reorder_by_z_order(component, diag);
         lower_property_to_element::lower_property_to_element(
@@ -186,6 +195,7 @@ pub async fn run_passes(
         }
         lower_repeated_rows::lower_repeated_rows(component, &global_type_registry.borrow());
         materialize_fake_properties::materialize_fake_properties(component);
+        lower_layout::check_popup_layout(component);
     });
     for root_component in doc.exported_roots() {
         lower_layout::check_window_layout(&root_component);
@@ -327,6 +337,7 @@ pub fn run_import_passes(
     purity_check::purity_check(doc, diag);
     focus_handling::replace_forward_focus_bindings_with_focus_functions(doc, diag);
     check_expressions::check_expressions(doc, diag);
+    check_builtin_shadowing::check_builtin_shadowing(doc, diag);
     windows::warn_about_child_windows(doc, diag);
     unique_id::check_unique_id(doc, diag);
 }

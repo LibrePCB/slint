@@ -76,7 +76,7 @@ struct Property
 
     void set(const T &value) const
     {
-        if ((inner._0 & 0b10) == 0b10 || this->value != value) {
+        if ((reinterpret_cast<uintptr_t>(inner._0) & 0b10) == 0b10 || this->value != value) {
             this->value = value;
             cbindgen_private::slint_property_set_changed(&inner, &this->value);
         }
@@ -86,6 +86,13 @@ struct Property
     {
         cbindgen_private::slint_property_update(&inner, &value);
         return value;
+    }
+
+    /// Register this property as a dependency of the current tracking scope
+    /// without evaluating any binding.
+    void register_as_dependency() const
+    {
+        cbindgen_private::slint_property_register_as_dependency(&inner);
     }
 
     template<typename F>
@@ -131,7 +138,7 @@ struct Property
     {
         auto value = p2->get();
         cbindgen_private::PropertyHandleOpaque handle {};
-        if ((p2->inner._0 & 0b10) == 0b10) {
+        if ((reinterpret_cast<uintptr_t>(p2->inner._0) & 0b10) == 0b10) {
             std::swap(handle, const_cast<Property<T> *>(p2)->inner);
         }
         auto common_property = std::make_shared<Property<T>>(handle, std::move(value));
@@ -154,7 +161,7 @@ struct Property
 
         auto value = prop1->get();
         cbindgen_private::PropertyHandleOpaque handle {};
-        if ((prop1->inner._0 & 0b10) == 0b10) {
+        if ((reinterpret_cast<uintptr_t>(prop1->inner._0) & 0b10) == 0b10) {
             std::swap(handle, const_cast<Property<T> *>(prop1)->inner);
         }
         auto common_property = std::make_shared<Property<T>>(handle, std::move(value));
@@ -201,7 +208,13 @@ struct Property
                     },
                     new BindingMapper { t2_binding, self->map_to, self->map_from },
                     [](void *user_data) { delete reinterpret_cast<BindingMapper *>(user_data); },
-                    nullptr, nullptr);
+                    [](void *user_data, const void *value) {
+                        auto self = reinterpret_cast<BindingMapper *>(user_data);
+                        T2 sub_value = self->map_to(*reinterpret_cast<const T *>(value));
+                        return cbindgen_private::slint_property_intercept_set_binding(
+                                self->t2_binding, &sub_value);
+                    },
+                    nullptr);
             return true;
         };
 
@@ -213,6 +226,38 @@ struct Property
         cbindgen_private::slint_property_set_binding(
                 &prop2->inner, call_fn, new TwoWayBindingWithMap { common_property, map1, map2 },
                 del_fn, intercept_fn, intercept_binding_fn);
+    }
+
+    /// Bind `prop` two-way to a value stored in a model row. `getter` reads
+    /// the current row value (returning std::nullopt when the source is no
+    /// longer alive, which keeps the previous value); `setter` writes a new
+    /// value back into the row.
+    template<typename Getter, typename Setter>
+    static void link_two_way_to_model_data(const Property<T> *prop, Getter getter, Setter setter)
+    {
+        struct ModelTwoWayBinding
+        {
+            Getter getter;
+            Setter setter;
+        };
+        cbindgen_private::slint_property_set_binding(
+                &prop->inner,
+                [](void *user_data, void *value) {
+                    auto self = reinterpret_cast<ModelTwoWayBinding *>(user_data);
+                    if (auto v = self->getter())
+                        *reinterpret_cast<T *>(value) = *std::move(v);
+                },
+                new ModelTwoWayBinding { std::move(getter), std::move(setter) },
+                [](void *user_data) { delete reinterpret_cast<ModelTwoWayBinding *>(user_data); },
+                [](void *user_data, const void *value) {
+                    auto self = reinterpret_cast<ModelTwoWayBinding *>(user_data);
+                    self->setter(*reinterpret_cast<const T *>(value));
+                    return true;
+                },
+                [](void *, void *) -> bool {
+                    // Cannot rebind a property already two-way bound to a model.
+                    std::abort();
+                });
     }
 
     /// Internal (private) constructor used by link_two_way
