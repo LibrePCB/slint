@@ -119,6 +119,22 @@ inline slint::LogicalPosition from_slint_value(const slint::interpreter::Value &
                                     float(s.get_field("y").value().to_number().value()) });
 }
 
+inline slint::interpreter::Value into_slint_value(const slint::LogicalSize &val)
+{
+    slint::interpreter::Struct s;
+    s.set_field("width", val.width);
+    s.set_field("height", val.height);
+    return s;
+}
+
+inline slint::LogicalSize from_slint_value(const slint::interpreter::Value &val,
+                                           const slint::LogicalSize *)
+{
+    auto s = val.to_struct().value();
+    return slint::LogicalSize({ float(s.get_field("width").value().to_number().value()),
+                                float(s.get_field("height").value().to_number().value()) });
+}
+
 template<typename T>
 T from_slint_value(const slint::interpreter::Value &v)
 {
@@ -401,11 +417,10 @@ concept HasFromSlintValue = requires(const slint::interpreter::Value &val) {
 template<typename ModelData>
 slint::interpreter::Value into_slint_value(const std::shared_ptr<slint::Model<ModelData>> &val)
 {
-    if (!val) {
-        return {};
-    }
     if constexpr (HasFromSlintValue<ModelData>) {
-        return LiveReloadModelWrapper<ModelData>::wrap(val);
+        // A null pointer is an empty model, not a void value the property would reject.
+        return LiveReloadModelWrapper<ModelData>::wrap(
+                val ? val : std::make_shared<slint::VectorModel<ModelData>>());
     }
     return {};
 }
