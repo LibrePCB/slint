@@ -1488,6 +1488,17 @@ fn generate_sub_component(
         init.push(quote!(#r;))
     }
 
+    // The pre-init code (custom font registration) runs before the property initialization.
+    let pre_init_code: Vec<TokenStream> = component
+        .pre_init_code
+        .iter()
+        .map(|e| {
+            let code = compile_expression(&e.borrow(), &ctx);
+            quote!(#code;)
+        })
+        .collect();
+    init.splice(0..0, pre_init_code);
+
     // Initialize all properties which have an initial value in the slint file
     // This sets up also the callback handler and bindings
     for (prop, expression) in &component.property_init {
@@ -3343,7 +3354,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         }
 
         Expression::StoreLocalVariable { name, value } => {
-            let value = compile_expression_no_parenthesis(value, ctx);
+            let value = compile_expression_to_value_no_parenthesis(value, ctx);
             let name = ident(name);
             quote!(let #name = #value;)
         }
@@ -3351,29 +3362,13 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             let name = ident(name);
             quote!(#name)
         }
-        Expression::EasingCurve(EasingCurve::Linear) => {
-            quote!(sp::EasingCurve::Linear)
-        }
         Expression::EasingCurve(EasingCurve::CubicBezier(a, b, c, d)) => {
             quote!(sp::EasingCurve::CubicBezier([#a, #b, #c, #d]))
         }
-        Expression::EasingCurve(EasingCurve::EaseInElastic) => {
-            quote!(sp::EasingCurve::EaseInElastic)
-        }
-        Expression::EasingCurve(EasingCurve::EaseOutElastic) => {
-            quote!(sp::EasingCurve::EaseOutElastic)
-        }
-        Expression::EasingCurve(EasingCurve::EaseInOutElastic) => {
-            quote!(sp::EasingCurve::EaseInOutElastic)
-        }
-        Expression::EasingCurve(EasingCurve::EaseInBounce) => {
-            quote!(sp::EasingCurve::EaseInBounce)
-        }
-        Expression::EasingCurve(EasingCurve::EaseOutBounce) => {
-            quote!(sp::EasingCurve::EaseOutBounce)
-        }
-        Expression::EasingCurve(EasingCurve::EaseInOutBounce) => {
-            quote!(sp::EasingCurve::EaseInOutBounce)
+        // The other curves have no parameters and map to a runtime variant with the same name.
+        Expression::EasingCurve(e) => {
+            let ident = format_ident!("{e:?}");
+            quote!(sp::EasingCurve::#ident)
         }
         Expression::LinearGradient { angle, stops } => {
             let angle = compile_expression(angle, ctx);
@@ -4056,6 +4051,10 @@ fn compile_builtin_function_call(
             let (a1, a2) = (a.next().unwrap(), a.next().unwrap());
             quote!(sp::shared_string_from_number_precision(#a1 as f64, (#a2 as i32).max(0) as usize))
         }
+        BuiltinFunction::ToStringUnlocalized => {
+            let a1 = a.next().unwrap();
+            quote!(sp::shared_string_from_number_unlocalized(#a1 as f64))
+        }
         BuiltinFunction::StringToFloat => {
             quote!(sp::string_to_float(#(#a)*.as_str()).unwrap_or_default())
         }
@@ -4585,7 +4584,7 @@ fn generate_with_grid_input_data(
                             let total_item_count = max_total;
                             #rs_init
                             let start_offset = items_vec.len();
-                            items_vec.extend(core::iter::repeat_with(Default::default).take(len * total_item_count));
+                            items_vec.extend(::core::iter::repeat_with(::core::default::Default::default).take(len * total_item_count));
                             for i in 0..len {
                                 if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
                                     let offset = start_offset + i * total_item_count;
@@ -4602,7 +4601,7 @@ fn generate_with_grid_input_data(
                         quote!({
                             let len = _self.#repeater_id.len();
                             let start_offset = items_vec.len();
-                            items_vec.extend(core::iter::repeat_with(Default::default).take(len * #step));
+                            items_vec.extend(::core::iter::repeat_with(::core::default::Default::default).take(len * #step));
                             for i in 0..len {
                                 if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
                                     let offset = start_offset + i * #step;
@@ -4694,6 +4693,10 @@ fn generate_with_layout_item_info(
                                         for child_idx in 0..total_item_count {
                                             items_vec.push(sub_comp.as_pin_ref().layout_item_info(#orientation, Some(child_idx)));
                                         }
+                                    } else {
+                                        // Not-yet-instantiated slot: push placeholder cells so the cell
+                                        // count stays in sync with the repeater length written above.
+                                        items_vec.extend(::core::iter::repeat_with(::core::default::Default::default).take(total_item_count));
                                     }
                                 }
                             }
@@ -4708,6 +4711,8 @@ fn generate_with_layout_item_info(
                                 for i in 0.._self.#repeater_id.len() {
                                     if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
                                        items_vec.push(sub_comp.as_pin_ref().layout_item_info(#orientation, None));
+                                    } else {
+                                        items_vec.push(::core::default::Default::default());
                                     }
                                 }
                             )
@@ -4718,6 +4723,8 @@ fn generate_with_layout_item_info(
                                         for child_idx in 0..#step {
                                             items_vec.push(sub_comp.as_pin_ref().layout_item_info(#orientation, Some(child_idx)));
                                         }
+                                    } else {
+                                        items_vec.extend(::core::iter::repeat_with(::core::default::Default::default).take(#step));
                                     }
                                 }
                             )
@@ -4796,6 +4803,11 @@ fn generate_with_flexbox_layout_item_info(
                         items_vec_v.push(
                             sub_comp.as_pin_ref().flexbox_layout_item_info(sp::Orientation::Vertical, None),
                         );
+                    } else {
+                        // Not-yet-instantiated slot: push placeholder cells so the cell
+                        // count stays in sync with the repeater length written above.
+                        items_vec_h.push(::core::default::Default::default());
+                        items_vec_v.push(::core::default::Default::default());
                     }
                 });
                 push_code.push(quote!(

@@ -39,7 +39,7 @@ export component Example inherits Window {
         }
 
         Rectangle {
-            background: drop.contains-drag ? #80e080 : #a0a0a0;
+            background: drop.has-drag ? #80e080 : #a0a0a0;
             drop := DropArea {
                 can-drop(event) => {
                     Api.can-drop(event.data) ? DragAction.copy : DragAction.none
@@ -80,7 +80,8 @@ DragArea {
 }
 
 DropArea {
-    can-drop(event) => event.allow-move ? DragAction.move : DragAction.none;
+    // Accept the action the user is asking for; the runtime clamps it to what the source allows.
+    can-drop(event) => event.proposed-action;
     dropped(event) => {
         Api.accept-drop(event.data);
         return event.proposed-action;
@@ -91,7 +92,7 @@ DropArea {
 The hovering target's chosen action is also exposed as `current-action`, useful for visual feedback (a different cursor, icon, or highlight per action).
 
 <Tabs syncKey="dev-language">
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 fn main() {
@@ -111,13 +112,13 @@ fn main() {
 ```
 
 </TabItem>
-<TabItem label="C++">
+<TabItem label="C++" icon="seti:cpp">
 
 ```cpp
 // `DataTransfer` is currently not fully implemented in C++
 ```
 </TabItem>
-<TabItem label="NodeJS">
+<TabItem label="NodeJS" icon="node">
 
 ```js
 import * as slint from "slint-ui";
@@ -138,7 +139,7 @@ window.Api.transfer_to_string = (data) => data.plainText ?? "";
 window.Api.can_drop = (data) => data.hasPlainText;
 ```
 </TabItem>
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 import slint

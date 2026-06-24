@@ -620,6 +620,12 @@ struct ElisionInfo {
     max_physical_width: PhysicalLength,
 }
 
+/// Whether a line whose bottom edge is at `block_max_coord` fits within `max_physical_height`,
+/// rounding the height up so a sub-pixel overflow still counts as fitting.
+fn line_fits_height(block_max_coord: f32, max_physical_height: PhysicalLength) -> bool {
+    max_physical_height.get().ceil() >= block_max_coord
+}
+
 struct TextParagraph {
     range: Range<usize>,
     y: PhysicalLength,
@@ -647,31 +653,53 @@ impl TextParagraph {
     ) {
         let para_y = layout.y_offset + self.y;
 
-        let mut lines = self
+        let total_lines = self.layout.lines().len();
+
+        // For `overflow: elide` with a height limit (`overflow: clip` applies a hard pixel clip
+        // instead), keep the lines that actually fall within the box, taking the vertical alignment
+        // into account: the layout shifts every line down by `para_y`, which is negative for
+        // bottom/center alignment. Comparing only a line's bottom to the height (ignoring `para_y`)
+        // kept the wrong lines -- bottom-aligned text showed the lines clipped off the top instead
+        // of the visible ones anchored at the bottom.
+        let line_within_box = |block_min: f32, block_max: f32| match layout.max_physical_height {
+            Some(max_physical_height) if layout.elision_info.is_some() => {
+                // `line_fits_height` rounds the bottom up by a pixel; allow the same slack at the
+                // top so a line sitting right on the box edge isn't dropped to a rounding error.
+                line_fits_height(para_y.get() + block_max, max_physical_height)
+                    && para_y.get() + block_min >= -0.5
+            }
+            _ => true,
+        };
+
+        // The last line within the box, or the first line if none fit (e.g. a single line taller
+        // than the box, #12197) so the text isn't dropped entirely -- `draw_text` clips its overflow.
+        let last_drawn = self
             .layout
             .lines()
-            .take_while(|line| {
-                let metrics = line.metrics();
-                match layout.max_physical_height {
-                    // If overflow: clip is set, we apply a hard pixel clip, but with overflow: elide,
-                    // we want to place an ellipsis on the last line and not draw any lines beyond the
-                    // given max height.
-                    Some(max_physical_height) if layout.elision_info.is_some() => {
-                        max_physical_height.get().ceil() >= metrics.block_max_coord
-                    }
-                    _ => true,
-                }
+            .enumerate()
+            .filter(|(_, line)| {
+                let m = line.metrics();
+                line_within_box(m.block_min_coord, m.block_max_coord)
             })
-            .peekable();
+            .map(|(index, _)| index)
+            .next_back()
+            .or(Some(0));
 
-        while let Some(line) = lines.next() {
-            let last_line = lines.peek().is_none();
+        for (index, line) in self.layout.lines().enumerate() {
+            let metrics = line.metrics();
+            let last_line = Some(index) == last_drawn;
+            if !last_line && !line_within_box(metrics.block_min_coord, metrics.block_max_coord) {
+                continue;
+            }
+            // The last drawn line should show an ellipsis if real lines below it were dropped for
+            // the height, even when it fits the width.
+            let vertically_truncated = last_line && index + 1 < total_lines;
             for item in line.items() {
                 match item {
                     parley::PositionedLayoutItem::GlyphRun(glyph_run) => {
                         let ellipsis = if last_line {
                             let (truncated_glyphs, ellipsis) =
-                                layout.glyphs_with_elision(&glyph_run);
+                                layout.glyphs_with_elision(&glyph_run, vertically_truncated);
 
                             Self::draw_glyph_run(
                                 &glyph_run,
@@ -868,6 +896,19 @@ struct Layout {
 }
 
 impl Layout {
+    /// Returns true if the very first line is taller than the available height, meaning the
+    /// vertical line dropping used for `overflow: elide` would discard it and render nothing.
+    /// In that case the caller keeps drawing the first line but applies a hard pixel clip to
+    /// trim its vertical overflow, so it is shown (clipped) rather than disappearing entirely.
+    fn first_line_exceeds_height(&self) -> bool {
+        let Some(max_physical_height) = self.max_physical_height else {
+            return false;
+        };
+        self.paragraphs.first().and_then(|paragraph| paragraph.layout.lines().next()).is_some_and(
+            |line| !line_fits_height(line.metrics().block_max_coord, max_physical_height),
+        )
+    }
+
     fn paragraph_by_byte_offset(&self, byte_offset: usize) -> Option<&TextParagraph> {
         self.paragraphs.iter().find(|p| byte_offset >= p.range.start && byte_offset <= p.range.end)
     }
@@ -979,6 +1020,9 @@ impl Layout {
     fn glyphs_with_elision<'a>(
         &'a self,
         glyph_run: &'a parley::layout::GlyphRun<Brush>,
+        // When set, place an ellipsis even if the run fits the width. Used when lines below were
+        // dropped for the height, so the last visible line signals the vertical truncation.
+        force_elision: bool,
     ) -> (
         impl Iterator<Item = parley::layout::Glyph> + Clone + 'a,
         Option<(parley::layout::Glyph, parley::FontData, PhysicalLength)>,
@@ -996,8 +1040,9 @@ impl Layout {
 
         // Run starts after where the ellipsis would go - skip entirely
         let run_beyond_elision = run_start > max_width;
-        // Run extends beyond max width and needs truncation + ellipsis
-        let needs_elision = !run_beyond_elision && run_end.get().floor() > max_width.get().ceil();
+        // Run extends beyond max width (or the lines below it were dropped) and needs an ellipsis
+        let needs_elision = !run_beyond_elision
+            && (force_elision || run_end.get().floor() > max_width.get().ceil());
 
         let truncated_glyphs = glyph_run.positioned_glyphs().take_while(move |glyph| {
             !run_beyond_elision
@@ -1014,10 +1059,14 @@ impl Layout {
                             > info.max_physical_width
                     })
                     .map(|g| g.x)
-                    .unwrap_or(0.0);
+                    // Nothing overflows horizontally (force_elision): put the ellipsis after the run.
+                    .unwrap_or(run_end.get());
 
                 let mut ellipsis_glyph = info.ellipsis_glyph;
                 ellipsis_glyph.x = ellipsis_x;
+                // The ellipsis glyph comes from a standalone layout; place it on this run's
+                // baseline so it lands on the right line (not just the first one).
+                ellipsis_glyph.y = glyph_run.baseline();
 
                 let font_size = PhysicalLength::new(glyph_run.run().font_size());
                 (ellipsis_glyph, info.font_for_ellipsis_glyph.clone(), font_size)
@@ -1128,7 +1177,14 @@ pub fn draw_text(
 
     drop(font_ctx);
 
-    let render = if text_overflow == TextOverflow::Clip {
+    // When `overflow: elide` can't even fit the first line, the line is still drawn (rather than
+    // dropped, which would render nothing) but its vertical overflow needs to be clipped like
+    // `overflow: clip` would. Horizontal elision still applies, so a line that is both too tall
+    // and too wide is clipped vertically and gets an ellipsis horizontally.
+    let clip_overflowing_first_line =
+        text_overflow == TextOverflow::Elide && layout.first_line_exceeds_height();
+
+    let render = if text_overflow == TextOverflow::Clip || clip_overflowing_first_line {
         item_renderer.save_state();
 
         item_renderer.combine_clip(
@@ -1166,7 +1222,7 @@ pub fn draw_text(
         );
     }
 
-    if text_overflow == TextOverflow::Clip {
+    if text_overflow == TextOverflow::Clip || clip_overflowing_first_line {
         item_renderer.restore_state();
     }
 

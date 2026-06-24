@@ -186,6 +186,10 @@ export component FloatToString {
 In addition, call the <Link type="MathRef" label="math functions"/> in postfix style on any numeric value,
 for example `(-10).abs()` or `x.round()`.
 
+#### to-string-unlocalized() -> string
+
+Returns a string representation of the number but not localized. This means the decimal separator will always be a dot.
+
 ### int
 <SlintProperty propName="int" typeName="int" defaultValue='0'>
 Signed integral number.
@@ -282,10 +286,7 @@ Supported format are SVG, and formats supported by the [`image` crate](https://c
 AVIF, BMP, DDS, Farbfeld, GIF, HDR, ICO, JPEG, EXR, PNG, PNM, QOI, TGA, TIFF, WebP.
 
 <Tabs syncKey="dev-language">
-<TabItem label="C++">
-In C++, properties or struct fields of the image type are mapped to <LangRefLink lang="cpp" relpath="api/slint/image/">`slint::Image`</LangRefLink>.
-</TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 In Rust, properties or struct fields of the image type are mapped to <LangRefLink lang="rust-slint" relpath="struct.Image">`slint::Image`</LangRefLink>.
 :::note[Note]
 By default, only PNG, JPEG, and SVG are supported.
@@ -293,11 +294,14 @@ Enable the `image-default-formats` Cargo feature to support the other formats li
 which comes at a cost of increased binary size and compilation time.
 :::
 </TabItem>
-<TabItem label="NodeJS" >
+<TabItem label="C++" icon="seti:cpp">
+In C++, properties or struct fields of the image type are mapped to <LangRefLink lang="cpp" relpath="api/slint/image/">`slint::Image`</LangRefLink>.
+</TabItem>
+<TabItem label="NodeJS" icon="node">
 In JavaScript properties or struct fields of the image type are mapped an object that implement the <LangRefLink lang="nodejs" relpath="api/interfaces/ImageData/">ImageData interface</LangRefLink>.
 </TabItem>
 
-<TabItem label="Python" >
+<TabItem label="Python" icon="seti:python">
 In Python, properties or struct fields of the image type are mapped to <LangRefLink lang="python" relpath="api/classes/image/">`Image`</LangRefLink>.
 </TabItem>
 
@@ -478,6 +482,7 @@ export component Example {
 `int` and `float` convert implicitly to `string`.
 To control how many digits appear in the result, use the [`to-fixed()` and `to-precision()`](#to-fixeddigits-int---string)
 member functions instead of the implicit conversion.
+To always use a dot as decimal separator regardless of the locale, use [`to-string-unlocalized()`](#to-string-unlocalized---string).
 
 For the other direction, convert a `string` to a number with the [`to-float()`](#to-float---float) member function,
 and check whether a string holds a valid number with `is-float()`.
