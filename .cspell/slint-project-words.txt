@@ -178,6 +178,7 @@ endforeach
 endfunction
 endrst
 enim
+epoll
 entrancy
 enummember
 eprintln
@@ -229,6 +230,7 @@ fract
 framebuffers
 freetype
 frontends
+frontmatter
 Fsvg
 fullsize
 Fullwidth
@@ -261,6 +263,7 @@ hlayout
 hmenu
 horizontalbox
 horizontallayout
+hotplug
 hspace
 HSPI
 HSYNC
@@ -284,6 +287,7 @@ incpath
 inputchip
 intprop
 intval
+iocp
 IRAM
 Irqs
 isinstance
@@ -332,6 +336,7 @@ libglx
 libgstreamer
 libgstrtspserver
 Libinput
+libintl
 libloading
 libm
 librsvg
@@ -339,6 +344,7 @@ libseat
 libslint
 libstdc
 libudev
+libuv
 libx
 libxcb
 libxcursor
@@ -382,6 +388,7 @@ mimxrt
 minmax
 MIPI
 mipidsi
+miscompile
 modalnavigationdrawer
 modelprop
 MOSI
@@ -435,6 +442,7 @@ objfile
 Octa
 oklch
 oldsyspath
+optipng
 ospi
 othercomp
 ovmf
@@ -494,6 +502,7 @@ Randriana
 rasterizer
 rasterizes
 RBUTTONUP
+recompiles
 rects
 redoable
 REFR
@@ -560,6 +569,7 @@ srcroot
 SRCS
 SRGBA
 standardbutton
+startswith
 staticlib
 staticmethod
 stdset

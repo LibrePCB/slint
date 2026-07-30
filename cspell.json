@@ -24,6 +24,8 @@
         "minx",
         "miny",
         "miri",
+        "monomorphized",
+        "monomorphizing",
         "peekable",
         "Realloc",
         "refcell",
@@ -36,6 +38,7 @@
         "Unlocalized",
         "unmap",
         "unsync",
+        "vecs", // plural of vec
         "vsync"
       ],
       "ignoreRegExpList": [
@@ -97,7 +100,8 @@
         "ὀδυσσεύς",
         "commonmark",
         "strikethroughs",
-        "unlocalized"
+        "unlocalized",
+        "binstall"
       ]
     }
   ],
@@ -106,6 +110,7 @@
     "AARRGGBB",
     "accesskit",
     "antialiasing",
+    "arboard",
     "Argb",
     "armv",
     "astrojs",
@@ -143,6 +148,8 @@
     "inout",
     "knip",
     "layouting",
+    "libpython",
+    "libfuzzer",
     "linebreak",
     "lineedit",
     "LINUXFB",
@@ -151,9 +158,12 @@
     "mdns",
     "microcontroller",
     "microcontrollers",
+    "microtask",
+    "miscompilation",
     "MSVC",
     "muda",
     "napi",
+    "nostartfiles",
     "ogoffart",
     "oneshot",
     "Oooops",
@@ -161,10 +171,13 @@
     "opengles",
     "Pandoc",
     "pico",
+    "Pipfile",
     "pixmap",
     "prestart",
     "printerdemo",
+    "pycache",
     "pythonw",
+    "regenerable",
     "replacen",
     "rehype",
     "Rgba",
@@ -217,14 +230,17 @@
     "vulkan",
     "wasm",
     "webassembly",
+    "webgpu",
     "wgpu",
     "windowrc",
     "winit",
     "xaarrggbb",
     "Xcodegen",
     "Xcodeproj",
+    "xcworkspace",
     "xtask",
     "xtensa",
+    "Zmiri",
     // CSS Color 4 named-color keywords not accepted by the default English dictionary (W3C CSS Color Module Level 4).
     "aliceblue",
     "antiquewhite",
@@ -317,7 +333,10 @@
     "springgreen",
     "steelblue",
     "whitesmoke",
-    "yellowgreen"
+    "yellowgreen",
+    "hotspot",
+    "builtinmousecursor",
+    "mousecursor"
   ],
   "ignorePaths": [
     ".github/**",
@@ -326,6 +345,7 @@
     "cspell.json",
     "LICENSES",
     "examples/*/lang/**",
+    "internal/compiler/fuzz/README.md",
     "pnpm-lock.yaml",
     "pnpm-workspace.yaml",
     "REUSE.toml",

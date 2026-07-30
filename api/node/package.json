@@ -1,6 +1,6 @@
 {
   "name": "slint-ui",
-  "version": "1.17.0",
+  "version": "1.18.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "homepage": "https://github.com/slint-ui/slint",
@@ -21,13 +21,13 @@
   "description": "Slint is a declarative GUI toolkit to build native user interfaces for desktop and embedded applications.",
   "devDependencies": {
     "@biomejs/biome": "catalog:",
-    "@napi-rs/cli": "3.7.2",
+    "@napi-rs/cli": "3.7.4",
     "@types/capture-console": "1.0.5",
     "@types/node": "catalog:",
     "capture-console": "1.0.2",
-    "image-js": "1.6.1",
+    "image-js": "1.7.0",
     "typescript": "catalog:",
-    "verdaccio": "6.7.2",
+    "verdaccio": "6.8.0",
     "vitest": "catalog:"
   },
   "engines": {
@@ -44,6 +44,7 @@
     "docs": "pnpm build && pnpm -C ../../docs/nodejs run build",
     "docs:dev": "pnpm build && pnpm -C ../../docs/nodejs run dev",
     "docs:debug": "pnpm build:debug && pnpm -C ../../docs/nodejs run build",
+    "type-check": "tsc -p tsconfig.bindings.json && tsc -p __test__/tsconfig.json && tsc -p tsconfig.e2e.json",
     "check": "biome check",
     "format": "biome format",
     "format:fix": "biome format --write",

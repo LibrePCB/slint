@@ -9,6 +9,7 @@ use smol_str::{SmolStr, ToSmolStr};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::expression_tree::Expression;
 use crate::langtype::{
@@ -22,7 +23,10 @@ use crate::typeregister::TypeRegister;
 /// Parse the contents of builtins.slint and fill the builtin type registry
 /// `register` is the register to fill with the builtin types.
 /// At this point, it really should already contain the basic Types (string, int, ...)
-pub(crate) fn load_builtins(register: &mut TypeRegister) {
+pub(crate) fn load_builtins(
+    register: &mut TypeRegister,
+    symbol_counters: &Rc<crate::symbol_counters::SymbolCounters>,
+) {
     let mut diag = crate::diagnostics::BuildDiagnostics::default();
     let node = crate::parser::parse(include_str!("builtins.slint").into(), None, &mut diag);
     if !diag.is_empty() {
@@ -93,19 +97,20 @@ pub(crate) fn load_builtins(register: &mut TypeRegister) {
                         }
                     }
 
-                    info.docs = docs::doc_comment(&p);
+                    info.set_docs(docs::doc_comment(&p));
                     info.shadowable = has_shadowable_annotation(&p);
 
                     if let Some(e) = p.BindingExpression() {
                         assert!(!info.shadowable, "shadowable property {id}::{prop_name} can't have a default value as it would end up on the shadowing declaration");
                         let ty = info.ty.clone();
-                        info.default_value = BuiltinPropertyDefault::Expr(compiled(e, register, ty));
+                        info.default_value =
+                            BuiltinPropertyDefault::Expr(compiled(e, register, ty, symbol_counters));
                     }
 
                     (prop_name, info)
                 })
                 .chain(e.CallbackDeclaration().map(|s| {
-                    let mut info = BuiltinPropertyInfo::new(Type::Callback(Rc::new(Function{
+                    let mut info = BuiltinPropertyInfo::new(Type::Callback(Arc::new(Function{
                         args: s
                             .CallbackDeclarationParameter()
                             .map(|a| {
@@ -124,7 +129,7 @@ pub(crate) fn load_builtins(register: &mut TypeRegister) {
                             .map(|a| a.DeclaredIdentifier().and_then(|x| identifier_text(&x)).unwrap_or_default())
                             .collect()
                     })));
-                    info.docs = docs::doc_comment(&s);
+                    info.set_docs(docs::doc_comment(&s));
                     info.shadowable = has_shadowable_annotation(&s);
                     (identifier_text(&s.DeclaredIdentifier()).unwrap(), info)
                 }))
@@ -180,12 +185,14 @@ pub(crate) fn load_builtins(register: &mut TypeRegister) {
             let mut info = BuiltinPropertyInfo::new(Type::Function(
                 Function { return_type, args, arg_names }.into(),
             ));
-            info.docs = docs::doc_comment(&f);
+            info.set_docs(docs::doc_comment(&f));
             info.shadowable = has_shadowable_annotation(&f);
             (name, info)
         }));
 
-        let mut builtin = BuiltinElement::new(Rc::new(n));
+        // NativeClass is not Send yet; the Arc is for the shared langtype graph.
+        #[allow(clippy::arc_with_non_send_sync)]
+        let mut builtin = BuiltinElement::new(Arc::new(n));
         builtin.is_global = matches!(base, Base::Global);
         let properties = &mut builtin.properties;
         if let Base::NativeParent(parent) = &base {
@@ -274,12 +281,15 @@ fn compiled(
     node: syntax_nodes::BindingExpression,
     type_register: &TypeRegister,
     ty: Type,
+    symbol_counters: &Rc<crate::symbol_counters::SymbolCounters>,
 ) -> Expression {
     let mut diag = crate::diagnostics::BuildDiagnostics::default();
-    let mut ctx = crate::lookup::LookupCtx::empty_context(type_register, &mut diag);
+    let mut ctx =
+        crate::lookup::LookupCtx::empty_context(type_register, &mut diag, symbol_counters.clone());
     ctx.property_type = ty.clone();
+    ctx.expected_type = ty.clone();
     let e = Expression::from_binding_expression_node(node.clone().into(), &mut ctx)
-        .maybe_convert_to(ty, &node, &mut diag);
+        .maybe_convert_to(ty, &node, ctx.diag, &ctx.symbol_counters);
     if diag.has_errors() {
         let vec = diag.to_string_vec();
         #[cfg(feature = "display-diagnostics")]
@@ -336,7 +346,7 @@ fn parse_annotation(key: &str, node: &SyntaxNode) -> Option<Option<SmolStr>> {
 /// Check for standalone `\sc` marker in a doc string, ensuring it is not
 /// followed by an alphanumeric or underscore character (avoids matching
 /// `\score`, `\scale`, etc.).
-fn has_sc_marker(doc: &str) -> bool {
+pub(crate) fn has_sc_marker(doc: &str) -> bool {
     doc.match_indices("\\sc").any(|(start, _)| {
         let end = start + 3;
         match doc.as_bytes().get(end).copied() {

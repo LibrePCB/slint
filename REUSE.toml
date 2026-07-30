@@ -50,8 +50,9 @@ path = [
   "Cargo.lock",
   "flake.nix",
   "flake.lock",
-  "examples/bevy/Cargo.lock",
-  "examples/servo/Cargo.lock",
+  "examples/Cargo.lock",
+  "demos/Cargo.lock",
+  "tests/Cargo.lock",
   "REUSE.toml",
   "biome.json",
   "knip.json",
@@ -194,10 +195,18 @@ path = [
   "tools/figma-inspector/**.html",
   "tools/figma-inspector/**.css",
   "tools/viewer/TestFlight/WhatToTest.en-US.txt",
+  "tools/viewer/android/fastlane/metadata/android/**.txt",
+  "tools/viewer/android/fastlane/metadata/android/**.png",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright © SixtyFPS GmbH <info@slint.dev>"
 SPDX-License-Identifier = "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0"
+
+[[annotations]]
+path = ["api/slint-sc/tests/references/**.png"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright © SixtyFPS GmbH <info@slint.dev>"
+SPDX-License-Identifier = "GPL-3.0-only OR LicenseRef-Slint-Software-3.0"
 
 [[annotations]]
 path = ["demos/weather-demo/ui/assets/icons/**.svg", "examples/memory/icons/**.png", "examples/memory/icons/**.svg"]

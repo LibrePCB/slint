@@ -8,7 +8,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 Use <Link type="DragArea" /> and <Link type="DropArea" /> to move data between parts of the UI with a drag-and-drop gesture.
 On platforms that support it, a <Link type="DropArea" /> also accepts drops from other applications.
 
-The payload is a `data-transfer` value, which abstracts over the file-type transfer mechanisms supported by each platform.
+The payload is a <Link type="data_transfer" label="data-transfer" code /> value, which abstracts over the file-type transfer mechanisms supported by each platform.
 `data-transfer` values are opaque in Slint code:
 construct and read them via callbacks implemented in the host language.
 
@@ -115,7 +115,23 @@ fn main() {
 <TabItem label="C++" icon="seti:cpp">
 
 ```cpp
-// `DataTransfer` is currently not fully implemented in C++
+int main()
+{
+    auto app = Example::create();
+    auto api = app->global<Api>();
+    // For simple plain text and image transfers, a simple conversion is supplied
+    // which handles the common case.
+    api.on_string_to_transfer(
+            [](const slint::SharedString &text) { return slint::DataTransfer(text); });
+    // A helper for reading plain text from a `DataTransfer` is also supplied.
+    api.on_transfer_to_string(
+            [](const slint::DataTransfer &data) { return data.plain_text().value_or(""); });
+    api.on_can_drop([](const slint::DataTransfer &data) {
+        // This helper abstracts over various "plain text" MIME types
+        return data.has_plain_text();
+    });
+    // ...
+}
 ```
 </TabItem>
 <TabItem label="NodeJS" icon="node">

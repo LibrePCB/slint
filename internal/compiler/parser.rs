@@ -70,6 +70,11 @@ macro_rules! verify_node {
         )*
     };
 
+    // At least one
+    (@check_has_children $node:ident, + $kind:ident) => {
+        let count = $node.children_with_tokens().filter(|n| n.kind() == SyntaxKind::$kind).count();
+        assert!(count >= 1, "Expecting one or more sub-node of type {}, found {}\n{:?}", stringify!($kind), count, $node);
+    };
     // Any number of this kind.
     (@check_has_children $node:ident, * $kind:ident) => {};
     // 1 or 0
@@ -88,11 +93,13 @@ macro_rules! verify_node {
         assert_eq!(count, $count, "Expecting {} sub-node of type {}, found {}\n{:?}", $count, stringify!($kind), count, $node);
     };
 
+    (@extract_kind + $kind:ident) => {SyntaxKind::$kind};
     (@extract_kind * $kind:ident) => {SyntaxKind::$kind};
     (@extract_kind ? $kind:ident) => {SyntaxKind::$kind};
     (@extract_kind $count:literal $kind:ident) => {SyntaxKind::$kind};
     (@extract_kind $kind:ident) => {SyntaxKind::$kind};
 
+    (@extract_type + $kind:ident) => {$crate::parser::syntax_nodes::$kind};
     (@extract_type * $kind:ident) => {$crate::parser::syntax_nodes::$kind};
     (@extract_type ? $kind:ident) => {$crate::parser::syntax_nodes::$kind};
     (@extract_type $count:literal $kind:ident) => {$crate::parser::syntax_nodes::$kind};
@@ -104,7 +111,14 @@ macro_rules! node_accessors {
     ([ $($t1:tt $($t2:ident)?),* ]) => {
         $(node_accessors!{@ $t1 $($t2)*} )*
     };
-
+    (@ + $kind:ident) => {
+        #[allow(non_snake_case)]
+        pub fn $kind(&self) -> impl Iterator<Item = $kind> + use<> {
+            let mut it = self.0.children().filter(|n| n.kind() == SyntaxKind::$kind).map(Into::into).peekable();
+            debug_assert!(it.peek().is_some(), stringify!(Expected at least one $kind));
+            it
+        }
+    };
     (@ * $kind:ident) => {
         #[allow(non_snake_case)]
         pub fn $kind(&self) -> impl Iterator<Item = $kind> + use<> {
@@ -334,16 +348,22 @@ declare_syntax! {
     {
         Document -> [ *Component, *ExportsList, *ImportSpecifier, *StructDeclaration, *EnumDeclaration ],
         /// `DeclaredIdentifier := Element { ... }`
-        Component -> [ DeclaredIdentifier, ?UsesSpecifier, ?ImplementsSpecifier, Element ],
+        Component -> [ DeclaredIdentifier, Element ],
         /// `id := Element { ... }`
         SubElement -> [ Element ],
         Element -> [ ?QualifiedName, *PropertyDeclaration, *Binding, *CallbackConnection,
-                     *CallbackDeclaration, *ConditionalElement, *Function, *SubElement,
+                     *CallbackDeclaration, *ConditionalElement, *MatchElement, *Function, *SubElement,
                      *RepeatedElement, *PropertyAnimation, *PropertyChangedCallback,
-                     *TwoWayBinding, *States, *Transitions, ?ChildrenPlaceholder ],
+                     *TwoWayBinding, *States, *Transitions, *ImplementStatement, ?ChildrenPlaceholder ],
         RepeatedElement -> [ ?DeclaredIdentifier, ?RepeatedIndex, Expression , SubElement],
         RepeatedIndex -> [],
         ConditionalElement -> [ Expression , SubElement],
+        /// match (foo) { 1: Elem { } }
+        MatchElement -> [ Expression , *MatchCase, ?WildcardMatchCase ],
+        /// 1: Elem { }
+        MatchCase -> [ Expression, ?SubElement ],
+        /// *: Elem { }
+        WildcardMatchCase -> [ ?SubElement ],
         CallbackDeclaration -> [ DeclaredIdentifier, *CallbackDeclarationParameter, ?ReturnType, ?TwoWayBinding ],
         // `foo: type` or just `type`
         CallbackDeclarationParameter -> [ ?DeclaredIdentifier, Type],
@@ -353,7 +373,10 @@ declare_syntax! {
         ReturnType -> [Type],
         CallbackConnection -> [ *DeclaredIdentifier, ?CodeBlock, ?Expression ],
         /// Declaration of a property.
-        PropertyDeclaration-> [ ?Type , DeclaredIdentifier, ?BindingExpression, ?TwoWayBinding ],
+        PropertyDeclaration-> [ ?PropertyDeprecation, ?Type , DeclaredIdentifier, ?BindingExpression, ?TwoWayBinding ],
+        /// `@deprecated` or `@deprecated("message")` prefixing a PropertyDeclaration.
+        /// The optional message is a StringLiteral token child.
+        PropertyDeprecation -> [],
         /// QualifiedName are the properties name
         PropertyAnimation-> [ *QualifiedName, *Binding ],
         /// `changed xxx => {...}`  where `xxx` is the DeclaredIdentifier
@@ -366,6 +389,8 @@ declare_syntax! {
         Binding-> [ BindingExpression ],
         /// `xxx <=> something`
         TwoWayBinding -> [ Expression ],
+        /// `implement Interface <=> target;`
+        ImplementStatement -> [ QualifiedName, DeclaredIdentifier ],
         /// the right-hand-side of a binding
         // Fixme: the test should be a or
         BindingExpression-> [ ?CodeBlock, ?Expression ],
@@ -442,8 +467,8 @@ declare_syntax! {
         Type -> [ ?QualifiedName, ?ObjectType, ?ArrayType ],
         /// `{foo: string, bar: string} `
         ObjectType ->[ *ObjectTypeMember ],
-        /// `foo: type` inside an ObjectType
-        ObjectTypeMember -> [ Type ],
+        /// `foo: type` or `foo: type = default-value` inside an ObjectType
+        ObjectTypeMember -> [ Type, ?Expression ],
         /// `[ type ]`
         ArrayType -> [ Type ],
         /// `struct Foo { ... }`
@@ -454,12 +479,6 @@ declare_syntax! {
         EnumValue -> [],
         /// `@rust-attr(...)`
         AtRustAttr -> [],
-        /// `uses { Foo from Bar, Baz from Qux }`
-        UsesSpecifier -> [ *UsesIdentifier ],
-        /// `Interface.Foo from bar`
-        UsesIdentifier -> [QualifiedName, DeclaredIdentifier],
-        /// `implements Interface.Foo`
-        ImplementsSpecifier -> [ QualifiedName ],
     }
 }
 
@@ -1065,7 +1084,7 @@ pub fn parse(
     build_diagnostics: &mut BuildDiagnostics,
 ) -> SyntaxNode {
     let mut p = DefaultParser::new(&source, build_diagnostics);
-    p.source_file = std::rc::Rc::new(crate::diagnostics::SourceFileInner::new(
+    p.source_file = std::sync::Arc::new(crate::diagnostics::SourceFileInner::new(
         path.map(crate::pathutils::clean_path).unwrap_or_default(),
         source,
     ));

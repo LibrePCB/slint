@@ -48,6 +48,7 @@ impl DefaultFontSize {
 pub struct GlobalAnalysis {
     pub default_font_size: DefaultFontSize,
     pub const_scale_factor: Option<f32>,
+    pub const_image_sizes: bool,
 }
 
 /// Maps the alias in the other direction than what the BindingExpression::two_way_binding does.
@@ -62,6 +63,7 @@ pub fn binding_analysis(
 ) -> GlobalAnalysis {
     let mut global_analysis = GlobalAnalysis {
         const_scale_factor: compiler_config.const_scale_factor,
+        const_image_sizes: compiler_config.const_image_sizes,
         ..Default::default()
     };
     let mut reverse_aliases = Default::default();
@@ -104,6 +106,18 @@ impl PropertyPath {
         if element.borrow().enclosing_component.upgrade().unwrap().is_global() {
             return second.clone();
         }
+        fn check_that_element_is_in_the_component(
+            e: &ElementRc,
+            c: &Rc<crate::object_tree::Component>,
+        ) -> bool {
+            let enclosing = e.borrow().enclosing_component.upgrade().unwrap();
+            Rc::ptr_eq(c, &enclosing)
+                || enclosing
+                    .parent_element
+                    .borrow()
+                    .upgrade()
+                    .is_some_and(|e| check_that_element_is_in_the_component(&e, c))
+        }
         let mut elements = self.elements.clone();
         loop {
             let enclosing = element.borrow().enclosing_component.upgrade().unwrap();
@@ -113,32 +127,27 @@ impl PropertyPath {
                 break;
             }
 
-            if let Some(last) = elements.pop() {
-                #[cfg(debug_assertions)]
-                fn check_that_element_is_in_the_component(
-                    e: &ElementRc,
-                    c: &Rc<crate::object_tree::Component>,
-                ) -> bool {
-                    let enclosing = e.borrow().enclosing_component.upgrade().unwrap();
-                    Rc::ptr_eq(c, &enclosing)
-                        || enclosing
-                            .parent_element
-                            .borrow()
-                            .upgrade()
-                            .is_some_and(|e| check_that_element_is_in_the_component(&e, c))
-                }
-                #[cfg(debug_assertions)]
+            let Some(last) = elements.last() else {
+                break;
+            };
+            let last_component = last.borrow().base_type.as_component().clone();
+            if !check_that_element_is_in_the_component(&element, &last_component) {
+                // `element` is not inside `last`'s sub-component. The reverse holds
+                // instead — `last`'s component is enclosed by `element`'s — meaning
+                // `second` is rooted in an enclosing scope (e.g. a repeated cell's
+                // input bound to an outer property). There is no descent prefix to
+                // lift it through, so return it unchanged. Neither containment
+                // holding is a malformed path (asserted in debug builds).
                 debug_assert!(
                     check_that_element_is_in_the_component(
-                        &element,
-                        last.borrow().base_type.as_component()
+                        &last_component.root_element,
+                        &enclosing
                     ),
                     "The element is not in the component pointed at by the path ({self:?} / {second:?})"
                 );
-                element = last.0;
-            } else {
-                break;
+                return second.clone();
             }
+            element = elements.pop().unwrap().0;
         }
         if second.elements.is_empty() {
             debug_assert!(elements.last().is_none_or(|x| *x != ByAddress(second.prop.element())));
@@ -253,9 +262,13 @@ fn analyze_element(
             process_property(prop, r, context, reverse_aliases, diag);
         });
         if let Some(lv) = &repeated.is_listview {
-            process_property(&lv.viewport_y.clone().into(), P, context, reverse_aliases, diag);
-            process_property(&lv.viewport_height.clone().into(), P, context, reverse_aliases, diag);
-            process_property(&lv.viewport_width.clone().into(), P, context, reverse_aliases, diag);
+            process_property(&lv.content_y.clone().into(), P, context, reverse_aliases, diag);
+            if let Some(content_height) = &lv.content_height {
+                process_property(&content_height.clone().into(), P, context, reverse_aliases, diag);
+            }
+            if let Some(content_width) = &lv.content_width {
+                process_property(&content_width.clone().into(), P, context, reverse_aliases, diag);
+            }
             process_property(&lv.listview_height.clone().into(), P, context, reverse_aliases, diag);
             process_property(&lv.listview_width.clone().into(), P, context, reverse_aliases, diag);
         }
@@ -727,9 +740,10 @@ fn recurse_expression(
             }
             BuiltinFunction::ItemAbsolutePosition => {
                 if let Some(Expression::ElementReference(item)) = arguments.first() {
+                    // The result depends on the element's own geometry origin as well as every
+                    // ancestor's (map_to_window walks the whole ancestor chain).
                     let mut item = item.upgrade().unwrap();
-                    while let Some(parent) = find_parent_element(&item) {
-                        item = parent;
+                    loop {
                         vis(
                             &NamedReference::new(&item, SmolStr::new_static("x")).into(),
                             ReadType::NativeRead,
@@ -738,6 +752,8 @@ fn recurse_expression(
                             &NamedReference::new(&item, SmolStr::new_static("y")).into(),
                             ReadType::NativeRead,
                         );
+                        let Some(parent) = find_parent_element(&item) else { break };
+                        item = parent;
                     }
                 }
             }
@@ -1018,13 +1034,16 @@ fn check_window_properties(doc: &Document, global_analysis: &mut GlobalAnalysis)
                             .get(DEFAULT_FONT_SIZE)
                             .is_some_and(|a| a.is_set)
                     {
-                        let value = elem.borrow().bindings.get(DEFAULT_FONT_SIZE).and_then(|e| {
-                            match &e.borrow().expression {
-                                Expression::NumberLiteral(v, crate::expression_tree::Unit::Px) => {
-                                    Some(*v as f32)
-                                }
-                                _ => None,
+                        // Do not ignore debug hooks here. They make the expression variable, so the
+                        // const-check would incorrectly mark the font size as const, even if it is
+                        // not.
+                        let value = elem.borrow().binding(DEFAULT_FONT_SIZE).and_then(|e| match e
+                            .expression
+                        {
+                            Expression::NumberLiteral(v, crate::expression_tree::Unit::Px) => {
+                                Some(v as f32)
                             }
+                            _ => None,
                         });
                         let is_const = value.is_some()
                             || NamedReference::new(elem, SmolStr::new_static(DEFAULT_FONT_SIZE))

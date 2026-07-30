@@ -1,7 +1,7 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-// cSpell: ignore RAII
+// cSpell: ignore bidi RAII uncacheable unrepresentable unshareable
 pub use parley;
 pub use parley::fontique;
 
@@ -13,7 +13,7 @@ use crate::{
     items::TextStrokeStyle,
     lengths::{
         LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, PhysicalPx,
-        PointLengths, ScaleFactor, SizeLengths,
+        PointLengths, RectLengths, ScaleFactor, SizeLengths,
     },
     renderer::RendererSealed,
     textlayout::{TextHorizontalAlignment, TextOverflow, TextVerticalAlignment, TextWrap},
@@ -55,7 +55,24 @@ impl FontContext {
     }
 }
 
-type InnerTextLayoutCache = crate::item_rendering::ItemCache<Vec<TextParagraph>>;
+/// Shaped paragraphs together with the wrap mode they were shaped with.
+///
+/// The glyph geometry only depends on (text, font, wrap, scale factor): the width is applied
+/// later by `break_all_lines`, and the fill/stroke/selection brushes only change colors, not
+/// positions. So one entry serves measuring, hit-testing and drawing alike -- but only for the
+/// wrap mode it was shaped with, because parley bakes the break opportunities into the shaped
+/// layout via `WordBreak`/`OverflowWrap`/`TextWrapMode` (see `ranged_builder`). The scale factor
+/// is the other input baked into the shaping, but it applies to every entry at once and so is
+/// handled by the cache as a whole.
+struct CachedParagraphs {
+    wrap: TextWrap,
+    /// `None` while a [`CachedParagraphsGuard`] has the paragraphs checked out; the guard puts
+    /// them back when it drops. Finding `None` here therefore means the previous caller returned
+    /// without handing them back, and the entry has to be reshaped rather than served empty.
+    paragraphs: Option<Vec<TextParagraph>>,
+}
+
+type InnerTextLayoutCache = crate::item_rendering::ItemCache<CachedParagraphs>;
 
 /// Cache for shaped text paragraphs (before line breaking), keyed by ItemRc.
 pub struct TextLayoutCache {
@@ -76,7 +93,11 @@ impl Default for TextLayoutCache {
 }
 
 impl TextLayoutCache {
-    pub fn clear_cache_if_scale_factor_changed(&self, window: &crate::api::Window) {
+    /// Drops everything shaped for the previous scale factor. Glyph advances are in physical
+    /// pixels, so a new scale factor invalidates every entry at once. Called on the way into the
+    /// cache rather than when rendering starts, because the layout pass that follows a scale
+    /// factor change measures before anything renders.
+    fn clear_if_scale_factor_changed(&self, window: &crate::api::Window) {
         self.inner.clear_cache_if_scale_factor_changed(window);
     }
     pub fn component_destroyed(&self, component: crate::item_tree::ItemTreeRef) {
@@ -101,6 +122,13 @@ pub type PhysicalLength = euclid::Length<f32, PhysicalPx>;
 pub type PhysicalRect = euclid::Rect<f32, PhysicalPx>;
 type PhysicalSize = euclid::Size2D<f32, PhysicalPx>;
 type PhysicalPoint = euclid::Point2D<f32, PhysicalPx>;
+
+/// Outline drawn around a rectangle filled via [`GlyphRenderer::fill_rectangle`].
+#[derive(Clone)]
+pub struct RectangleBorder<Brush> {
+    pub brush: Brush,
+    pub width: PhysicalLength,
+}
 
 /// Trait used for drawing text and text input elements with parley, where parley does the
 /// shaping and positioning, and the renderer is responsible for drawing just the glyphs.
@@ -141,18 +169,33 @@ pub trait GlyphRenderer: crate::item_rendering::ItemRenderer {
         glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph>,
     );
 
+    /// Convenience wrapper around `fill_rectangle` that resolves `color` to a platform
+    /// brush and fills `physical_rect` with sharp corners and no outline.
     fn fill_rectangle_with_color(&mut self, physical_rect: PhysicalRect, color: Color) {
         if let Some(platform_brush) = self.platform_brush_for_color(&color) {
-            self.fill_rectangle(physical_rect, platform_brush);
+            self.fill_rectangle(physical_rect, platform_brush, PhysicalLength::zero(), None);
         }
     }
 
-    /// Fills the given rectangle with the specified color. This is used for drawing selection
-    /// rectangles as well as the text cursor.
-    fn fill_rectangle(&mut self, physical_rect: PhysicalRect, brush: Self::PlatformBrush);
+    /// Fills `physical_rect` with `brush`, optionally rounding the corners by `radius`
+    /// and outlining it with `border`. Passing a zero `radius` produces sharp corners;
+    /// passing `None` for `border` skips the outline.
+    fn fill_rectangle(
+        &mut self,
+        physical_rect: PhysicalRect,
+        brush: Self::PlatformBrush,
+        radius: PhysicalLength,
+        border: Option<RectangleBorder<Self::PlatformBrush>>,
+    );
 }
 
 pub use super::DEFAULT_FONT_SIZE;
+
+/// Font size of inline `code` runs, as a fraction of the surrounding body
+/// text. Matches the convention used by GitHub-style markdown renderers — the
+/// glyphs sit a little smaller than body text, inside a translucent capsule
+/// that visually marks them as code.
+const INLINE_CODE_FONT_SCALE: f32 = 0.85;
 
 std::thread_local! {
     static LAYOUT_CONTEXT: RefCell<parley::LayoutContext<Brush>> = Default::default();
@@ -166,9 +209,12 @@ struct Brush {
     link_color: Option<Color>,
 }
 
+#[derive(Default)]
 struct LayoutOptions {
     max_width: Option<LogicalLength>,
     max_height: Option<LogicalLength>,
+    /// Maximum number of visible lines across all paragraphs.
+    max_lines: Option<usize>,
     horizontal_align: TextHorizontalAlignment,
     vertical_align: TextVerticalAlignment,
     text_overflow: TextOverflow,
@@ -183,6 +229,7 @@ impl LayoutOptions {
         Self {
             max_width,
             max_height,
+            max_lines: None,
             horizontal_align: text_input.horizontal_alignment(),
             vertical_align: text_input.vertical_alignment(),
             text_overflow: TextOverflow::Clip,
@@ -196,6 +243,9 @@ struct LayoutWithoutLineBreaksBuilder {
     stroke: Option<TextStrokeStyle>,
     scale_factor: ScaleFactor,
     pixel_size: LogicalLength,
+    /// When false, overlong words are not broken up. Only used to measure the
+    /// min-content width (the longest word), never to lay text out for display.
+    overflow_wrap_anywhere: bool,
 }
 
 impl LayoutWithoutLineBreaksBuilder {
@@ -210,7 +260,14 @@ impl LayoutWithoutLineBreaksBuilder {
             .and_then(|font_request| font_request.pixel_size)
             .unwrap_or(DEFAULT_FONT_SIZE);
 
-        Self { font_request, text_wrap, stroke, scale_factor, pixel_size }
+        Self {
+            font_request,
+            text_wrap,
+            stroke,
+            scale_factor,
+            pixel_size,
+            overflow_wrap_anywhere: true,
+        }
     }
 
     fn ranged_builder<'a>(
@@ -288,10 +345,14 @@ impl LayoutWithoutLineBreaksBuilder {
             TextWrap::WordWrap => parley::style::WordBreak::Normal,
             TextWrap::CharWrap => parley::style::WordBreak::BreakAll,
         }));
-        builder.push_default(parley::StyleProperty::OverflowWrap(match self.text_wrap {
-            TextWrap::NoWrap => parley::style::OverflowWrap::Normal,
-            TextWrap::WordWrap | TextWrap::CharWrap => parley::style::OverflowWrap::Anywhere,
-        }));
+        builder.push_default(parley::StyleProperty::OverflowWrap(
+            match (self.text_wrap, self.overflow_wrap_anywhere) {
+                (TextWrap::NoWrap, _) | (_, false) => parley::style::OverflowWrap::Normal,
+                (TextWrap::WordWrap | TextWrap::CharWrap, true) => {
+                    parley::style::OverflowWrap::Anywhere
+                }
+            },
+        ));
         if self.text_wrap == TextWrap::NoWrap {
             // Parley 0.9 removed the width parameter from `Layout::align()` and instead
             // uses the `max_advance` set by `break_all_lines()` as the alignment container
@@ -311,11 +372,14 @@ impl LayoutWithoutLineBreaksBuilder {
         builder
     }
 
+    /// Note that the selection is deliberately absent here: it is a rendering concern, not a
+    /// styling one, and baking it into the layout both makes the layout uncacheable across
+    /// selection changes and makes sub-glyph selection boundaries unrepresentable. See
+    /// [`SelectionSpan`].
     fn build(
         &self,
         font_context: &mut parley::FontContext,
         text: &str,
-        selection: Option<(Range<usize>, Color)>,
         formatting: impl IntoIterator<Item = i_slint_common::styled_text::FormattedSpan>,
         link_color: Option<Color>,
     ) -> parley::Layout<Brush> {
@@ -323,19 +387,6 @@ impl LayoutWithoutLineBreaksBuilder {
 
         LAYOUT_CONTEXT.with_borrow_mut(|layout_ctx| {
             let mut builder = self.ranged_builder(layout_ctx, font_context, text);
-
-            if let Some((selection_range, selection_color)) = selection {
-                {
-                    builder.push(
-                        parley::StyleProperty::Brush(Brush {
-                            override_fill_color: Some(selection_color),
-                            stroke: self.stroke,
-                            link_color: None,
-                        }),
-                        selection_range,
-                    );
-                }
-            }
 
             // filter empty ranges otherwise parley will panic on assert
             for span in formatting.into_iter().filter(|s| !s.range.is_empty()) {
@@ -362,6 +413,15 @@ impl LayoutWithoutLineBreaksBuilder {
                                     parley::style::GenericFamily::Monospace,
                                 ),
                             )),
+                            span.range.clone(),
+                        );
+                        // Inline `code` reads as slightly smaller text on top of a
+                        // translucent capsule (drawn separately in `TextParagraph::draw`),
+                        // matching the convention used by common markdown renderers.
+                        builder.push(
+                            parley::StyleProperty::FontSize(
+                                self.pixel_size.get() * INLINE_CODE_FONT_SCALE,
+                            ),
                             span.range,
                         );
                     }
@@ -397,11 +457,23 @@ impl LayoutWithoutLineBreaksBuilder {
     }
 }
 
+/// Splits plain text into paragraph byte ranges at `'\n'`. The `'\n'` and any preceding `'\r'`
+/// are excluded from the range: parley treats a lone CR as a mandatory line break, so a CRLF
+/// left in the paragraph would render an extra empty line.
+fn paragraph_ranges(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let mut start = 0;
+    text.split('\n').map(move |paragraph| {
+        let end = start + paragraph.len();
+        let range = if paragraph.ends_with('\r') { start..end - 1 } else { start..end };
+        start = end + 1;
+        range
+    })
+}
+
 fn create_text_paragraphs(
     layout_builder: &LayoutWithoutLineBreaksBuilder,
     font_context: &mut parley::FontContext,
     text: PlainOrStyledText,
-    selection: Option<(Range<usize>, Color)>,
     link_color: Color,
 ) -> Vec<TextParagraph> {
     let paragraph_from_text =
@@ -410,50 +482,22 @@ fn create_text_paragraphs(
          range: std::ops::Range<usize>,
          formatting: Vec<i_slint_common::styled_text::FormattedSpan>,
          links: Vec<(std::ops::Range<usize>, std::string::String)>| {
-            let selection = selection.clone().and_then(|(selection, selection_color)| {
-                let sel_start = selection.start.max(range.start);
-                let sel_end = selection.end.min(range.end);
+            let code_ranges: alloc::vec::Vec<Range<usize>> = formatting
+                .iter()
+                .filter(|s| matches!(s.style, i_slint_common::styled_text::Style::Code))
+                .map(|s| s.range.clone())
+                .collect();
 
-                if sel_start < sel_end {
-                    let local_selection = (sel_start - range.start)..(sel_end - range.start);
-                    Some((local_selection, selection_color))
-                } else {
-                    None
-                }
-            });
+            let layout = layout_builder.build(font_context, text, formatting, Some(link_color));
 
-            let layout =
-                layout_builder.build(font_context, text, selection, formatting, Some(link_color));
-
-            TextParagraph { range, y: PhysicalLength::default(), layout, links }
+            TextParagraph { range, y: PhysicalLength::default(), layout, links, code_ranges }
         };
 
     let mut paragraphs = Vec::with_capacity(1);
 
     match text {
         PlainOrStyledText::Plain(ref text) => {
-            let paragraph_ranges = core::iter::from_fn({
-                let mut start = 0;
-                let mut char_it = text.char_indices().peekable();
-                let mut eot = false;
-                move || {
-                    for (idx, ch) in char_it.by_ref() {
-                        if ch == '\n' {
-                            let next_range = start..idx;
-                            start = idx + ch.len_utf8();
-                            return Some(next_range);
-                        }
-                    }
-
-                    if eot {
-                        return None;
-                    }
-                    eot = true;
-                    Some(start..text.len())
-                }
-            });
-
-            for range in paragraph_ranges {
+            for range in paragraph_ranges(text) {
                 paragraphs.push(paragraph_from_text(
                     font_context,
                     &text[range.clone()],
@@ -479,10 +523,6 @@ fn create_text_paragraphs(
     paragraphs
 }
 
-/// Note: parley currently uses `WordBreak` while shaping via `analyze_text()`,
-/// so shaped paragraphs aren't identical across wrap modes. This is why `text_size()`
-/// doesn't use the `TextLayoutCache` — it would be incorrect to share cached paragraphs
-/// shaped with one wrap mode and reuse them with another.
 fn layout(
     layout_builder: &LayoutWithoutLineBreaksBuilder,
     font_context: &mut parley::FontContext,
@@ -495,7 +535,7 @@ fn layout(
 
     // Returned None if failed to get the ellipsis glyph for some rare reason.
     let get_ellipsis_glyph = |font_context: &mut parley::FontContext| {
-        let mut layout = layout_builder.build(font_context, "…", None, None, None);
+        let mut layout = layout_builder.build(font_context, "…", None, None);
         layout.break_all_lines(None);
         let line = layout.lines().next()?;
         let item = line.items().next()?;
@@ -537,19 +577,53 @@ fn layout(
         para_y += para.layout.height();
     }
 
+    let line_limit_cut =
+        options.max_lines.and_then(|max_lines| line_limit_cut(&paragraphs, max_lines));
+    let visible_paragraph_count =
+        line_limit_cut.map_or(paragraphs.len(), |(last_paragraph, _)| last_paragraph + 1);
+
     let max_width = paragraphs
         .iter()
-        .map(|p| {
+        .take(visible_paragraph_count)
+        .enumerate()
+        .map(|(paragraph_index, p)| {
             // The max width is used for the ellipsis computation when eliding text. We *want* to exclude whitespace
             // for that, but we can't at the glyph run level, so the glyph runs always *do* include whitespace glyphs,
             // and as such we must also accept the full width here including trailing whitespace, otherwise text with
             // trailing whitespace will assigned a smaller width for rendering and thus the ellipsis will be placed.
-            PhysicalLength::new(p.layout.full_width())
+            match line_limit_cut {
+                // In the paragraph where the line limit lands, only the kept lines count towards
+                // the width; `full_width()` would also span the dropped lines below the cut. Per
+                // line, mirror parley's `full_width` formula (Slint doesn't use indentation).
+                Some((last_paragraph, last_line)) if paragraph_index == last_paragraph => p
+                    .layout
+                    .lines()
+                    .take(last_line + 1)
+                    .map(|line| {
+                        let metrics = line.metrics();
+                        PhysicalLength::new(metrics.inline_min_coord + metrics.advance)
+                    })
+                    .fold(PhysicalLength::zero(), PhysicalLength::max),
+                _ => PhysicalLength::new(p.layout.full_width()),
+            }
         })
         .fold(PhysicalLength::zero(), PhysicalLength::max);
-    let height = paragraphs
-        .last()
-        .map_or(PhysicalLength::zero(), |p| p.y + PhysicalLength::new(p.layout.height()));
+    // With an active line limit, the height only extends to the bottom of the last kept line, so
+    // that the preferred height and vertical alignment are based on what is actually shown.
+    let height = match line_limit_cut {
+        Some((last_paragraph, last_line)) => {
+            let para = &paragraphs[last_paragraph];
+            let line = para
+                .layout
+                .lines()
+                .nth(last_line)
+                .expect("line_limit_cut returns an existing line index");
+            para.y + PhysicalLength::new(line.metrics().block_max_coord)
+        }
+        None => paragraphs
+            .last()
+            .map_or(PhysicalLength::zero(), |p| p.y + PhysicalLength::new(p.layout.height())),
+    };
 
     let y_offset = match (max_physical_height, options.vertical_align) {
         (Some(max_height), TextVerticalAlignment::Center) => (max_height - height) / 2.0,
@@ -557,61 +631,154 @@ fn layout(
         (None, _) | (Some(_), TextVerticalAlignment::Top) => PhysicalLength::new(0.0),
     };
 
-    Layout { paragraphs, y_offset, elision_info, max_width, height, max_physical_height }
+    Layout {
+        paragraphs,
+        y_offset,
+        elision_info,
+        max_width,
+        height,
+        max_physical_height,
+        line_limit_cut,
+    }
 }
 
-/// RAII guard: takes Vec out of the cache on creation, puts it back on drop.
+/// Where a `max-lines` limit cuts the text off: the (paragraph index, line index within that
+/// paragraph) of the last kept line. Returns `None` when all lines fit the limit, so an active
+/// cut always means that at least one line was dropped.
+fn line_limit_cut(paragraphs: &[TextParagraph], max_lines: usize) -> Option<(usize, usize)> {
+    let total_lines: usize = paragraphs.iter().map(|p| p.layout.lines().len()).sum();
+    if total_lines <= max_lines {
+        return None;
+    }
+
+    let mut seen_lines = 0;
+    for (paragraph_index, para) in paragraphs.iter().enumerate() {
+        let line_count = para.layout.lines().len();
+        // seen_lines < max_lines holds on entry, so the cut line index can't underflow and
+        // lands within this paragraph's lines.
+        if seen_lines + line_count >= max_lines {
+            return Some((paragraph_index, max_lines - seen_lines - 1));
+        }
+        seen_lines += line_count;
+    }
+    unreachable!("total_lines > max_lines, so the paragraph with the last kept line exists")
+}
+
+/// RAII guard: takes the shaped paragraphs out of the cache on creation, puts them back on drop.
 struct CachedParagraphsGuard<'a> {
     paragraphs: Option<Vec<TextParagraph>>,
-    container: Option<std::cell::RefMut<'a, Vec<TextParagraph>>>,
+    container: Option<std::cell::RefMut<'a, CachedParagraphs>>,
+}
+
+impl CachedParagraphsGuard<'_> {
+    /// Lends the paragraphs to [`layout`], which hands them back as part of its `Layout`.
+    fn take(&mut self) -> Vec<TextParagraph> {
+        self.paragraphs.take().unwrap_or_default()
+    }
+
+    /// Returns the paragraphs, so that the next caller reuses the shaping.
+    fn restore(&mut self, paragraphs: Vec<TextParagraph>) {
+        self.paragraphs = Some(paragraphs);
+    }
 }
 
 impl Drop for CachedParagraphsGuard<'_> {
     fn drop(&mut self) {
         if let (Some(paragraphs), Some(container)) = (self.paragraphs.take(), &mut self.container) {
-            **container = paragraphs;
+            container.paragraphs = Some(paragraphs);
         }
     }
 }
 
-fn shape_paragraphs(
-    text: Pin<&dyn crate::item_rendering::RenderText>,
+/// Shapes the text of `item_rc` for `wrap`, reusing the `TextLayoutCache` entry when it holds
+/// paragraphs shaped for the same wrap mode and none of the properties `shape` read have changed
+/// since. Without a cache or item it just shapes, so the caller doesn't need to special-case that.
+///
+/// `shape` runs inside the entry's dependency tracker, so everything it reads (the text and the
+/// font request, at least) invalidates the entry when it changes. Properties evaluated by the
+/// caller before this point are clean by then and thus can't re-enter here.
+fn cached_paragraphs<'a>(
+    cache: Option<&'a TextLayoutCache>,
     item_rc: Option<&crate::item_tree::ItemRc>,
+    wrap: TextWrap,
+    window: &crate::api::Window,
+    font_context: &mut parley::FontContext,
+    shape: &dyn Fn(&mut parley::FontContext) -> Vec<TextParagraph>,
+) -> CachedParagraphsGuard<'a> {
+    let Some((cache, item_rc)) = cache.zip(item_rc) else {
+        return CachedParagraphsGuard { paragraphs: Some(shape(font_context)), container: None };
+    };
+
+    cache.clear_if_scale_factor_changed(window);
+
+    // Shaped geometry must never be mixed across wrap modes, and the entry only holds one mode
+    // at a time. Drop a mismatching one up front so the shaping below happens in the regular
+    // (vacant) path, inside a fresh dependency tracker and without the cache borrowed.
+    //
+    // Paragraphs that were never handed back can't be served either.
+    let stale = cache
+        .inner
+        .with_entry(item_rc, |entry| {
+            (entry.wrap != wrap || entry.paragraphs.is_none()).then_some(())
+        })
+        .is_some();
+    if stale {
+        cache.inner.release(item_rc);
+    }
+
+    let mut entry = cache.inner.get_or_update_cache_entry_ref(item_rc, || {
+        #[cfg(feature = "testing")]
+        cache.cache_miss_count.set(cache.cache_miss_count.get() + 1);
+        CachedParagraphs { wrap, paragraphs: Some(shape(font_context)) }
+    });
+    let paragraphs = entry.paragraphs.take().unwrap_or_default();
+    CachedParagraphsGuard { paragraphs: Some(paragraphs), container: Some(entry) }
+}
+
+/// The builder the shaped paragraphs of `text` must be produced with. Measuring and drawing share
+/// cache entries, so they have to agree on every input baked into the shaping -- which is why this
+/// lives in one place rather than at each call site.
+fn shaping_builder(
+    text: Pin<&dyn crate::item_rendering::RenderString>,
+    item_rc: Option<&crate::item_tree::ItemRc>,
+    text_wrap: TextWrap,
+    scale_factor: ScaleFactor,
+) -> LayoutWithoutLineBreaksBuilder {
+    let (stroke_brush, _, stroke_style) = text.stroke();
+    LayoutWithoutLineBreaksBuilder::new(
+        item_rc.map(|irc| text.font_request(irc)),
+        text_wrap,
+        (!stroke_brush.is_transparent()).then_some(stroke_style),
+        scale_factor,
+    )
+}
+
+/// Shapes `text` the way both the drawing and the measuring paths need it, so that they can share
+/// one cache entry. `text_wrap` is passed separately because `text_size` measures the unwrapped
+/// width of items that are otherwise wrapped.
+fn shape_paragraphs(
+    text: Pin<&dyn crate::item_rendering::RenderString>,
+    item_rc: Option<&crate::item_tree::ItemRc>,
+    text_wrap: TextWrap,
     scale_factor: ScaleFactor,
     font_context: &mut parley::FontContext,
 ) -> Vec<TextParagraph> {
-    let (stroke_brush, _, stroke_style) = text.stroke();
-    let has_stroke = !stroke_brush.is_transparent();
-    let builder = LayoutWithoutLineBreaksBuilder::new(
-        item_rc.map(|irc| text.font_request(irc)),
-        text.wrap(),
-        has_stroke.then_some(stroke_style),
-        scale_factor,
-    );
-    create_text_paragraphs(&builder, font_context, text.text(), None, text.link_color())
+    let builder = shaping_builder(text, item_rc, text_wrap, scale_factor);
+    create_text_paragraphs(&builder, font_context, text.text(), text.link_color())
 }
 
 fn get_or_create_text_paragraphs<'a>(
     cache: Option<&'a TextLayoutCache>,
     item_rc: Option<&crate::item_tree::ItemRc>,
-    text: Pin<&dyn crate::item_rendering::RenderText>,
+    text: Pin<&dyn crate::item_rendering::RenderString>,
+    text_wrap: TextWrap,
     scale_factor: ScaleFactor,
+    window: &crate::api::Window,
     font_context: &mut parley::FontContext,
 ) -> CachedParagraphsGuard<'a> {
-    if let (Some(cache), Some(item_rc)) = (cache, item_rc) {
-        let mut entry = cache.inner.get_or_update_cache_entry_ref(item_rc, || {
-            #[cfg(feature = "testing")]
-            cache.cache_miss_count.set(cache.cache_miss_count.get() + 1);
-            shape_paragraphs(text, Some(item_rc), scale_factor, font_context)
-        });
-        let paragraphs = std::mem::take(&mut *entry);
-        CachedParagraphsGuard { paragraphs: Some(paragraphs), container: Some(entry) }
-    } else {
-        CachedParagraphsGuard {
-            paragraphs: Some(shape_paragraphs(text, item_rc, scale_factor, font_context)),
-            container: None,
-        }
-    }
+    cached_paragraphs(cache, item_rc, text_wrap, window, font_context, &|font_context| {
+        shape_paragraphs(text, item_rc, text_wrap, scale_factor, font_context)
+    })
 }
 
 struct ElisionInfo {
@@ -631,103 +798,112 @@ struct TextParagraph {
     y: PhysicalLength,
     layout: parley::Layout<Brush>,
     links: std::vec::Vec<(Range<usize>, std::string::String)>,
+    /// Byte ranges within the paragraph's text that carry `Style::Code`. Drawn with a
+    /// translucent rounded background by `draw` for visual parity with common markdown
+    /// renderers.
+    code_ranges: std::vec::Vec<Range<usize>>,
 }
 
 impl TextParagraph {
     fn draw<R: GlyphRenderer>(
         &self,
         layout: &Layout,
+        paragraph_index: usize,
+        visible_extent: Option<ElisionCut>,
         item_renderer: &mut R,
         default_fill_brush: &<R as GlyphRenderer>::PlatformBrush,
         default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
-        draw_glyphs: &mut dyn FnMut(
-            &mut R,
-            &parley::FontData,
-            PhysicalLength,
-            &[i16],               // normalized variation coords
-            &fontique::Synthesis, // design-space variation settings
-            <R as GlyphRenderer>::PlatformBrush,
-            PhysicalLength, // y offset for paragraph
-            &mut dyn Iterator<Item = parley::layout::Glyph>,
-        ),
+        default_text_color: Color,
+        selection: Option<&SelectionRendering<'_, R>>,
     ) {
         let para_y = layout.y_offset + self.y;
 
-        let total_lines = self.layout.lines().len();
+        let line_count = self.layout.lines().len();
 
         // For `overflow: elide` with a height limit (`overflow: clip` applies a hard pixel clip
-        // instead), keep the lines that actually fall within the box, taking the vertical alignment
-        // into account: the layout shifts every line down by `para_y`, which is negative for
-        // bottom/center alignment. Comparing only a line's bottom to the height (ignoring `para_y`)
-        // kept the wrong lines -- bottom-aligned text showed the lines clipped off the top instead
-        // of the visible ones anchored at the bottom.
-        let line_within_box = |block_min: f32, block_max: f32| match layout.max_physical_height {
-            Some(max_physical_height) if layout.elision_info.is_some() => {
-                // `line_fits_height` rounds the bottom up by a pixel; allow the same slack at the
-                // top so a line sitting right on the box edge isn't dropped to a rounding error.
-                line_fits_height(para_y.get() + block_max, max_physical_height)
-                    && para_y.get() + block_min >= -0.5
+        // instead) and for `max-lines`, `visible_extent` decides -- across all paragraphs -- the
+        // last line to keep and where the vertical-truncation ellipsis goes. Translate it to this
+        // paragraph. `last_drawn` is the deepest line of this paragraph that we draw; it carries
+        // the horizontal ellipsis when it overflows the width. `vertical_truncation` marks the
+        // single global last kept line that must also show an ellipsis when lines below it were
+        // dropped.
+        let (last_drawn, vertical_truncation) = match visible_extent {
+            // Entirely below the kept block: drop the paragraph (don't redraw a stray first line,
+            // and don't paint inline-code backgrounds under text that isn't rendered).
+            Some(cut) if paragraph_index > cut.last_paragraph => return,
+            // The paragraph where the cut falls: stop at the global last kept line.
+            Some(cut) if paragraph_index == cut.last_paragraph => {
+                (cut.last_line, cut.needs_ellipsis)
             }
-            _ => true,
+            // A paragraph fully above the cut, or no cut at all: draw every line that fits
+            // the box; the last visual line still elides horizontally when it is too wide.
+            _ => (line_count.saturating_sub(1), false),
         };
 
-        // The last line within the box, or the first line if none fit (e.g. a single line taller
-        // than the box, #12197) so the text isn't dropped entirely -- `draw_text` clips its overflow.
-        let last_drawn = self
-            .layout
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| {
-                let m = line.metrics();
-                line_within_box(m.block_min_coord, m.block_max_coord)
-            })
-            .map(|(index, _)| index)
-            .next_back()
-            .or(Some(0));
+        self.draw_inline_code_backgrounds(item_renderer, para_y, default_text_color, last_drawn);
 
         for (index, line) in self.layout.lines().enumerate() {
+            // Stop once we are past the last kept line of the last kept paragraph.
+            if index > last_drawn {
+                break;
+            }
             let metrics = line.metrics();
-            let last_line = Some(index) == last_drawn;
-            if !last_line && !line_within_box(metrics.block_min_coord, metrics.block_max_coord) {
+            // The kept line is always drawn, even when it slightly exceeds the box (#12197); other
+            // lines are kept only while they fall within the box, taking vertical alignment into
+            // account (bottom/center alignment clips lines off the top, not the bottom).
+            let last_line = index == last_drawn;
+            if !last_line
+                && !layout.paragraph_line_within_box(
+                    self,
+                    metrics.block_min_coord,
+                    metrics.block_max_coord,
+                )
+            {
                 continue;
             }
             // The last drawn line should show an ellipsis if real lines below it were dropped for
             // the height, even when it fits the width.
-            let vertically_truncated = last_line && index + 1 < total_lines;
+            let vertically_truncated = last_line && vertical_truncation;
+            let line_spans =
+                selection.map(|selection| selection.spans.for_line(paragraph_index, index));
             for item in line.items() {
                 match item {
                     parley::PositionedLayoutItem::GlyphRun(glyph_run) => {
                         let ellipsis = if last_line {
-                            let (truncated_glyphs, ellipsis) =
-                                layout.glyphs_with_elision(&glyph_run, vertically_truncated);
+                            let (truncated_glyphs, ellipsis) = layout.glyphs_with_elision(
+                                &glyph_run,
+                                vertically_truncated,
+                                metrics.trailing_whitespace,
+                            );
 
-                            Self::draw_glyph_run(
+                            Self::draw_glyph_run_with_selection(
                                 &glyph_run,
                                 item_renderer,
                                 default_fill_brush,
                                 default_stroke_brush,
                                 para_y,
                                 &mut truncated_glyphs.into_iter(),
-                                draw_glyphs,
+                                selection.map(|selection| &selection.foreground),
+                                line_spans.unwrap_or_default(),
                             );
                             ellipsis
                         } else {
-                            Self::draw_glyph_run(
+                            Self::draw_glyph_run_with_selection(
                                 &glyph_run,
                                 item_renderer,
                                 default_fill_brush,
                                 default_stroke_brush,
                                 para_y,
                                 &mut glyph_run.positioned_glyphs(),
-                                draw_glyphs,
+                                selection.map(|selection| &selection.foreground),
+                                line_spans.unwrap_or_default(),
                             );
                             None
                         };
 
                         if let Some((ellipsis_glyph, ellipsis_font, font_size)) = ellipsis {
                             let run = glyph_run.run();
-                            draw_glyphs(
-                                item_renderer,
+                            item_renderer.draw_glyph_run(
                                 &ellipsis_font,
                                 font_size,
                                 run.normalized_coords(),
@@ -744,6 +920,257 @@ impl TextParagraph {
         }
     }
 
+    /// Paints a translucent rounded capsule under every glyph run that lies inside one of
+    /// this paragraph's `Style::Code` ranges. Capsule colors are derived from the luminance
+    /// of `default_text_color`, so light and dark themes both get a sensible default
+    /// without any user-facing styling property.
+    fn draw_inline_code_backgrounds<R: GlyphRenderer>(
+        &self,
+        item_renderer: &mut R,
+        para_y: PhysicalLength,
+        default_text_color: Color,
+        last_drawn: usize,
+    ) {
+        if self.code_ranges.is_empty() {
+            return;
+        }
+
+        // Neutral gray fill (low alpha) on both themes — contrast against the page
+        // background carries the "this is code" cue. The border picks up the same hue
+        // but a higher alpha so the rounded outline stays visible against the fill.
+        // Pick brighter values on dark backgrounds (luminance of the text gives us
+        // that signal without poking at the window background).
+        let fg_luminance = 0.299 * default_text_color.red() as f32
+            + 0.587 * default_text_color.green() as f32
+            + 0.114 * default_text_color.blue() as f32;
+        let fill = Color::from_argb_u8(28, 128, 128, 128);
+        let border = if fg_luminance > 140.0 {
+            Color::from_argb_u8(88, 170, 170, 170)
+        } else {
+            Color::from_argb_u8(56, 128, 128, 128)
+        };
+        // Border width and radius bounds are logical so that the capsule looks the
+        // same at every DPI; the part of the radius derived from the capsule height
+        // already scales with the (physical) font size.
+        const BORDER_WIDTH: LogicalLength = LogicalLength::new(1.0);
+        const MIN_RADIUS: LogicalLength = LogicalLength::new(2.0);
+        const MAX_RADIUS: LogicalLength = LogicalLength::new(5.0);
+        // A touch of vertical padding above and below the cap-height / descender band
+        // so the capsule edge doesn't sit flush against tall glyphs.
+        const VERTICAL_PADDING_RATIO: f32 = 0.15;
+
+        let scale_factor = ScaleFactor::new(item_renderer.scale_factor());
+        let border_width = BORDER_WIDTH * scale_factor;
+
+        // Capsules only under lines that are drawn: lines past the visible-extent cut
+        // (`overflow: elide` height limit or `max-lines`) don't render their glyphs either.
+        for line in self.layout.lines().take(last_drawn + 1) {
+            for item in line.items() {
+                let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                    continue;
+                };
+                let run = glyph_run.run();
+                let run_range = run.text_range();
+                if run_range.is_empty() {
+                    continue;
+                }
+                // `Style::Code` pushes its own FontFamily + FontSize, which forces a
+                // run boundary, so a code run is always fully contained in one of the
+                // recorded ranges — a single containment check is enough.
+                let is_code = self
+                    .code_ranges
+                    .iter()
+                    .any(|cr| cr.start <= run_range.start && run_range.end <= cr.end);
+                if !is_code {
+                    continue;
+                }
+
+                let metrics = run.metrics();
+                let ascent = metrics.ascent;
+                let descent = metrics.descent;
+                let cap_height = metrics.cap_height.unwrap_or(ascent * 0.72);
+
+                // Center the capsule on the midpoint between cap-top and a shallow
+                // approximation of the descender bottom (roughly where parens, commas
+                // and dots reach). This gives equal visible padding above and below
+                // for typical code text (which has caps but rarely real descenders).
+                let upper_extent = cap_height;
+                let lower_extent = descent * 0.4;
+                let center = glyph_run.baseline() + (lower_extent - upper_extent) / 2.0;
+                let inner_half_height = (upper_extent + lower_extent) / 2.0;
+                let extra_padding = ascent * VERTICAL_PADDING_RATIO;
+                let half_height = inner_half_height + extra_padding;
+                let bg_height = (half_height * 2.0).max(1.0);
+                let bg_top = center - half_height;
+
+                // Width hugs the glyphs tightly — `glyph_run.advance()` is exactly
+                // the horizontal extent of the rendered run. The underlying text is
+                // not modified, so selection, hit-testing and copy/paste keep working
+                // on the underlying characters.
+                let bg_width = glyph_run.advance().max(0.0);
+                if bg_width <= 0.0 {
+                    continue;
+                }
+                let bg_left = glyph_run.offset();
+
+                let bg_rect = PhysicalRect::new(
+                    PhysicalPoint::from_lengths(
+                        PhysicalLength::new(bg_left),
+                        PhysicalLength::new(bg_top) + para_y,
+                    ),
+                    PhysicalSize::new(bg_width, bg_height),
+                );
+                let radius = PhysicalLength::new(bg_height * 0.22)
+                    .max(MIN_RADIUS * scale_factor)
+                    .min(MAX_RADIUS * scale_factor);
+                let Some(fill_brush) = item_renderer.platform_brush_for_color(&fill) else {
+                    continue;
+                };
+                let border_brush = item_renderer
+                    .platform_brush_for_color(&border)
+                    .map(|brush| RectangleBorder { brush, width: border_width });
+                item_renderer.fill_rectangle(bg_rect, fill_brush, radius, border_brush);
+            }
+        }
+    }
+
+    /// Draws one glyph run, splitting it where the selection starts or ends inside it.
+    ///
+    /// The overwhelmingly common cases -- a run that is entirely selected or entirely unselected
+    /// -- draw exactly once with no clip, so an enormous selection costs no more than a tiny one.
+    /// Only the at most two runs per selection edge that actually straddle a boundary are drawn
+    /// twice against a clip, and that is precisely where a ligature has to be cut in half.
+    fn draw_glyph_run_with_selection<R: GlyphRenderer>(
+        glyph_run: &parley::layout::GlyphRun<Brush>,
+        item_renderer: &mut R,
+        default_fill_brush: &<R as GlyphRenderer>::PlatformBrush,
+        default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
+        para_y: PhysicalLength,
+        glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph>,
+        // The selection foreground, and the spans it covers on this run's line. Both empty when
+        // there is no selection, which `run_coverage` reports as `Unselected`.
+        selection_brush: Option<&<R as GlyphRenderer>::PlatformBrush>,
+        line_spans: &[SelectionSpan],
+    ) {
+        let run_x = glyph_run.offset()..glyph_run.offset() + glyph_run.advance();
+
+        match run_coverage(&run_x, line_spans) {
+            RunCoverage::Unselected => Self::draw_glyph_run(
+                glyph_run,
+                item_renderer,
+                default_fill_brush,
+                default_stroke_brush,
+                para_y,
+                glyphs_it,
+                None,
+            ),
+            RunCoverage::Full => Self::draw_glyph_run(
+                glyph_run,
+                item_renderer,
+                default_fill_brush,
+                default_stroke_brush,
+                para_y,
+                glyphs_it,
+                selection_brush,
+            ),
+            RunCoverage::Partial => {
+                // The run has to be rasterized once per segment, so the glyphs can't stay behind
+                // a one-shot iterator.
+                let glyphs = glyphs_it.collect::<alloc::vec::Vec<_>>();
+
+                // Walk the run left to right, alternating unselected and selected segments. This
+                // relies on the spans being ascending in x, which [`SelectionSpans`] guarantees.
+                let mut x = run_x.start;
+                for span in line_spans {
+                    let span_x = span.x();
+                    if span_x.end <= run_x.start {
+                        continue;
+                    }
+                    if span_x.start >= run_x.end {
+                        break;
+                    }
+                    let start = span_x.start.max(run_x.start);
+                    let end = span_x.end.min(run_x.end);
+                    for (segment, brush) in [(x..start, None), (start..end, selection_brush)] {
+                        Self::draw_glyph_run_segment(
+                            glyph_run,
+                            item_renderer,
+                            default_fill_brush,
+                            default_stroke_brush,
+                            para_y,
+                            &glyphs,
+                            segment,
+                            brush,
+                        );
+                    }
+                    x = end;
+                }
+                Self::draw_glyph_run_segment(
+                    glyph_run,
+                    item_renderer,
+                    default_fill_brush,
+                    default_stroke_brush,
+                    para_y,
+                    &glyphs,
+                    x..run_x.end,
+                    None,
+                );
+            }
+        }
+    }
+
+    /// Draws `glyphs` clipped to the horizontal band `x`, so that a glyph straddling the band's
+    /// edge is cut rather than recolored as a whole.
+    fn draw_glyph_run_segment<R: GlyphRenderer>(
+        glyph_run: &parley::layout::GlyphRun<Brush>,
+        item_renderer: &mut R,
+        default_fill_brush: &<R as GlyphRenderer>::PlatformBrush,
+        default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
+        para_y: PhysicalLength,
+        glyphs: &[parley::layout::Glyph],
+        x: Range<f32>,
+        override_fill_brush: Option<&<R as GlyphRenderer>::PlatformBrush>,
+    ) {
+        if x.end <= x.start {
+            return;
+        }
+
+        item_renderer.save_state();
+
+        // Clip horizontally only: the vertical extent stays whatever is already in effect, so
+        // accents and descenders reaching outside the line box are never sheared off.
+        let scale_factor = ScaleFactor::new(item_renderer.scale_factor());
+        let current_clip = item_renderer.get_current_clip();
+        let render = item_renderer.combine_clip(
+            LogicalRect::new(
+                LogicalPoint::from_lengths(
+                    PhysicalLength::new(x.start) / scale_factor,
+                    current_clip.origin.y_length(),
+                ),
+                LogicalSize::from_lengths(
+                    PhysicalLength::new(x.end - x.start) / scale_factor,
+                    current_clip.height_length(),
+                ),
+            ),
+            LogicalBorderRadius::zero(),
+            LogicalLength::zero(),
+        );
+
+        if render {
+            Self::draw_glyph_run(
+                glyph_run,
+                item_renderer,
+                default_fill_brush,
+                default_stroke_brush,
+                para_y,
+                &mut glyphs.iter().cloned(),
+                override_fill_brush,
+            );
+        }
+
+        item_renderer.restore_state();
+    }
+
     fn draw_glyph_run<R: GlyphRenderer>(
         glyph_run: &parley::layout::GlyphRun<Brush>,
         item_renderer: &mut R,
@@ -751,36 +1178,33 @@ impl TextParagraph {
         default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
         para_y: PhysicalLength,
         glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph>,
-        draw_glyphs: &mut dyn FnMut(
-            &mut R,
-            &parley::FontData,
-            PhysicalLength,
-            &[i16],               // normalized variation coords
-            &fontique::Synthesis, // design-space variation settings
-            <R as GlyphRenderer>::PlatformBrush,
-            PhysicalLength,
-            &mut dyn Iterator<Item = parley::layout::Glyph>,
-        ),
+        // Forced fill for selected glyphs, overriding the run's own brush.
+        override_fill_brush: Option<&<R as GlyphRenderer>::PlatformBrush>,
     ) {
         let run = glyph_run.run();
         let normalized_coords = run.normalized_coords();
         let synthesis = run.synthesis();
         let brush = &glyph_run.style().brush;
 
-        let (fill_brush, stroke_style) = match (brush.override_fill_color, brush.link_color) {
-            (Some(color), _) => {
-                let Some(selection_brush) = item_renderer.platform_brush_for_color(&color) else {
-                    return;
-                };
-                (selection_brush.clone(), &None)
-            }
-            (None, Some(color)) => {
-                let Some(link_brush) = item_renderer.platform_brush_for_color(&color) else {
-                    return;
-                };
-                (link_brush.clone(), &None)
-            }
-            (None, None) => (default_fill_brush.clone(), &brush.stroke),
+        let (fill_brush, stroke_style) = match override_fill_brush {
+            // Selection wins over a `Style::Color` span and over a link color: text under the
+            // highlight has to stay legible against the selection background.
+            Some(selection_brush) => (selection_brush.clone(), &None),
+            None => match (brush.override_fill_color, brush.link_color) {
+                (Some(color), _) => {
+                    let Some(color_brush) = item_renderer.platform_brush_for_color(&color) else {
+                        return;
+                    };
+                    (color_brush.clone(), &None)
+                }
+                (None, Some(color)) => {
+                    let Some(link_brush) = item_renderer.platform_brush_for_color(&color) else {
+                        return;
+                    };
+                    (link_brush.clone(), &None)
+                }
+                (None, None) => (default_fill_brush.clone(), &brush.stroke),
+            },
         };
 
         match stroke_style {
@@ -788,8 +1212,7 @@ impl TextParagraph {
                 let glyphs = glyphs_it.collect::<alloc::vec::Vec<_>>();
 
                 if let Some(stroke_brush) = default_stroke_brush.clone() {
-                    draw_glyphs(
-                        item_renderer,
+                    item_renderer.draw_glyph_run(
                         run.font(),
                         PhysicalLength::new(run.font_size()),
                         normalized_coords,
@@ -800,8 +1223,7 @@ impl TextParagraph {
                     );
                 }
 
-                draw_glyphs(
-                    item_renderer,
+                item_renderer.draw_glyph_run(
                     run.font(),
                     PhysicalLength::new(run.font_size()),
                     normalized_coords,
@@ -814,8 +1236,7 @@ impl TextParagraph {
             Some(TextStrokeStyle::Center) => {
                 let glyphs = glyphs_it.collect::<alloc::vec::Vec<_>>();
 
-                draw_glyphs(
-                    item_renderer,
+                item_renderer.draw_glyph_run(
                     run.font(),
                     PhysicalLength::new(run.font_size()),
                     normalized_coords,
@@ -826,8 +1247,7 @@ impl TextParagraph {
                 );
 
                 if let Some(stroke_brush) = default_stroke_brush.clone() {
-                    draw_glyphs(
-                        item_renderer,
+                    item_renderer.draw_glyph_run(
                         run.font(),
                         PhysicalLength::new(run.font_size()),
                         normalized_coords,
@@ -839,8 +1259,7 @@ impl TextParagraph {
                 }
             }
             None => {
-                draw_glyphs(
-                    item_renderer,
+                item_renderer.draw_glyph_run(
                     run.font(),
                     PhysicalLength::new(run.font_size()),
                     normalized_coords,
@@ -854,6 +1273,8 @@ impl TextParagraph {
 
         let metrics = run.metrics();
 
+        // A decoration spans the whole run. Where a selection boundary cuts through it, the
+        // renderer clip that cuts the glyphs cuts the rectangle too.
         if glyph_run.style().underline.is_some() {
             item_renderer.fill_rectangle(
                 PhysicalRect::new(
@@ -865,6 +1286,8 @@ impl TextParagraph {
                     PhysicalSize::new(glyph_run.advance(), metrics.underline_size),
                 ),
                 fill_brush.clone(),
+                PhysicalLength::zero(),
+                None,
             );
         }
 
@@ -881,9 +1304,115 @@ impl TextParagraph {
                     PhysicalSize::new(glyph_run.advance(), metrics.strikethrough_size),
                 ),
                 fill_brush,
+                PhysicalLength::zero(),
+                None,
             );
         }
     }
+}
+
+/// One contiguous run of selected text on a single line.
+///
+/// Selection is deliberately *not* expressed as a text style. A style can only ever recolor a
+/// whole glyph, but a selection boundary may fall in the middle of one: with an `fi` ligature,
+/// selecting just the `i` leaves parley with a single glyph whose style comes from the cluster's
+/// first character (`Glyph::style_index` is `char_infos[cluster_id]`), so the whole ligature would
+/// be painted unselected while the highlight covers only its right half. Instead the spans below
+/// are used twice — to fill the highlight background, and to clip the glyph runs that straddle a
+/// boundary so each half is drawn in its own color.
+#[derive(Clone, Debug)]
+struct SelectionSpan {
+    /// Index into `Layout::paragraphs`.
+    paragraph: usize,
+    /// Line within that paragraph.
+    line: usize,
+    /// Highlight rectangle in item coordinates, ready to fill. Its horizontal edges are snapped to
+    /// whole device pixels where they are computed, and [`Self::x`] hands the very same edges to
+    /// the glyph clip -- so the highlight edge and the clip edge cannot disagree and leave a sliver
+    /// of wrongly-colored glyph on top of the highlight.
+    background: PhysicalRect,
+}
+
+impl SelectionSpan {
+    /// Horizontal extent of the highlight, in the same coordinate space as `GlyphRun::offset()`.
+    fn x(&self) -> Range<f32> {
+        self.background.min_x()..self.background.max_x()
+    }
+}
+
+/// Sorted by `(paragraph, line, x.start)`: the spans belonging to one line form a contiguous slice,
+/// and within that slice they run left to right. Both halves are load-bearing -- see
+/// [`Self::for_line`] and the segment walk in `draw_glyph_run_with_selection`.
+#[derive(Clone, Debug, Default)]
+struct SelectionSpans(Vec<SelectionSpan>);
+
+impl SelectionSpans {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn backgrounds(&self) -> impl Iterator<Item = PhysicalRect> + '_ {
+        self.0.iter().map(|span| span.background)
+    }
+
+    /// The spans covering one line. Both the stored spans and the draw loop walk paragraphs and
+    /// lines in order, but a binary search keeps this independent of that ordering.
+    fn for_line(&self, paragraph: usize, line: usize) -> &[SelectionSpan] {
+        let key = (paragraph, line);
+        let start = self.0.partition_point(|span| (span.paragraph, span.line) < key);
+        let len = self.0[start..].partition_point(|span| (span.paragraph, span.line) == key);
+        &self.0[start..start + len]
+    }
+}
+
+/// How selected glyphs are painted, resolved once per draw call.
+struct SelectionRendering<'a, R: GlyphRenderer> {
+    spans: &'a SelectionSpans,
+    /// Forced fill for selected glyphs. It wins over `Brush::override_fill_color` and
+    /// `Brush::link_color`, so a colored span or a link inside the selection still reads as
+    /// selected.
+    foreground: <R as GlyphRenderer>::PlatformBrush,
+}
+
+/// How much of one glyph run a selection covers.
+enum RunCoverage {
+    /// No selected pixels: draw once, in the run's own brush.
+    Unselected,
+    /// Fully selected: draw once, in the selection foreground. No clip needed.
+    Full,
+    /// A boundary falls inside the run — possibly inside a ligature. The line's spans have to be
+    /// drawn separately, each clipped to its own horizontal band.
+    Partial,
+}
+
+/// Classifies `run_x` against the selection spans of the line it sits on.
+fn run_coverage(run_x: &Range<f32>, spans: &[SelectionSpan]) -> RunCoverage {
+    // Empty runs (and the degenerate zero-advance runs parley emits for ligature tails) can't
+    // show a boundary.
+    if spans.is_empty() || run_x.end <= run_x.start {
+        return RunCoverage::Unselected;
+    }
+    let mut overlapping = false;
+    for span in spans {
+        let span_x = span.x();
+        if span_x.start <= run_x.start && span_x.end >= run_x.end {
+            return RunCoverage::Full;
+        }
+        overlapping |= span_x.start < run_x.end && span_x.end > run_x.start;
+    }
+    if overlapping { RunCoverage::Partial } else { RunCoverage::Unselected }
+}
+
+/// Where `overflow: elide` cuts text off, computed across all paragraphs (each explicit `\n`
+/// produces one paragraph). See [`Layout::elision_extent`].
+#[derive(Clone, Copy)]
+struct ElisionCut {
+    /// Paragraph holding the last kept line.
+    last_paragraph: usize,
+    /// Last kept line within `last_paragraph`.
+    last_line: usize,
+    /// A line below the kept one was dropped for the height, so the kept line shows an ellipsis.
+    needs_ellipsis: bool,
 }
 
 struct Layout {
@@ -893,9 +1422,51 @@ struct Layout {
     height: PhysicalLength,
     max_physical_height: Option<PhysicalLength>,
     elision_info: Option<ElisionInfo>,
+    /// Where an active `max-lines` limit drops lines, in the same coordinates as [`ElisionCut`]:
+    /// the (paragraph index, line index) of the last kept line. See [`line_limit_cut`].
+    line_limit_cut: Option<(usize, usize)>,
 }
 
 impl Layout {
+    /// The paragraphs that have at least one line to show. Only differs from `paragraphs` when a
+    /// `max-lines` limit drops lines: paragraphs entirely below the cut don't take part in
+    /// hit-testing or selection.
+    fn visible_paragraphs(&self) -> &[TextParagraph] {
+        match self.line_limit_cut {
+            Some((last_paragraph, _)) => &self.paragraphs[..=last_paragraph],
+            None => &self.paragraphs,
+        }
+    }
+
+    /// True when an active line limit dropped lines and `y` (in item coordinates) falls below
+    /// the last kept line, i.e. into the item region where the dropped lines would have been.
+    /// Nothing is shown there, so nothing there should hit-test. With an active cut, `height`
+    /// is the bottom of the last kept line.
+    fn below_line_limit(&self, y: PhysicalLength) -> bool {
+        self.line_limit_cut.is_some() && y >= self.y_offset + self.height
+    }
+
+    /// The last line to draw, combining the height-based elision cut with the `max-lines` limit:
+    /// whichever cuts earlier wins. Unlike the elision cut, the line limit also applies with
+    /// `overflow: clip` -- just without the ellipsis.
+    fn visible_extent(&self) -> Option<ElisionCut> {
+        let line_limit_cut = self.line_limit_cut.map(|(last_paragraph, last_line)| ElisionCut {
+            last_paragraph,
+            last_line,
+            // The cut only exists when lines were dropped below it, so when eliding, the last
+            // kept line always signals the truncation.
+            needs_ellipsis: self.elision_info.is_some(),
+        });
+        match (self.elision_extent(), line_limit_cut) {
+            (Some(elision), Some(line_limit)) => {
+                Some(core::cmp::min_by_key(elision, line_limit, |cut| {
+                    (cut.last_paragraph, cut.last_line)
+                }))
+            }
+            (elision, line_limit) => elision.or(line_limit),
+        }
+    }
+
     /// Returns true if the very first line is taller than the available height, meaning the
     /// vertical line dropping used for `overflow: elide` would discard it and render nothing.
     /// In that case the caller keeps drawing the first line but applies a hard pixel clip to
@@ -909,19 +1480,90 @@ impl Layout {
         )
     }
 
+    /// Whether a line of `paragraph` (with the metrics block range `block_min`..`block_max` in the
+    /// paragraph's local coordinates) falls within the box for `overflow: elide` with a height
+    /// limit. Accounts for vertical alignment via `y_offset`, which is negative for bottom/center
+    /// alignment. Without a height limit, or when not eliding, every line counts as within the box.
+    fn paragraph_line_within_box(
+        &self,
+        paragraph: &TextParagraph,
+        block_min: f32,
+        block_max: f32,
+    ) -> bool {
+        match self.max_physical_height {
+            Some(max_physical_height) if self.elision_info.is_some() => {
+                let para_y = self.y_offset + paragraph.y;
+                // `line_fits_height` rounds the bottom up by a pixel; allow the same slack at the
+                // top so a line sitting right on the box edge isn't dropped to a rounding error.
+                line_fits_height(para_y.get() + block_max, max_physical_height)
+                    && para_y.get() + block_min >= -0.5
+            }
+            _ => true,
+        }
+    }
+
+    /// For `overflow: elide` with a height limit, work out the last line to keep across all
+    /// paragraphs. Explicit `\n` line breaks each produce a paragraph, and they have to elide as a
+    /// single block: lines below the box are dropped and the ellipsis goes on the last visible
+    /// line. Returns `None` when there is no height limit or elision (draw everything). When
+    /// nothing fits at all the very first line is kept (#12197) so the text never vanishes
+    /// entirely; `draw_text` then clips its vertical overflow.
+    fn elision_extent(&self) -> Option<ElisionCut> {
+        self.max_physical_height?;
+        self.elision_info.as_ref()?;
+
+        // The deepest line still within the box, scanning paragraphs and their lines from the
+        // bottom up. Bottom/center alignment clips lines off the top, so the visible block can
+        // start partway down, but its last line is always the lowest one that fits.
+        let last_within_box = self.paragraphs.iter().enumerate().rev().find_map(|(pi, para)| {
+            para.layout
+                .lines()
+                .enumerate()
+                .rev()
+                .find(|(_, line)| {
+                    let m = line.metrics();
+                    self.paragraph_line_within_box(para, m.block_min_coord, m.block_max_coord)
+                })
+                .map(|(li, _)| (pi, li))
+        });
+
+        // The very last line in document order, used to tell whether anything was dropped below
+        // the kept line (and so whether an ellipsis is needed).
+        let final_line = self
+            .paragraphs
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(pi, para)| para.layout.lines().len().checked_sub(1).map(|li| (pi, li)));
+
+        let (last_paragraph, last_line) = last_within_box.unwrap_or((0, 0));
+        let needs_ellipsis =
+            final_line.is_some_and(|final_line| final_line != (last_paragraph, last_line));
+        Some(ElisionCut { last_paragraph, last_line, needs_ellipsis })
+    }
+
+    /// Returns the last paragraph starting at or before the given byte offset. An offset in the
+    /// gap between two paragraph ranges (between a '\r' and its '\n') thus maps to the preceding
+    /// paragraph; callers have to clamp their local offset to the paragraph's range.
     fn paragraph_by_byte_offset(&self, byte_offset: usize) -> Option<&TextParagraph> {
-        self.paragraphs.iter().find(|p| byte_offset >= p.range.start && byte_offset <= p.range.end)
+        self.visible_paragraphs().iter().take_while(|p| p.range.start <= byte_offset).last()
     }
 
     fn paragraph_by_y(&self, y: PhysicalLength) -> Option<&TextParagraph> {
+        // Positions on lines dropped by `max-lines` (within the cut paragraph, when the item is
+        // taller than the visible text) don't hit-test: nothing is rendered there.
+        if self.below_line_limit(y) {
+            return None;
+        }
+
         // Adjust for vertical alignment
         let y = y - self.y_offset;
 
         if y < PhysicalLength::zero() {
-            return self.paragraphs.first();
+            return self.visible_paragraphs().first();
         }
 
-        let idx = self.paragraphs.binary_search_by(|paragraph| {
+        let idx = self.visible_paragraphs().binary_search_by(|paragraph| {
             if y < paragraph.y {
                 core::cmp::Ordering::Greater
             } else if y >= paragraph.y + PhysicalLength::new(paragraph.layout.height()) {
@@ -932,48 +1574,75 @@ impl Layout {
         });
 
         match idx {
-            Ok(i) => self.paragraphs.get(i),
-            Err(_) => self.paragraphs.last(),
+            Ok(i) => self.visible_paragraphs().get(i),
+            Err(_) => self.visible_paragraphs().last(),
         }
     }
 
-    fn selection_geometry(
-        &self,
-        selection_range: Range<usize>,
-        mut callback: impl FnMut(PhysicalRect),
-    ) {
-        for paragraph in &self.paragraphs {
+    /// Resolves `selection_range` into per-line horizontal spans.
+    ///
+    /// Parley already splits a ligature into one cluster per character and apportions the
+    /// advance between them, so the geometry it reports is accurate to sub-glyph precision --
+    /// selecting the `i` of an `fi` ligature yields exactly the ligature's right half. That
+    /// precision is what makes clip-based selection drawing possible; see [`SelectionSpan`].
+    fn selection_geometry(&self, selection_range: Range<usize>) -> SelectionSpans {
+        let mut spans = Vec::new();
+
+        for (paragraph_index, paragraph) in self.visible_paragraphs().iter().enumerate() {
             let selection_start = selection_range.start.max(paragraph.range.start);
             let selection_end = selection_range.end.min(paragraph.range.end);
 
-            if selection_start < selection_end {
-                let local_start = selection_start - paragraph.range.start;
-                let local_end = selection_end - paragraph.range.start;
-
-                let selection = parley::editing::Selection::new(
-                    parley::editing::Cursor::from_byte_index(
-                        &paragraph.layout,
-                        local_start,
-                        Default::default(),
-                    ),
-                    parley::editing::Cursor::from_byte_index(
-                        &paragraph.layout,
-                        local_end,
-                        Default::default(),
-                    ),
-                );
-
-                selection.geometry_with(&paragraph.layout, |rect, _| {
-                    callback(PhysicalRect::new(
-                        PhysicalPoint::from_lengths(
-                            PhysicalLength::new(rect.x0 as _),
-                            PhysicalLength::new(rect.y0 as _) + self.y_offset + paragraph.y,
-                        ),
-                        PhysicalSize::new(rect.width() as _, rect.height() as _),
-                    ));
-                });
+            if selection_start >= selection_end {
+                continue;
             }
+
+            let local_start = selection_start - paragraph.range.start;
+            let local_end = selection_end - paragraph.range.start;
+
+            let selection = parley::editing::Selection::new(
+                parley::editing::Cursor::from_byte_index(
+                    &paragraph.layout,
+                    local_start,
+                    Default::default(),
+                ),
+                parley::editing::Cursor::from_byte_index(
+                    &paragraph.layout,
+                    local_end,
+                    Default::default(),
+                ),
+            );
+
+            selection.geometry_with(&paragraph.layout, |rect, line| {
+                // Snap the horizontal edges to device pixels once, here, so that the highlight
+                // rectangle and the glyph clip derived from the same span are pixel-identical.
+                let x = (rect.x0 as f32).round()..(rect.x1 as f32).round();
+                if x.end <= x.start {
+                    return;
+                }
+                let background = PhysicalRect::new(
+                    PhysicalPoint::from_lengths(
+                        PhysicalLength::new(x.start),
+                        PhysicalLength::new(rect.y0 as _) + self.y_offset + paragraph.y,
+                    ),
+                    PhysicalSize::new(x.end - x.start, rect.height() as _),
+                );
+                spans.push(SelectionSpan { paragraph: paragraph_index, line, background });
+            });
         }
+
+        // Already in this order: paragraphs are visited in order, `geometry_with` walks a
+        // paragraph's lines in order, and within a line it accumulates x left to right over
+        // visually reordered items -- so even a bidi line yields ascending spans. Sort defensively
+        // anyway, since both consumers depend on it and neither would fail loudly: `for_line`
+        // needs the `(paragraph, line)` grouping, and the segment walk in
+        // `draw_glyph_run_with_selection` needs ascending x within a line.
+        spans.sort_by(|a, b| {
+            (a.paragraph, a.line)
+                .cmp(&(b.paragraph, b.line))
+                .then_with(|| a.x().start.total_cmp(&b.x().start))
+        });
+
+        SelectionSpans(spans)
     }
 
     fn byte_offset_from_point(&self, pos: PhysicalPoint) -> usize {
@@ -997,7 +1666,7 @@ impl Layout {
             return PhysicalRect::new(PhysicalPoint::default(), PhysicalSize::new(1.0, 1.0));
         };
 
-        let local_offset = byte_offset - paragraph.range.start;
+        let local_offset = (byte_offset - paragraph.range.start).min(paragraph.range.len());
         let cursor = parley::editing::Cursor::from_byte_index(
             &paragraph.layout,
             local_offset,
@@ -1023,6 +1692,10 @@ impl Layout {
         // When set, place an ellipsis even if the run fits the width. Used when lines below were
         // dropped for the height, so the last visible line signals the vertical truncation.
         force_elision: bool,
+        // Advance width of the line's trailing whitespace. A vertically truncated line that fits
+        // the width anchors the appended ellipsis after the last non-whitespace glyph, so trailing
+        // spaces (e.g. left at a word-wrap break) don't push it away from the text.
+        trailing_whitespace: f32,
     ) -> (
         impl Iterator<Item = parley::layout::Glyph> + Clone + 'a,
         Option<(parley::layout::Glyph, parley::FontData, PhysicalLength)>,
@@ -1059,8 +1732,9 @@ impl Layout {
                             > info.max_physical_width
                     })
                     .map(|g| g.x)
-                    // Nothing overflows horizontally (force_elision): put the ellipsis after the run.
-                    .unwrap_or(run_end.get());
+                    // Nothing overflows horizontally (force_elision): put the ellipsis right after
+                    // the run's last non-whitespace glyph, i.e. before any trailing whitespace.
+                    .unwrap_or(run_end.get() - trailing_whitespace);
 
                 let mut ellipsis_glyph = info.ellipsis_glyph;
                 ellipsis_glyph.x = ellipsis_x;
@@ -1083,24 +1757,22 @@ impl Layout {
         item_renderer: &mut R,
         default_fill_brush: <R as GlyphRenderer>::PlatformBrush,
         default_stroke_brush: Option<<R as GlyphRenderer>::PlatformBrush>,
-        draw_glyphs: &mut dyn FnMut(
-            &mut R,
-            &parley::FontData,
-            PhysicalLength,
-            &[i16],               // normalized variation coords
-            &fontique::Synthesis, // design-space variation settings
-            <R as GlyphRenderer>::PlatformBrush,
-            PhysicalLength, // y offset for paragraph
-            &mut dyn Iterator<Item = parley::layout::Glyph>,
-        ),
+        default_text_color: Color,
+        selection: Option<&SelectionRendering<'_, R>>,
     ) {
-        for paragraph in &self.paragraphs {
+        // Compute the cut once: explicit `\n` breaks produce one paragraph each, but they must
+        // elide as a single block (drop lines below the box, ellipsis on the last visible one).
+        let visible_extent = self.visible_extent();
+        for (paragraph_index, paragraph) in self.paragraphs.iter().enumerate() {
             paragraph.draw(
                 self,
+                paragraph_index,
+                visible_extent,
                 item_renderer,
                 &default_fill_brush,
                 &default_stroke_brush,
-                draw_glyphs,
+                default_text_color,
+                selection,
             );
         }
     }
@@ -1153,10 +1825,18 @@ pub fn draw_text(
         scale_factor,
     );
 
+    let window_adapter = item_renderer.window().window_adapter();
     let mut font_ctx = item_renderer.window().context().font_context().borrow_mut();
 
-    let mut guard =
-        get_or_create_text_paragraphs(cache, item_rc, text, scale_factor, &mut font_ctx);
+    let mut guard = get_or_create_text_paragraphs(
+        cache,
+        item_rc,
+        text,
+        text.wrap(),
+        scale_factor,
+        window_adapter.window(),
+        &mut font_ctx,
+    );
 
     let (horizontal_align, vertical_align) = text.alignment();
     let text_overflow = text.overflow();
@@ -1164,13 +1844,14 @@ pub fn draw_text(
     let layout = layout(
         &layout_builder,
         &mut font_ctx,
-        guard.paragraphs.take().unwrap_or_default(),
+        guard.take(),
         scale_factor,
         LayoutOptions {
             horizontal_align,
             vertical_align,
             max_height: Some(max_height),
             max_width: Some(max_width),
+            max_lines: text.line_limit(),
             text_overflow: text.overflow(),
         },
     );
@@ -1201,24 +1882,10 @@ pub fn draw_text(
             item_renderer,
             platform_fill_brush,
             platform_stroke_brush,
-            &mut |item_renderer: &mut _,
-                  font,
-                  font_size,
-                  normalized_coords,
-                  synthesis,
-                  brush,
-                  y_offset,
-                  glyphs_it| {
-                item_renderer.draw_glyph_run(
-                    font,
-                    font_size,
-                    normalized_coords,
-                    synthesis,
-                    brush,
-                    y_offset,
-                    glyphs_it,
-                );
-            },
+            text.color().color(),
+            // `Text` has no selection today; the machinery is shared so wiring one up later is
+            // a matter of passing spans here.
+            None,
         );
     }
 
@@ -1226,9 +1893,7 @@ pub fn draw_text(
         item_renderer.restore_state();
     }
 
-    // Put paragraphs back into the cache guard for reuse.
-    // break_all_lines replaces line data each time, so the state is ready for the next call.
-    guard.paragraphs = Some(layout.paragraphs);
+    guard.restore(layout.paragraphs);
 }
 
 #[cfg(feature = "std")]
@@ -1239,6 +1904,7 @@ pub fn link_under_cursor(
     item_rc: &crate::item_tree::ItemRc,
     size: LogicalSize,
     cursor: PhysicalPoint,
+    window: &crate::api::Window,
     cache: Option<&TextLayoutCache>,
 ) -> Option<std::string::String> {
     let layout_builder = LayoutWithoutLineBreaksBuilder::new(
@@ -1248,21 +1914,29 @@ pub fn link_under_cursor(
         scale_factor,
     );
 
-    let mut guard =
-        get_or_create_text_paragraphs(cache, Some(item_rc), text, scale_factor, font_context);
+    let mut guard = get_or_create_text_paragraphs(
+        cache,
+        Some(item_rc),
+        text,
+        text.wrap(),
+        scale_factor,
+        window,
+        font_context,
+    );
 
     let (horizontal_align, vertical_align) = text.alignment();
 
     let layout = layout(
         &layout_builder,
         font_context,
-        guard.paragraphs.take().unwrap_or_default(),
+        guard.take(),
         scale_factor,
         LayoutOptions {
             horizontal_align,
             vertical_align,
             max_height: Some(size.height_length()),
             max_width: Some(size.width_length()),
+            max_lines: text.line_limit(),
             text_overflow: text.overflow(),
         },
     );
@@ -1301,8 +1975,7 @@ pub fn link_under_cursor(
             .map(|(_, link)| link.clone())
     });
 
-    // Put paragraphs back into the cache guard for reuse.
-    guard.paragraphs = Some(layout.paragraphs);
+    guard.restore(layout.paragraphs);
 
     result
 }
@@ -1312,7 +1985,7 @@ pub fn draw_text_input(
     text_input: Pin<&crate::items::TextInput>,
     item_rc: &crate::item_tree::ItemRc,
     size: LogicalSize,
-    password_character: Option<fn() -> char>,
+    cache: &TextLayoutCache,
 ) {
     let width = size.width_length();
     let height = size.height_length();
@@ -1320,10 +1993,11 @@ pub fn draw_text_input(
         return;
     }
 
-    let visual_representation = text_input.visual_representation(password_character);
+    let visual_representation = text_input.visual_representation();
 
+    let text_color = visual_representation.text_color.color();
     let Some(platform_fill_brush) =
-        item_renderer.platform_text_fill_brush(visual_representation.text_color, size)
+        item_renderer.platform_text_fill_brush(visual_representation.text_color.clone(), size)
     else {
         return;
     };
@@ -1343,41 +2017,37 @@ pub fn draw_text_input(
         scale_factor,
     );
 
-    let text = visual_representation.text.clone();
-
-    // When a piece of text is first selected, it gets an empty range like `Some(1..1)`.
-    // If the text starts with a multi-byte character then this selection will be within
-    // that character and parley will panic. We just filter out empty selection ranges.
-    let selection_and_color = if !selection_range.is_empty() {
-        Some((selection_range.clone(), text_input.selection_foreground_color()))
-    } else {
-        None
-    };
-
+    let window_adapter = item_renderer.window().window_adapter();
     let mut font_ctx = item_renderer.window().context().font_context().borrow_mut();
 
-    let paragraphs_without_linebreaks = create_text_paragraphs(
-        &layout_builder,
+    let mut guard = cached_text_input_paragraphs(
+        Some(cache),
+        item_rc,
+        text_input,
+        text_input.wrap(),
+        scale_factor,
+        window_adapter.window(),
         &mut font_ctx,
-        PlainOrStyledText::Plain(text),
-        selection_and_color,
-        Color::default(),
     );
 
     let layout = layout(
         &layout_builder,
         &mut font_ctx,
-        paragraphs_without_linebreaks,
+        guard.take(),
         scale_factor,
         LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
     );
 
     drop(font_ctx);
 
-    layout.selection_geometry(selection_range, |selection_rect| {
-        item_renderer
-            .fill_rectangle_with_color(selection_rect, text_input.selection_background_color());
-    });
+    // When a piece of text is first selected, it gets an empty range like `1..1`. If the text
+    // starts with a multi-byte character then this selection would be within that character and
+    // parley would panic, so empty ranges are filtered out.
+    let selection_spans = if selection_range.is_empty() {
+        SelectionSpans::default()
+    } else {
+        layout.selection_geometry(selection_range)
+    };
 
     item_renderer.save_state();
 
@@ -1388,29 +2058,24 @@ pub fn draw_text_input(
     );
 
     if render {
-        layout.draw(
-            item_renderer,
-            platform_fill_brush,
-            None,
-            &mut |item_renderer: &mut _,
-                  font,
-                  font_size,
-                  normalized_coords,
-                  synthesis,
-                  brush,
-                  y_offset,
-                  glyphs_it| {
-                item_renderer.draw_glyph_run(
-                    font,
-                    font_size,
-                    normalized_coords,
-                    synthesis,
-                    brush,
-                    y_offset,
-                    glyphs_it,
-                );
-            },
-        );
+        // Inside the clip, like the glyphs it sits under: a line box taller than the item would
+        // otherwise paint the highlight over whatever follows the input.
+        for background in selection_spans.backgrounds() {
+            item_renderer
+                .fill_rectangle_with_color(background, text_input.selection_background_color());
+        }
+
+        // Selected glyphs are recolored by clipping, not by restyling the layout, so that a
+        // boundary landing inside a ligature cuts the glyph instead of recoloring all of it.
+        let selection = (!selection_spans.is_empty())
+            .then(|| {
+                item_renderer
+                    .platform_brush_for_color(&text_input.selection_foreground_color())
+                    .map(|foreground| SelectionRendering { spans: &selection_spans, foreground })
+            })
+            .flatten();
+
+        layout.draw(item_renderer, platform_fill_brush, None, text_color, selection.as_ref());
 
         if let Some(cursor_pos) = visual_representation.cursor_position {
             let cursor_rect = layout.cursor_rect_for_byte_offset(
@@ -1423,6 +2088,42 @@ pub fn draw_text_input(
     }
 
     item_renderer.restore_state();
+
+    guard.restore(layout.paragraphs);
+}
+
+/// Shapes a text input's visual text, reusing the `TextLayoutCache` where the shaped result is
+/// a pure function of the text and font properties.
+///
+/// A selection doesn't make an entry unshareable: it is applied when drawing, by clipping the runs
+/// it cuts across, and never reaches shaping. Cluster ranges and advances are identical with and
+/// without one, so a selected `TextInput` hits the same entry as an unselected one -- which is what
+/// keeps dragging a selection, or composing with an IME, from re-shaping the document on every
+/// event. A password field shapes a substituted text, but the substitution is the same everywhere,
+/// so it is cacheable too.
+fn cached_text_input_paragraphs<'a>(
+    cache: Option<&'a TextLayoutCache>,
+    item_rc: &crate::item_tree::ItemRc,
+    text_input: Pin<&crate::items::TextInput>,
+    text_wrap: TextWrap,
+    scale_factor: ScaleFactor,
+    window: &crate::api::Window,
+    font_context: &mut parley::FontContext,
+) -> CachedParagraphsGuard<'a> {
+    cached_paragraphs(
+        cache,
+        Some(item_rc),
+        text_wrap,
+        window,
+        font_context,
+        // Shape through the very function the measuring path uses, so that the two register the
+        // same dependencies. Were this to read anything narrower, a draw could fill the entry with
+        // a tracker that a later measurement then trusts, and that measurement would miss whatever
+        // the draw didn't look at.
+        &|font_context| {
+            shape_paragraphs(text_input, Some(item_rc), text_wrap, scale_factor, font_context)
+        },
+    )
 }
 
 pub fn text_size(
@@ -1431,39 +2132,100 @@ pub fn text_size(
     item_rc: &crate::item_tree::ItemRc,
     max_width: Option<LogicalLength>,
     text_wrap: TextWrap,
-    _cache: Option<&TextLayoutCache>,
+    cache: Option<&TextLayoutCache>,
 ) -> Option<LogicalSize> {
     let scale_factor = renderer.scale_factor()?;
 
-    // Evaluate properties before borrowing font_context: both font_request()
-    // and text() can trigger property bindings that re-enter text_size for
-    // other elements, which would panic on a second borrow_mut().
+    // Evaluate the properties that `shape_paragraphs` reads before borrowing font_context: they
+    // can trigger property bindings that re-enter text_size for other elements, which would panic
+    // on a second borrow_mut(). Afterwards they are clean, so shaping can read them again -- now
+    // without re-entering -- inside the cache entry's dependency tracker.
+    let _ = text_item.font_request(item_rc);
+    let _ = text_item.stroke();
+    let _ = text_item.link_color();
+    let _ = text_item.text();
+
+    let window_adapter = renderer.window_adapter()?;
+    let ctx = renderer.slint_context()?;
+    let mut font_ctx = ctx.font_context().borrow_mut();
+
+    // Only `layout()`'s elision glyph reads this, and `TextOverflow::Clip` never asks for one.
+    let layout_builder = shaping_builder(text_item, Some(item_rc), text_wrap, scale_factor);
+
+    let mut guard = get_or_create_text_paragraphs(
+        cache,
+        Some(item_rc),
+        text_item,
+        text_wrap,
+        scale_factor,
+        window_adapter.window(),
+        &mut font_ctx,
+    );
+
+    let layout = layout(
+        &layout_builder,
+        &mut font_ctx,
+        guard.take(),
+        scale_factor,
+        LayoutOptions {
+            max_width,
+            max_height: None,
+            max_lines: text_item.line_limit(),
+            horizontal_align: TextHorizontalAlignment::Left,
+            vertical_align: TextVerticalAlignment::Top,
+            text_overflow: TextOverflow::Clip,
+        },
+    );
+    let size = PhysicalSize::from_lengths(layout.max_width, layout.height) / scale_factor;
+    guard.restore(layout.paragraphs);
+    Some(size)
+}
+
+/// The content widths of the text. See [`crate::renderer::ContentWidths`].
+pub fn text_content_widths(
+    renderer: &dyn RendererSealed,
+    text_item: Pin<&dyn crate::item_rendering::RenderString>,
+    item_rc: &crate::item_tree::ItemRc,
+) -> Option<crate::renderer::ContentWidths> {
+    let scale_factor = renderer.scale_factor()?;
+
+    // See text_size(): evaluate properties before borrowing font_context.
     let font_request = text_item.font_request(item_rc);
     let text = text_item.text();
 
     let ctx = renderer.slint_context()?;
     let mut font_ctx = ctx.font_context().borrow_mut();
 
-    let layout_builder =
-        LayoutWithoutLineBreaksBuilder::new(Some(font_request), text_wrap, None, scale_factor);
+    // WordWrap gives WordBreak::Normal, so `min` becomes the longest word. Content widths
+    // are intrinsic to the text, so they don't depend on the item's actual wrap mode.
+    let mut layout_builder = LayoutWithoutLineBreaksBuilder::new(
+        Some(font_request),
+        TextWrap::WordWrap,
+        None,
+        scale_factor,
+    );
+    // Without this, parley may break anywhere to keep overlong words from overflowing,
+    // which makes the min-content width a single character instead of the longest word.
+    layout_builder.overflow_wrap_anywhere = false;
 
     let paragraphs_without_linebreaks =
-        create_text_paragraphs(&layout_builder, &mut font_ctx, text, None, Color::default());
+        create_text_paragraphs(&layout_builder, &mut font_ctx, text, Color::default());
 
-    let layout = layout(
-        &layout_builder,
-        &mut font_ctx,
-        paragraphs_without_linebreaks,
-        scale_factor,
-        LayoutOptions {
-            max_width,
-            max_height: None,
-            horizontal_align: TextHorizontalAlignment::Left,
-            vertical_align: TextVerticalAlignment::Top,
-            text_overflow: TextOverflow::Clip,
-        },
-    );
-    Some(PhysicalSize::from_lengths(layout.max_width, layout.height) / scale_factor)
+    // No line breaking needed: parley derives the content widths from the break
+    // opportunities. Paragraphs stack vertically, so both widths are the widest.
+    // Without wrapping each paragraph is one line, so a line limit drops the paragraphs
+    // that are not drawn, from both widths.
+    let (min, max) = paragraphs_without_linebreaks
+        .iter()
+        .take(text_item.line_limit().unwrap_or(usize::MAX))
+        .fold((0., 0.), |(min, max), p| {
+            let w = p.layout.calculate_content_widths();
+            (f32::max(min, w.min), f32::max(max, w.max))
+        });
+    Some(crate::renderer::ContentWidths {
+        min: PhysicalLength::new(min) / scale_factor,
+        max: PhysicalLength::new(max) / scale_factor,
+    })
 }
 
 pub fn char_size(
@@ -1536,6 +2298,7 @@ pub fn text_input_byte_offset_for_position(
     text_input: Pin<&crate::items::TextInput>,
     item_rc: &crate::item_tree::ItemRc,
     pos: LogicalPoint,
+    cache: Option<&TextLayoutCache>,
 ) -> usize {
     let Some(scale_factor) = renderer.scale_factor() else {
         return 0;
@@ -1554,29 +2317,33 @@ pub fn text_input_byte_offset_for_position(
         None,
         scale_factor,
     );
-    let visual_representation = text_input.visual_representation(None);
+    let visual_representation = text_input.visual_representation();
 
-    let Some(ctx) = renderer.slint_context() else {
+    let (Some(window_adapter), Some(ctx)) = (renderer.window_adapter(), renderer.slint_context())
+    else {
         return 0;
     };
     let mut font_ctx = ctx.font_context().borrow_mut();
 
-    let paragraphs_without_linebreaks = create_text_paragraphs(
-        &layout_builder,
+    let mut guard = cached_text_input_paragraphs(
+        cache,
+        item_rc,
+        text_input,
+        text_input.wrap(),
+        scale_factor,
+        window_adapter.window(),
         &mut font_ctx,
-        PlainOrStyledText::Plain(visual_representation.text.clone()),
-        None,
-        Color::default(),
     );
 
     let layout = layout(
         &layout_builder,
         &mut font_ctx,
-        paragraphs_without_linebreaks,
+        guard.take(),
         scale_factor,
         LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
     );
     let byte_offset = layout.byte_offset_from_point(pos);
+    guard.restore(layout.paragraphs);
     visual_representation.map_byte_offset_from_visual_text_to_actual_text(byte_offset)
 }
 
@@ -1585,6 +2352,7 @@ pub fn text_input_cursor_rect_for_byte_offset(
     text_input: Pin<&crate::items::TextInput>,
     item_rc: &crate::item_tree::ItemRc,
     byte_offset: usize,
+    cache: Option<&TextLayoutCache>,
 ) -> LogicalRect {
     let Some(scale_factor) = renderer.scale_factor() else {
         return LogicalRect::default();
@@ -1606,10 +2374,11 @@ pub fn text_input_cursor_rect_for_byte_offset(
         );
     }
 
-    let visual_representation = text_input.visual_representation(None);
+    let visual_representation = text_input.visual_representation();
     let cursor_width = text_input.text_cursor_width() * scale_factor;
 
-    let Some(ctx) = renderer.slint_context() else {
+    let (Some(window_adapter), Some(ctx)) = (renderer.window_adapter(), renderer.slint_context())
+    else {
         return LogicalRect::default();
     };
 
@@ -1617,21 +2386,244 @@ pub fn text_input_cursor_rect_for_byte_offset(
 
     let byte_offset = visual_representation.map_byte_offset_from_actual_to_visual_text(byte_offset);
 
-    let paragraphs_without_linebreaks = create_text_paragraphs(
-        &layout_builder,
+    let mut guard = cached_text_input_paragraphs(
+        cache,
+        item_rc,
+        text_input,
+        text_input.wrap(),
+        scale_factor,
+        window_adapter.window(),
         &mut font_ctx,
-        PlainOrStyledText::Plain(visual_representation.text),
-        None,
-        Color::default(),
     );
 
     let layout = layout(
         &layout_builder,
         &mut font_ctx,
-        paragraphs_without_linebreaks,
+        guard.take(),
         scale_factor,
         LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
     );
     let cursor_rect = layout.cursor_rect_for_byte_offset(byte_offset, cursor_width);
+    guard.restore(layout.paragraphs);
     cursor_rect / scale_factor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paragraphs(text: &str) -> Vec<&str> {
+        paragraph_ranges(text).map(|r| &text[r]).collect()
+    }
+
+    fn layout_text_with_options(text: &str, options: LayoutOptions) -> Layout {
+        // Don't load system fonts: that goes through fontconfig FFI, which Miri
+        // can't execute. Use the bundled Inter font instead.
+        let mut font_ctx = parley::FontContext {
+            collection: fontique::Collection::new(fontique::CollectionOptions {
+                system_fonts: false,
+                ..Default::default()
+            }),
+            source_cache: Default::default(),
+        };
+        let data = include_bytes!("../../common/sharedfontique/Inter-VariableFont.ttf");
+        let families =
+            font_ctx.collection.register_fonts(fontique::Blob::new(Arc::new(data)), None);
+        font_ctx.collection.set_generic_families(
+            fontique::GenericFamily::SansSerif,
+            families.iter().map(|(id, _)| *id),
+        );
+        let builder = LayoutWithoutLineBreaksBuilder::new(
+            None,
+            TextWrap::NoWrap,
+            None,
+            ScaleFactor::new(1.0),
+        );
+        let paragraphs = create_text_paragraphs(
+            &builder,
+            &mut font_ctx,
+            PlainOrStyledText::Plain(text.into()),
+            Color::default(),
+        );
+        layout(&builder, &mut font_ctx, paragraphs, ScaleFactor::new(1.0), options)
+    }
+
+    fn layout_text(text: &str) -> Layout {
+        layout_text_with_options(text, LayoutOptions::default())
+    }
+
+    fn visual_line_count(text: &str) -> usize {
+        layout_text(text).paragraphs.iter().map(|p| p.layout.lines().len()).sum()
+    }
+
+    #[test]
+    fn bidi_selection_spans_are_ascending_in_x() {
+        // The segment walk in `draw_glyph_run_with_selection` steps through a line's spans left to
+        // right, so they have to arrive ascending in x. A bidi line is where that could plausibly
+        // break: a logically contiguous selection reaching into an RTL run maps to several
+        // disjoint visual rects, and the second one can be the *leftmost* on screen.
+        let text = "abc\u{5d0}\u{5d1}\u{5d2}def";
+        let layout = layout_text(text);
+        let mut saw_line_with_several_spans = false;
+        for start in [0, 2, 3, 4] {
+            for end in [4, 6, 8, text.len()] {
+                if start >= end {
+                    continue;
+                }
+                let spans = layout.selection_geometry(start..end);
+                saw_line_with_several_spans |= spans.0.len() > 1;
+                for pair in spans.0.windows(2) {
+                    let (left, right) = (&pair[0], &pair[1]);
+                    if (left.paragraph, left.line) != (right.paragraph, right.line) {
+                        continue;
+                    }
+                    assert!(
+                        left.x().start <= right.x().start,
+                        "spans of {start}..{end} are out of order: {:?} before {:?}",
+                        left.x(),
+                        right.x()
+                    );
+                }
+            }
+        }
+        // Otherwise the ranges above stopped producing a split line and this proves nothing.
+        assert!(saw_line_with_several_spans, "expected a bidi selection to split into spans");
+    }
+
+    #[test]
+    fn test_crlf_line_count() {
+        assert_eq!(visual_line_count("hello\r\nworld"), visual_line_count("hello\nworld"));
+        assert_eq!(visual_line_count("hello\r\nworld"), 2);
+    }
+
+    #[test]
+    fn test_cursor_between_cr_and_lf() {
+        // The cursor can land between the '\r' and the '\n' (e.g. moving left from the start of
+        // the next line); it draws at the end of the preceding paragraph, like on the '\r'.
+        let layout = layout_text("hello\r\nworld");
+        let cursor_width = PhysicalLength::new(1.0);
+        assert_eq!(
+            layout.cursor_rect_for_byte_offset(6, cursor_width),
+            layout.cursor_rect_for_byte_offset(5, cursor_width)
+        );
+        assert_ne!(
+            layout.cursor_rect_for_byte_offset(6, cursor_width),
+            layout.cursor_rect_for_byte_offset(0, cursor_width)
+        );
+    }
+
+    #[test]
+    fn test_paragraph_ranges() {
+        assert_eq!(paragraphs(""), [""]);
+        assert_eq!(paragraphs("hello"), ["hello"]);
+        assert_eq!(paragraphs("hello\nworld"), ["hello", "world"]);
+        assert_eq!(paragraphs("hello\n"), ["hello", ""]);
+        assert_eq!(paragraphs("\n\n"), ["", "", ""]);
+    }
+
+    #[test]
+    fn test_paragraph_ranges_crlf() {
+        assert_eq!(paragraphs("hello\r\nworld"), ["hello", "world"]);
+        assert_eq!(paragraphs("hello\r\n"), ["hello", ""]);
+        assert_eq!(paragraphs("\r\n\r\n"), ["", "", ""]);
+        assert_eq!(paragraphs("a\r\n\nb"), ["a", "", "b"]);
+        // A lone CR stays in the paragraph; parley breaks the line there.
+        assert_eq!(paragraphs("hello\rworld"), ["hello\rworld"]);
+    }
+
+    fn layout_with_max_lines(text: &str, max_lines: usize) -> Layout {
+        layout_text_with_options(
+            text,
+            LayoutOptions { max_lines: Some(max_lines), ..LayoutOptions::default() },
+        )
+    }
+
+    #[test]
+    fn test_max_lines_cut_across_paragraphs() {
+        // Three paragraphs with one line each; the limit lands on the paragraph boundary.
+        let layout = layout_with_max_lines("a\nb\nc", 2);
+        assert_eq!(layout.line_limit_cut, Some((1, 0)));
+        assert_eq!(layout.visible_paragraphs().len(), 2);
+
+        // Empty paragraphs still synthesize a line that counts towards the limit.
+        let layout = layout_with_max_lines("a\n\nb", 2);
+        assert_eq!(layout.line_limit_cut, Some((1, 0)));
+    }
+
+    #[test]
+    fn test_max_lines_cut_within_paragraph() {
+        // A lone CR breaks lines within a single paragraph, so the limit lands mid-paragraph.
+        let layout = layout_with_max_lines("a\rb\rc", 2);
+        assert_eq!(layout.line_limit_cut, Some((0, 1)));
+        assert_eq!(layout.visible_paragraphs().len(), 1);
+    }
+
+    #[test]
+    fn test_max_lines_no_cut_when_all_lines_fit() {
+        // The limit only cuts when lines are actually dropped, and layout results (notably the
+        // height) are unchanged when it doesn't.
+        let unlimited = layout_text("a\nb\nc");
+        for max_lines in [3, 4] {
+            let layout = layout_with_max_lines("a\nb\nc", max_lines);
+            assert_eq!(layout.line_limit_cut, None);
+            assert_eq!(layout.visible_paragraphs().len(), 3);
+            assert_eq!(layout.height, unlimited.height);
+        }
+    }
+
+    #[test]
+    fn test_max_lines_caps_preferred_width() {
+        // The cut lands mid-paragraph (a lone CR breaks lines within one paragraph); the
+        // dropped, longer line must not count towards the preferred width, so the layout is
+        // exactly as wide as the kept line alone.
+        let limited = layout_with_max_lines("ab\rlonger", 1);
+        assert_eq!(limited.line_limit_cut, Some((0, 0)));
+        assert!(limited.max_width < layout_text("ab\rlonger").max_width);
+        assert_eq!(limited.max_width, layout_text("ab").max_width);
+
+        // The per-line width formula used for the cut paragraph mirrors parley's `full_width`;
+        // pin the equivalence so a change in parley's formula doesn't silently diverge.
+        let unlimited = layout_text("ab\rlonger");
+        let per_line_max = unlimited.paragraphs[0]
+            .layout
+            .lines()
+            .map(|line| {
+                let metrics = line.metrics();
+                metrics.inline_min_coord + metrics.advance
+            })
+            .fold(0.0f32, f32::max);
+        assert_eq!(per_line_max, unlimited.paragraphs[0].layout.full_width());
+    }
+
+    #[test]
+    fn test_max_lines_below_line_limit() {
+        let limited = layout_with_max_lines("a\nb\nc", 2);
+        // Within the visible text: hit-testing stays active.
+        assert!(!limited.below_line_limit(PhysicalLength::zero()));
+        assert!(!limited.below_line_limit(limited.height - PhysicalLength::new(1.0)));
+        // At and below the bottom of the last kept line: dropped-line territory.
+        assert!(limited.below_line_limit(limited.height));
+        assert!(limited.below_line_limit(limited.height + PhysicalLength::new(100.0)));
+
+        // Without an active cut nothing is below the limit, no matter the y.
+        let unlimited = layout_text("a\nb\nc");
+        assert!(!unlimited.below_line_limit(unlimited.height + PhysicalLength::new(100.0)));
+
+        // paragraph_by_y honors the guard, so no hit-testing consumer sees dropped lines.
+        assert!(limited.paragraph_by_y(limited.height).is_none());
+        assert!(limited.paragraph_by_y(PhysicalLength::zero()).is_some());
+    }
+
+    #[test]
+    fn test_max_lines_caps_height() {
+        let unlimited = layout_text("a\nb\nc");
+        let limited = layout_with_max_lines("a\nb\nc", 1);
+        assert!(limited.height < unlimited.height);
+        assert!(limited.height > PhysicalLength::zero());
+        // The capped height matches the bottom of the last kept line.
+        let first_line_bottom = PhysicalLength::new(
+            limited.paragraphs[0].layout.lines().next().unwrap().metrics().block_max_coord,
+        );
+        assert_eq!(limited.height, first_line_bottom);
+    }
 }

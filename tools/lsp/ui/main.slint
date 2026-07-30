@@ -240,13 +240,9 @@ export component PreviewUi inherits Window {
                     }
                 }
 
-                if root.remote-mode: RemotePreviewView {
-                    horizontal-stretch: 1;
-                    vertical-stretch: 1;
-                }
+                if root.remote-mode: RemotePreviewView { }
 
                 if !root.remote-mode: HorizontalLayout {
-                    spacing: 0px;
 
                     if root.library-widget: LibraryView {
                         known-components: Api.known-components;
@@ -381,7 +377,7 @@ export component PreviewUi inherits Window {
                     }
                 }
 
-                if !root.remote-mode: Rectangle {
+                Rectangle {
                     height: cp.height;
                 }
 
@@ -390,7 +386,6 @@ export component PreviewUi inherits Window {
             cp := ConsolePanel {
                 y: parent.height - self.height - 1px;
                 width: parent.width;
-                visible: !root.remote-mode;
                 panel-expanded <=> root.console-panel-expanded;
             }
         }
@@ -409,7 +404,6 @@ export component PreviewUi inherits Window {
 
     if show-floating-table-editor: TableEditorView {
         init => {
-            self.initial-x = root.initial-floating-x;
             self.initial-y = 50px;
         }
     }

@@ -409,6 +409,7 @@ fn duplicate_element_with_mapping(
             .map(|t| duplicate_transition(t, mapping, root_component, priority_delta))
             .collect(),
         child_of_layout: elem.child_of_layout,
+        child_of_flexbox: elem.child_of_flexbox,
         layout_info_prop: elem.layout_info_prop.clone(),
         layout_info_v_with_constraint: elem.layout_info_v_with_constraint.clone(),
         layout_info_h_with_constraint: elem.layout_info_h_with_constraint.clone(),
@@ -418,7 +419,7 @@ fn duplicate_element_with_mapping(
         named_references: Default::default(),
         item_index: Default::default(), // Not determined yet
         item_index_of_first_children: Default::default(),
-        is_flickable_viewport: elem.is_flickable_viewport,
+        is_flickable_content: elem.is_flickable_content,
         has_popup_child: elem.has_popup_child,
         is_tooltip: elem.is_tooltip,
         is_legacy_syntax: elem.is_legacy_syntax,
@@ -513,6 +514,9 @@ fn duplicate_sub_component(
         fixup_reference(&mut t.interval, mapping);
         fixup_reference(&mut t.running, mapping);
         fixup_reference(&mut t.triggered, mapping);
+        if let Some(e) = mapping.get(&element_key(t.element.upgrade().unwrap())) {
+            t.element = Rc::downgrade(e);
+        }
     }
     *new_component.menu_item_tree.borrow_mut() = component_to_duplicate
         .menu_item_tree
