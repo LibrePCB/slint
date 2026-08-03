@@ -57,7 +57,8 @@ jobs:
                     - os: windows-2022
                       name: "Windows 2022 1.92"
                       rust_version: "1.92"
-                      extra_args: "--exclude ffmpeg --exclude gstreamer-player --exclude material-gallery"
+                      # The platform-independent interpreter test driver only runs on macOS
+                      extra_args: "--exclude ffmpeg --exclude gstreamer-player --exclude material-gallery --exclude test-driver-interpreter"
                     - os: macos-14
                       name: "MacOS 14 beta"
                       rust_version: "beta"
@@ -71,6 +72,9 @@ jobs:
             run_qt: ${{ inputs.full || contains(fromJSON(inputs.changes), 'qt') }}
             test_workspace: ${{ inputs.full || contains(fromJSON(inputs.changes), 'slint') }}
             test_integration: ${{ inputs.full || contains(fromJSON(inputs.changes), 'integration') || contains(fromJSON(inputs.changes), 'tests') }}
+            # macOS only runs the rust driver when its inputs changed;
+            # Windows always does, for the live-preview test.
+            test_rust_driver: ${{ !startsWith(matrix.os, 'macos') || inputs.full || contains(fromJSON(inputs.changes), 'api_rs') || contains(fromJSON(inputs.changes), 'tests') || contains(fromJSON(inputs.changes), 'qt') }}
             build_examples: ${{ inputs.full || contains(fromJSON(inputs.changes), 'integration') || contains(fromJSON(inputs.changes), 'examples') }}
             save_if: ${{ github.ref == 'refs/heads/master' }}
 
@@ -343,12 +347,12 @@ jobs:
                   buildtargets: esp32
                   ldproxy: false
             - name: Check pico-st7789
-              if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'internal') || contains(fromJSON(inputs.changes), 'examples_mcu') || contains(fromJSON(inputs.changes), 'api_rs') }}
+              if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'examples_mcu') || contains(fromJSON(inputs.changes), 'api_rs') }}
               env:
                   RUSTFLAGS: --cfg slint_int_coord -D warnings
               run: cargo check --target=thumbv6m-none-eabi --manifest-path demos/Cargo.toml -p printerdemo_mcu --no-default-features --features=mcu-board-support/pico-st7789 --release
             - name: Check mcu-embassy
-              if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'internal') || contains(fromJSON(inputs.changes), 'examples_mcu') || contains(fromJSON(inputs.changes), 'api_rs') }}
+              if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'examples_mcu') || contains(fromJSON(inputs.changes), 'api_rs') }}
               env:
                   RUSTFLAGS: --cfg slint_int_coord -D warnings
               run: cargo check --bin ui_mcu --target=thumbv8m.main-none-eabihf --no-default-features --features="mcu-embassy/mcu" --release
@@ -377,13 +381,14 @@ jobs:
               run: cross check --target=armv7-unknown-linux-gnueabihf -p slint-cpp --no-default-features --features=testing,interpreter,std
 
     docs:
-        if: ${{ !inputs.full && contains(fromJSON(inputs.changes), 'docs_build') }}
+        if: ${{ !inputs.full && (contains(fromJSON(inputs.changes), 'docs_build') || contains(fromJSON(inputs.changes), 'slint_sc')) }}
         uses: ./.github/workflows/build_docs.yaml
         secrets:
           READ_WRITE_PRIVATE_KEY: ${{ secrets.READ_WRITE_PRIVATE_KEY }}
         with:
           release: false
           app-id: ${{ vars.READ_WRITE_APP_ID }}
+          slint-sc-coverage: ${{ inputs.full || contains(fromJSON(inputs.changes), 'slint_sc') || contains(fromJSON(inputs.changes), 'safety_docs') }}
 
     slintpad:
         if: ${{ !inputs.full && contains(fromJSON(inputs.changes), 'slintpad') }}
@@ -392,7 +397,7 @@ jobs:
             release: false
 
     wasm_demo:
-        if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'internal') || contains(fromJSON(inputs.changes), 'examples') || contains(fromJSON(inputs.changes), 'api_rs') }}
+        if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'examples') || contains(fromJSON(inputs.changes), 'api_rs') }}
         uses: ./.github/workflows/wasm_demos.yaml
         with:
           build_artifacts: false
@@ -500,7 +505,7 @@ jobs:
                   idf.py build
 
     android:
-        if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'internal') || contains(fromJSON(inputs.changes), 'api_rs') || contains(fromJSON(inputs.changes), 'examples') || contains(fromJSON(inputs.changes), 'android_backend') }}
+        if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'api_rs') || contains(fromJSON(inputs.changes), 'examples') || contains(fromJSON(inputs.changes), 'android_backend') }}
         runs-on: ubuntu-latest
         env:
             RUSTFLAGS: -D warnings
@@ -624,32 +629,6 @@ jobs:
             # but don't save the cache (would trash it for the next PR run).
             update: ${{ inputs.full == true }}
             save_if: ${{ inputs.full != true }}
-
-    slint_sc:
-        if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'slint_sc') }}
-        runs-on: ubuntu-22.04
-        steps:
-            - uses: actions/checkout@v7
-            - uses: ./.github/actions/setup-rust
-              with:
-                  components: llvm-tools-preview
-            - name: Install cargo-llvm-cov
-              uses: taiki-e/install-action@cargo-llvm-cov
-            - name: Test compiler with slint-sc feature
-              run: cargo llvm-cov --no-report -p i-slint-compiler --features slint-sc --no-default-features
-            - name: Test slint-compiler binary with slint-sc feature
-              run: cargo llvm-cov --no-report -p slint-compiler --features slint-sc --no-default-features
-            - name: Test slint-sc runtime and driver
-              run: cargo llvm-cov --no-report -p slint-sc
-            - name: Generate coverage report
-              run: |
-                  cargo llvm-cov report --html --output-dir coverage
-                  cargo llvm-cov report --lcov --output-path coverage/lcov.info
-            - name: Upload coverage report
-              uses: actions/upload-artifact@v7
-              with:
-                  name: slint-sc-coverage
-                  path: coverage
 
     clippy:
         if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'rust_files') }}

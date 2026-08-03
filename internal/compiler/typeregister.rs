@@ -93,6 +93,7 @@ pub struct BuiltinTypes {
     pub enums: BuiltinEnums,
     pub noarg_callback_type: Type,
     pub strarg_callback_type: Type,
+    pub set_selection_callback_type: Type,
     pub logical_point_type: Arc<Struct>,
     pub logical_size_type: Arc<Struct>,
     pub font_metrics_type: Type,
@@ -102,6 +103,7 @@ pub struct BuiltinTypes {
     pub path_element_type: Type,
     pub layout_item_info_type: Type,
     pub flexbox_layout_item_info_type: Type,
+    pub flex_item_props_type: Type,
 }
 
 impl BuiltinTypes {
@@ -120,6 +122,19 @@ impl BuiltinTypes {
         ));
         let enums = BuiltinEnums::new();
         let flex_align_self_type = Type::Enumeration(enums.FlexboxLayoutAlignSelf.clone());
+        // Shared by `flex_item_props_type` and nested as `props` in
+        // `flexbox_layout_item_info_type`, so the field list is defined once.
+        let flex_item_props_struct = Arc::new(Struct::new(
+            IntoIterator::into_iter([
+                ("flex-grow".into(), Type::Float32),
+                ("flex-shrink".into(), Type::Float32),
+                ("flex-basis".into(), Type::Float32),
+                ("flex-align-self".into(), flex_align_self_type),
+                ("flex-order".into(), Type::Int32),
+            ])
+            .collect(),
+            BuiltinStruct::FlexItemProps,
+        ));
         Self {
             enums,
             logical_point_type: Arc::new(Struct::new(
@@ -158,6 +173,11 @@ impl BuiltinTypes {
                 args: vec![Type::String],
                 arg_names: Vec::new(),
             })),
+            set_selection_callback_type: Type::Callback(Arc::new(Function {
+                return_type: Type::Void,
+                args: vec![Type::Int32, Type::Int32],
+                arg_names: vec![SmolStr::new_static("anchor"), SmolStr::new_static("focus")],
+            })),
             layout_info_type: layout_info_type.clone(),
             state_info_type: Arc::new(Struct::new(
                 IntoIterator::into_iter([
@@ -180,15 +200,12 @@ impl BuiltinTypes {
             flexbox_layout_item_info_type: Type::Struct(Arc::new(Struct::new(
                 IntoIterator::into_iter([
                     ("constraint".into(), layout_info_type.into()),
-                    ("flex-grow".into(), Type::Float32),
-                    ("flex-shrink".into(), Type::Float32),
-                    ("flex-basis".into(), Type::Float32),
-                    ("flex-align-self".into(), flex_align_self_type),
-                    ("flex-order".into(), Type::Int32),
+                    ("props".into(), Type::Struct(flex_item_props_struct.clone())),
                 ])
                 .collect(),
                 BuiltinStruct::FlexboxLayoutItemInfo,
             ))),
+            flex_item_props_type: Type::Struct(flex_item_props_struct),
             gridlayout_input_data_type: Type::Struct(Arc::new(Struct::new(
                 IntoIterator::into_iter([
                     ("row".into(), Type::Int32),
@@ -250,6 +267,10 @@ fn strarg_callback_type() -> Type {
     BUILTIN.strarg_callback_type.clone()
 }
 
+fn set_selection_callback_type() -> Type {
+    BUILTIN.set_selection_callback_type.clone()
+}
+
 pub fn reserved_accessibility_properties() -> impl Iterator<Item = (&'static str, Type)> {
     [
         //("accessible-role", ...)
@@ -271,6 +292,7 @@ pub fn reserved_accessibility_properties() -> impl Iterator<Item = (&'static str
         ("accessible-action-increment", noarg_callback_type()),
         ("accessible-action-decrement", noarg_callback_type()),
         ("accessible-action-set-value", strarg_callback_type()),
+        ("accessible-action-set-selection", set_selection_callback_type()),
         ("accessible-action-expand", noarg_callback_type()),
         ("accessible-item-selectable", Type::Bool),
         ("accessible-item-selected", Type::Bool),
@@ -959,4 +981,9 @@ pub fn layout_item_info_type() -> Type {
 /// The [`Type`] for a runtime FlexboxLayoutItemInfo structure
 pub fn flexbox_layout_item_info_type() -> Type {
     BUILTIN.flexbox_layout_item_info_type.clone()
+}
+
+/// The [`Type`] for a runtime FlexItemProps structure
+pub fn flex_item_props_type() -> Type {
+    BUILTIN.flex_item_props_type.clone()
 }

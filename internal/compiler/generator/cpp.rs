@@ -70,8 +70,7 @@ fn access_item_rc(pr: &llr::MemberReference, ctx: &EvaluationContext) -> String 
     let llr::MemberReference::Relative { parent_level, local_reference } = pr else {
         unreachable!()
     };
-    let llr::LocalMemberIndex::Native { item_index, prop_name: _, .. } = &local_reference.reference
-    else {
+    let llr::LocalMemberIndex::Native { item_index, .. } = &local_reference.reference else {
         unreachable!()
     };
 
@@ -95,7 +94,7 @@ fn access_item_rc(pr: &llr::MemberReference, ctx: &EvaluationContext) -> String 
         format!("{component_access}tree_index_of_first_child + {item_index_in_tree} - 1")
     };
 
-    format!("{}, {}", &component_rc, item_index)
+    format!("{component_rc}, {item_index}")
 }
 
 /// This module contains some data structure that helps represent a C++ code.
@@ -1693,7 +1692,7 @@ fn generate_item_tree(
                     "{{ {}, {} offsetof({}, {}) }}",
                     item.ty.cpp_vtable_getter,
                     compo_offset,
-                    &ident(&sub_component.name),
+                    ident(&sub_component.name),
                     field_name(&item.name),
                 ));
             }
@@ -1797,19 +1796,19 @@ fn generate_item_tree(
                 // weak (matches the Rust backend).
                 vec![
                     format!("auto self = reinterpret_cast<const {item_tree_class_name}*>(component.instance);"),
-                    format!("if (auto parent = self->parent.lock()) {{"),
+                    "if (auto parent = self->parent.lock()) {".to_string(),
                     // TODO: store popup index in ctx and set it here instead of 0?
-                    format!("    *result = {{ (*parent)->self_weak, 0 }};"),
-                    format!("}}"),
+                    "    *result = { (*parent)->self_weak, 0 };".to_string(),
+                    "}".to_string(),
                     ]
                 }, |idx| {
                 let current_sub_component = &root.sub_components[parent.sub_component];
                 let parent_index = current_sub_component.repeated[idx].index_in_tree;
                 vec![
                     format!("auto self = reinterpret_cast<const {item_tree_class_name}*>(component.instance);"),
-                    format!("if (auto parent = self->parent.lock()) {{"),
+                    "if (auto parent = self->parent.lock()) {".to_string(),
                     format!("    *result = {{ (*parent)->self_weak, (*parent)->tree_index_of_first_child + {} }};", parent_index - 1),
-                    format!("}}"),
+                    "}".to_string(),
                 ]
             })
         })
@@ -2155,8 +2154,8 @@ fn generate_item_tree(
         }),
     ));
 
-    let destructor = vec![format!(
-        "if (auto &window = globals->m_window) window->window_handle().unregister_item_tree(this, item_array());"
+    let destructor = vec![String::from(
+        "if (auto &window = globals->m_window) window->window_handle().unregister_item_tree(this, item_array());",
     )];
 
     target_struct.members.push((
@@ -2730,13 +2729,18 @@ fn generate_sub_component(
         if what == "Role" {
             accessible_role_cases.push(format!("    case {index}: return {e};"));
         } else if let Some(what) = what.strip_prefix("Action") {
-            let has_args = matches!(&*expr.borrow(), llr::Expression::CallBackCall { arguments, .. } if !arguments.is_empty());
-
-            accessibility_action_cases.push(if has_args {
-                let member = ident(&crate::generator::to_kebab_case(what));
-                format!("    case ({index} << 8) | uintptr_t(slint::cbindgen_private::AccessibilityAction::Tag::{what}): {{ auto arg_0 = action.{member}._0; return {e}; }}")
+            let label = format!(
+                "    case ({index} << 8) | uintptr_t(slint::cbindgen_private::AccessibilityAction::Tag::{what}):"
+            );
+            let arg_count = crate::generator::accessibility_action_argument_count(what);
+            accessibility_action_cases.push(if arg_count == 0 {
+                format!("{label} return {e};")
             } else {
-                format!("    case ({index} << 8) | uintptr_t(slint::cbindgen_private::AccessibilityAction::Tag::{what}): return {e};")
+                let member = ident(&crate::generator::to_kebab_case(what));
+                let args = (0..arg_count)
+                    .map(|i| format!("[[maybe_unused]] auto arg_{i} = action.{member}._{i}; "))
+                    .join("");
+                format!("{label} {{ {args}return {e}; }}")
             });
             supported_accessibility_actions
                 .entry(*index)
@@ -2996,8 +3000,10 @@ fn generate_flexbox_layout_item_info_decl(
              return info;"
         )
     } else {
+        // Equivalent of the Rust trait default `layout_item_info(o).into()`, whose
+        // props are FlexItemProps::default() (note flex_shrink defaults to 1, not 0).
         "auto base = layout_item_info(o, child_index); \
-         return { base.constraint, 0.0f, 0.0f, -1.0f, slint::cbindgen_private::FlexboxLayoutAlignSelf::Auto, 0 };"
+         return { base.constraint, { 0.0f, 1.0f, -1.0f, slint::cbindgen_private::FlexboxLayoutAlignSelf::Auto, 0 } };"
             .to_owned()
     };
 
@@ -3362,7 +3368,7 @@ fn generate_global(
         )
     }
 
-    for (i, _) in global.change_callbacks.iter() {
+    for i in global.change_callbacks.keys() {
         global_struct.members.push((
             Access::Private,
             Declaration::Var(Var {
@@ -3607,7 +3613,7 @@ fn generate_public_api_for_properties(
                 Access::Public,
                 Declaration::Function(Function {
                     name: accessor_names::cpp_accessor_name(name, AccessorKind::Getter),
-                    signature: format!("() const -> {}", &cpp_property_type),
+                    signature: format!("() const -> {cpp_property_type}"),
                     statements: Some(prop_getter),
                     ..Default::default()
                 }),
@@ -3623,7 +3629,7 @@ fn generate_public_api_for_properties(
                     Access::Public,
                     Declaration::Function(Function {
                         name: accessor_names::cpp_accessor_name(name, AccessorKind::Setter),
-                        signature: format!("(const {} &value) const -> void", &cpp_property_type),
+                        signature: format!("(const {cpp_property_type} &value) const -> void"),
                         statements: Some(prop_setter),
                         ..Default::default()
                     }),
@@ -3789,7 +3795,7 @@ fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> M
                     field(&global.callbacks[*callback_index].name)
                 }
                 llr::LocalMemberIndex::Function(function_index) => {
-                    ident(&format!("fn_{}", &global.functions[*function_index].name))
+                    ident(&format!("fn_{}", global.functions[*function_index].name))
                 }
                 _ => unreachable!(),
             };
@@ -4624,6 +4630,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
         Expression::WithFlexboxLayoutItemInfo {
             cells_h_variable,
             cells_v_variable,
+            flex_props_variable,
             repeater_indices_var_name,
             elements,
             repeated_cross_width,
@@ -4631,6 +4638,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
         } => generate_with_flexbox_layout_item_info(
             cells_h_variable,
             cells_v_variable,
+            flex_props_variable,
             repeater_indices_var_name.as_ref().map(SmolStr::as_str),
             elements.as_ref(),
             repeated_cross_width.as_deref(),
@@ -5704,8 +5712,12 @@ fn generate_with_layout_item_info(
 fn generate_with_flexbox_layout_item_info(
     cells_h_variable: &str,
     cells_v_variable: &str,
+    flex_props_variable: &str,
     repeated_indices_var_name: Option<&str>,
-    elements: &[Either<(llr::Expression, llr::Expression), llr::LayoutRepeatedElement>],
+    elements: &[Either<
+        (llr::Expression, llr::Expression, llr::Expression),
+        llr::LayoutRepeatedElement,
+    >],
     repeated_cross_width: Option<&llr::Expression>,
     sub_expression: &llr::Expression,
     ctx: &llr_EvaluationContext<CppGeneratorContext>,
@@ -5715,17 +5727,18 @@ fn generate_with_flexbox_layout_item_info(
     // so a height-for-width instance wraps to the real width like a static cell.
     let cross_width = repeated_cross_width.map(|w| compile_expression(w, ctx));
     let mut push_code =
-        "std::vector<slint::cbindgen_private::FlexboxLayoutItemInfo> cells_vector_h; std::vector<slint::cbindgen_private::FlexboxLayoutItemInfo> cells_vector_v;".to_owned();
+        "std::vector<slint::cbindgen_private::LayoutItemInfo> cells_vector_h; std::vector<slint::cbindgen_private::LayoutItemInfo> cells_vector_v; std::vector<slint::cbindgen_private::FlexItemProps> flex_props_vector;".to_owned();
     let mut repeater_idx = 0usize;
 
     for item in elements {
         match item {
-            Either::Left((value_h, value_v)) => {
+            Either::Left((value_h, value_v, value_flex)) => {
                 write!(
                     push_code,
-                    "cells_vector_h.push_back({{ {} }}); cells_vector_v.push_back({{ {} }});",
+                    "cells_vector_h.push_back({{ {} }}); cells_vector_v.push_back({{ {} }}); flex_props_vector.push_back({{ {} }});",
                     compile_expression(value_h, ctx),
-                    compile_expression(value_v, ctx)
+                    compile_expression(value_v, ctx),
+                    compile_expression(value_flex, ctx)
                 )
                 .unwrap();
             }
@@ -5754,22 +5767,28 @@ fn generate_with_flexbox_layout_item_info(
                 // (not-yet-instantiated rows get placeholders).
                 // For a column flex, measure each instance's vertical info at the
                 // container width; otherwise use its preferred-width default.
-                let v_push = match &cross_width {
+                let v_query = match &cross_width {
                     Some(w) => format!(
                         "sub_comp->flexbox_layout_item_info_at_cross_width(static_cast<float>({w}))"
                     ),
                     None => "sub_comp->flexbox_layout_item_info(slint::cbindgen_private::Orientation::Vertical, std::nullopt)".to_owned(),
                 };
+                // The instance vtable returns the bundled FlexboxLayoutItemInfo; split
+                // it into the constraint cell and the (axis-independent) flex props.
                 write!(
                     push_code,
                     "{{ \
                      auto start_offset = cells_vector_h.size(); \
                      self->repeater_{repeater_index}.for_each([&](const auto &sub_comp){{ \
-                     cells_vector_h.push_back(sub_comp->flexbox_layout_item_info(slint::cbindgen_private::Orientation::Horizontal, std::nullopt)); \
-                     cells_vector_v.push_back({v_push}); }}); \
+                     auto info_h = sub_comp->flexbox_layout_item_info(slint::cbindgen_private::Orientation::Horizontal, std::nullopt); \
+                     auto info_v = {v_query}; \
+                     flex_props_vector.push_back(info_h.props); \
+                     cells_vector_h.push_back({{ info_h.constraint }}); \
+                     cells_vector_v.push_back({{ info_v.constraint }}); }}); \
                      auto repeater_len = self->repeater_{repeater_index}.len(); \
                      cells_vector_h.resize(start_offset + repeater_len); \
-                     cells_vector_v.resize(start_offset + repeater_len); }}"
+                     cells_vector_v.resize(start_offset + repeater_len); \
+                     flex_props_vector.resize(start_offset + repeater_len); }}"
                 )
                 .unwrap();
             }
@@ -5785,10 +5804,11 @@ fn generate_with_flexbox_layout_item_info(
         format!("std::array<int, {}> {ri}_array;", 2 * repeater_idx)
     });
     format!(
-        "[&]{{ {ri} {push_code} [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::FlexboxLayoutItemInfo>{cells_h} = slint::private_api::make_slice(std::span(cells_vector_h)); [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::FlexboxLayoutItemInfo>{cells_v} = slint::private_api::make_slice(std::span(cells_vector_v)); return {}; }}()",
+        "[&]{{ {ri} {push_code} [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{cells_h} = slint::private_api::make_slice(std::span(cells_vector_h)); [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{cells_v} = slint::private_api::make_slice(std::span(cells_vector_v)); [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::FlexItemProps>{flex_props} = slint::private_api::make_slice(std::span(flex_props_vector)); return {}; }}()",
         compile_expression(sub_expression, ctx),
         cells_h = ident(cells_h_variable),
         cells_v = ident(cells_v_variable),
+        flex_props = ident(flex_props_variable),
     )
 }
 

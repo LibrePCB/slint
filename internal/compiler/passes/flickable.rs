@@ -15,7 +15,6 @@ use crate::langtype::{ElementType, NativeClass, Type};
 use crate::layout::is_layout;
 use crate::object_tree::{Component, Element, ElementRc};
 use crate::typeregister::TypeRegister;
-use core::cell::RefCell;
 use smol_str::{SmolStr, format_smolstr};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -67,16 +66,14 @@ fn create_content_element(flickable: &ElementRc, native_empty: &Arc<NativeClass>
                 Type::LogicalLength,
             );
             new_y.mark_as_set();
-            inner_elem.borrow_mut().bindings.insert(
+            inner_elem.borrow_mut().set_binding(
                 "y".into(),
-                RefCell::new(
-                    Expression::BinaryExpression {
-                        lhs: Expression::PropertyReference(new_y.clone()).into(),
-                        rhs: Expression::PropertyReference(listview.content_y.clone()).into(),
-                        op: '-',
-                    }
-                    .into(),
-                ),
+                Expression::BinaryExpression {
+                    lhs: Expression::PropertyReference(new_y.clone()).into(),
+                    rhs: Expression::PropertyReference(listview.content_y.clone()).into(),
+                    op: '-',
+                }
+                .into(),
             );
             inner_elem.borrow_mut().geometry_props.as_mut().unwrap().y = new_y;
         }
@@ -98,10 +95,9 @@ fn create_content_element(flickable: &ElementRc, native_empty: &Arc<NativeClass>
                 //don't bind content-y for ListView because the layout is handled by the runtime
                 continue;
             }
-            content.borrow_mut().bindings.insert(
+            content.borrow_mut().set_binding(
                 content_prop.into(),
-                BindingExpression::new_two_way(NamedReference::new(flickable, prop.clone()).into())
-                    .into(),
+                BindingExpression::new_two_way(NamedReference::new(flickable, prop.clone()).into()),
             );
         }
     }
@@ -121,10 +117,10 @@ fn create_content_element(flickable: &ElementRc, native_empty: &Arc<NativeClass>
         .is_set_externally = true;
 
     let enclosing_component = flickable.borrow().enclosing_component.upgrade().unwrap();
-    if let Some(insertion_point) = &mut *enclosing_component.child_insertion_point.borrow_mut()
-        && std::rc::Rc::ptr_eq(&insertion_point.parent, flickable)
-    {
-        insertion_point.parent = content.clone()
+    for insertion_point in enclosing_component.child_insertion_points.borrow_mut().values_mut() {
+        if std::rc::Rc::ptr_eq(&insertion_point.parent, flickable) {
+            insertion_point.parent = content.clone()
+        }
     }
 
     flickable.borrow_mut().children.push(content);
@@ -213,8 +209,12 @@ fn set_binding_if_not_explicit(
     expression: impl FnOnce() -> Option<Expression>,
 ) {
     // we can't use `set_binding_if_not_set` directly because `expression()` may borrow `elem`
-    // (`has_binding` treats a synthetic debug hook as "no binding")
-    if elem.borrow().bindings.get(property).is_none_or(|b| !b.borrow().has_binding())
+    //
+    // Be careful to check both that a binding exists and that the BindingExpression actually has a
+    // binding by using is_binding_set instead of binding().is_none().
+    // Otherwise an animation on the property would prevent setting the binding, even if the binding
+    // is not set, but just animated.
+    if !elem.borrow().is_binding_set(property, false)
         && let Some(e) = expression()
     {
         elem.borrow_mut().set_binding_if_not_set(property.into(), || e);

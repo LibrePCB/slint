@@ -67,6 +67,8 @@ fn create_repeater_components(component: &Rc<Component>) {
                 item_index_of_first_children: Default::default(),
                 is_legacy_syntax: original_elem.is_legacy_syntax,
                 inline_depth: 0,
+                slot_target: original_elem.slot_target.clone(),
+                forwarded_slots: original_elem.forwarded_slots.clone(),
                 grid_layout_cell: original_elem.grid_layout_cell.clone(),
             })),
             parent_element: RefCell::new(Weak::clone(&original_elem_as_weak)),
@@ -82,13 +84,12 @@ fn create_repeater_components(component: &Rc<Component>) {
                 repeated_component
                     .root_element
                     .borrow_mut()
-                    .bindings
-                    .insert("height".into(), RefCell::new(preferred.into()));
+                    .set_binding("height".into(), preferred.into());
             }
             if !repeated_component.root_element.borrow().is_binding_set("width", false) {
-                repeated_component.root_element.borrow_mut().bindings.insert(
+                repeated_component.root_element.borrow_mut().set_binding(
                     "width".into(),
-                    RefCell::new(Expression::PropertyReference(listview.listview_width).into()),
+                    Expression::PropertyReference(listview.listview_width).into(),
                 );
             }
         }

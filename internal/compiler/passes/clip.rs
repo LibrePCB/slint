@@ -4,7 +4,6 @@
 //! Pass that lowers synthetic `clip` properties to Clip element
 
 use smol_str::{SmolStr, format_smolstr};
-use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -30,7 +29,7 @@ pub fn handle_clip(
             if elem.native_class().is_some_and(|n| Arc::ptr_eq(&n, &native_clip)) {
                 return;
             }
-            if elem.bindings.contains_key("clip")
+            if elem.binding("clip").is_some()
                 || elem
                     .property_analysis
                     .borrow()
@@ -46,7 +45,7 @@ pub fn handle_clip(
                     _ => {
                         diag.push_error(
                             "The 'clip' property can only be applied to a Rectangle or a Path for now".into(),
-                            &elem.bindings.get("clip").and_then(|x| x.borrow().span.clone()).unwrap_or_else(|| elem.to_source_location()),
+                            &elem.binding("clip").and_then(|binding| binding.span.clone()).unwrap_or_else(|| elem.to_source_location()),
                         );
                         return;
                     }
@@ -70,21 +69,16 @@ fn create_clip_element(parent_elem: &ElementRc, native_clip: &Arc<NativeClass>) 
 
     parent.children.push(clip.clone());
     drop(parent); // NamedReference::new will borrow() the parent, so we can't hold a mutable ref
-    clip.borrow_mut().bindings = ["width", "height"]
-        .iter()
-        .map(|prop| {
-            (
+    for prop in ["width", "height"] {
+        clip.borrow_mut().set_binding(
+            SmolStr::new_static(prop),
+            Expression::PropertyReference(NamedReference::new(
+                parent_elem,
                 SmolStr::new_static(prop),
-                RefCell::new(
-                    Expression::PropertyReference(NamedReference::new(
-                        parent_elem,
-                        SmolStr::new_static(prop),
-                    ))
-                    .into(),
-                ),
-            )
-        })
-        .collect();
+            ))
+            .into(),
+        );
+    }
 
     copy_optional_binding(parent_elem, "border-width", &clip);
     if super::border_radius::BORDER_RADIUS_PROPERTIES
@@ -96,24 +90,21 @@ fn create_clip_element(parent_elem: &ElementRc, native_clip: &Arc<NativeClass>) 
         }
     } else if parent_elem.borrow().binding("border-radius").is_some() {
         for prop in super::border_radius::BORDER_RADIUS_PROPERTIES.iter() {
-            clip.borrow_mut().bindings.insert(
+            clip.borrow_mut().set_binding(
                 SmolStr::new(prop),
-                RefCell::new(
-                    Expression::PropertyReference(NamedReference::new(
-                        parent_elem,
-                        SmolStr::new_static("border-radius"),
-                    ))
-                    .into(),
-                ),
+                Expression::PropertyReference(NamedReference::new(
+                    parent_elem,
+                    SmolStr::new_static("border-radius"),
+                ))
+                .into(),
             );
         }
     }
-    clip.borrow_mut().bindings.insert(
+    clip.borrow_mut().set_binding(
         SmolStr::new_static("clip"),
         BindingExpression::new_two_way(
             NamedReference::new(parent_elem, SmolStr::new_static("clip")).into(),
-        )
-        .into(),
+        ),
     );
 }
 
@@ -123,15 +114,13 @@ fn copy_optional_binding(
     clip: &ElementRc,
 ) {
     if parent_elem.borrow().binding(optional_binding).is_some() {
-        clip.borrow_mut().bindings.insert(
+        clip.borrow_mut().set_binding(
             optional_binding.into(),
-            RefCell::new(
-                Expression::PropertyReference(NamedReference::new(
-                    parent_elem,
-                    SmolStr::new_static(optional_binding),
-                ))
-                .into(),
-            ),
+            Expression::PropertyReference(NamedReference::new(
+                parent_elem,
+                SmolStr::new_static(optional_binding),
+            ))
+            .into(),
         );
     }
 }

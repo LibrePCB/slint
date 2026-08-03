@@ -624,10 +624,10 @@ fn find_binding<R>(
     let mut element = element.clone();
     let mut depth = 0;
     loop {
-        if let Some(b) = element.borrow().bindings.get(name)
-            && b.borrow().has_binding()
+        if let Some(b) = element.borrow().binding(name)
+            && b.has_binding()
         {
-            return Some(f(&b.borrow(), &element.borrow().enclosing_component, depth));
+            return Some(f(&b, &element.borrow().enclosing_component, depth));
         }
         let e = match &element.borrow().base_type {
             ElementType::Component(base) => base.root_element.clone(),
@@ -656,7 +656,7 @@ fn init_fake_property(
     lazy_default: impl Fn() -> Option<NamedReference>,
 ) {
     if grid_layout_element.borrow().property_declarations.contains_key(name)
-        && !grid_layout_element.borrow().bindings.contains_key(name)
+        && grid_layout_element.borrow().binding(name).is_none()
         && let Some(e) = lazy_default()
     {
         if e.name() == name && Rc::ptr_eq(&e.element(), grid_layout_element) {
@@ -665,8 +665,7 @@ fn init_fake_property(
         }
         grid_layout_element
             .borrow_mut()
-            .bindings
-            .insert(name.into(), RefCell::new(Expression::PropertyReference(e).into()));
+            .set_binding(name.into(), Expression::PropertyReference(e).into());
     }
 }
 
@@ -778,8 +777,8 @@ impl FlexboxLayout {
         }?;
         let target = nr.element();
         let target = target.borrow();
-        let binding = target.bindings.get(nr.name())?;
-        match binding.borrow().expression.ignore_debug_hooks() {
+        let binding = target.binding(nr.name())?;
+        match binding.value_expression() {
             Expression::ComputeFlexboxLayoutInfo { layout, .. } => Some(layout.clone()),
             _ => None,
         }
@@ -790,10 +789,9 @@ impl FlexboxLayout {
     fn compile_time_direction(&self) -> Option<FlexboxLayoutDirection> {
         match self.direction.as_ref() {
             None => Some(FlexboxLayoutDirection::Row),
-            Some(nr) => nr.element().borrow().bindings.get(nr.name()).and_then(|binding| {
-                let binding = binding.borrow();
+            Some(nr) => nr.element().borrow().binding(nr.name()).and_then(|binding| {
                 if let crate::expression_tree::Expression::EnumerationValue(ev) =
-                    binding.expression.ignore_debug_hooks()
+                    binding.value_expression()
                 {
                     match ev.enumeration.values[ev.value].as_str() {
                         "row" => Some(FlexboxLayoutDirection::Row),

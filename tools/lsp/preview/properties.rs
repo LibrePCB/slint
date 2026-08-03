@@ -290,7 +290,7 @@ fn find_property_binding_offset(
 
     let element = element.element.borrow();
 
-    if let Some(v) = element.bindings.get(property_name)
+    if let Some(v) = element.binding_cell_including_synthetic(property_name)
         && let Some(span) = &v.borrow().span
     {
         let offset = span.span().offset as u32;
@@ -826,7 +826,7 @@ fn element_at_source_code_position(
         util::text_size_to_lsp_position(&source_file, position.offset(), document_cache.format);
 
     Ok(document_cache.element_at_position(position.url(), &element_position).ok_or_else(|| {
-        format!("No element found at the given start position {:?}", &element_position)
+        format!("No element found at the given start position {element_position:?}")
     })?)
 }
 

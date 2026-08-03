@@ -8,7 +8,7 @@
 use crate::Config;
 use anyhow::Context;
 use std::collections::HashMap;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::Path;
 
 /// Canonical location of the specification chapters, relative to the
@@ -75,7 +75,7 @@ const SAFETY_DOCS_EXCLUDE: &[&str] = &["generated", "language"];
 /// [`Config::qualification_plan_dir`], the section it belongs to.
 const MATRIX_FILE: &str = "traceability-matrix.mdx";
 
-const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
+pub(crate) const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
 struct SpecPage {
     /// Repository-relative path with `/` separators, for error messages.
@@ -331,7 +331,7 @@ fn scan_spec_pages(dir: &Path) -> Result<Vec<SpecPage>, Box<dyn std::error::Erro
         // The index page is served at the root of the specification.
         page.top_level = stem == "index";
         page.base =
-            if page.top_level { format!("/language/") } else { format!("/language/{stem}/") };
+            if page.top_level { "/language/".to_string() } else { format!("/language/{stem}/") };
         if !page.draft {
             pages.push(page);
         }
@@ -479,8 +479,14 @@ fn informative(id: &str) -> bool {
     id.split('.').any(|s| s == "meta" || s == "example")
 }
 
+/// `Generated from commit ...` page header line, linking the commit on
+/// GitHub with a shortened sha as the text.
+pub(crate) fn commit_line(sha: &str) -> String {
+    format!("Generated from commit [`{}`]({REPO_URL}/tree/{sha}).", &sha[..sha.len().min(10)])
+}
+
 /// The commit to link test files to on GitHub.
-fn git_head(repo_root: &Path) -> String {
+pub(crate) fn git_head(repo_root: &Path) -> String {
     std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(repo_root)
@@ -501,11 +507,7 @@ fn write_matrix(
     tests_by_id: &HashMap<&str, Vec<&TestRef>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sha = git_head(repo_root);
-    let dir = cfg.qualification_plan_dir();
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(MATRIX_FILE);
-    let mut file =
-        BufWriter::new(std::fs::File::create(&path).context(format!("error creating {path:?}"))?);
+    let mut file = cfg.qualification_page(MATRIX_FILE)?;
 
     let all = || spec_pages.iter().chain(reference_pages).chain(safety_pages);
     let total = all().flat_map(|p| &p.anchors).filter(|(id, _)| !informative(id)).count();

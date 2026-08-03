@@ -1481,12 +1481,13 @@ fn generate_sub_component(
         if what == "Role" {
             accessible_role_branch.push(quote!(#index => #e,));
         } else if let Some(what) = what.strip_prefix("Action") {
+            let arg_count = crate::generator::accessibility_action_argument_count(what);
             let what = ident(what);
-            let has_args = matches!(&*expr.borrow(), Expression::CallBackCall { arguments, .. } if !arguments.is_empty());
-            accessibility_action_branch.push(if has_args {
-                quote!((#index, sp::AccessibilityAction::#what(args)) => { let args = (args,); #e })
-            } else {
+            accessibility_action_branch.push(if arg_count == 0 {
                 quote!((#index, sp::AccessibilityAction::#what) => { #e })
+            } else {
+                let arg = (0..arg_count).map(|i| format_ident!("arg_{i}")).collect::<Vec<_>>();
+                quote!((#index, sp::AccessibilityAction::#what(#(#arg),*)) => { #[allow(unused_variables)] let args = (#(#arg,)*); #e })
             });
             supported_accessibility_actions.entry(*index).or_default().insert(what);
         } else {
@@ -3276,8 +3277,7 @@ fn access_item_rc(pr: &llr::MemberReference, ctx: &EvaluationContext) -> TokenSt
     let llr::MemberReference::Relative { parent_level, local_reference } = pr else {
         unreachable!()
     };
-    let llr::LocalMemberIndex::Native { item_index, prop_name: _, .. } = &local_reference.reference
-    else {
+    let llr::LocalMemberIndex::Native { item_index, .. } = &local_reference.reference else {
         unreachable!()
     };
 
@@ -3530,6 +3530,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         Expression::WithFlexboxLayoutItemInfo {
             cells_h_variable,
             cells_v_variable,
+            flex_props_variable,
             repeater_indices_var_name,
             elements,
             repeated_cross_width,
@@ -3537,6 +3538,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         } => generate_with_flexbox_layout_item_info(
             cells_h_variable,
             cells_v_variable,
+            flex_props_variable,
             repeater_indices_var_name.as_ref().map(SmolStr::as_str),
             elements.as_ref(),
             repeated_cross_width.as_deref(),
@@ -3962,6 +3964,7 @@ fn compile_struct(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
                         BS::LayoutInfo
                             | BS::LayoutItemInfo
                             | BS::FlexboxLayoutItemInfo
+                            | BS::FlexItemProps
                             | BS::Padding
                             | BS::PropertyAnimation
                             | BS::StateInfo
@@ -5410,8 +5413,9 @@ fn generate_with_layout_item_info(
 fn generate_with_flexbox_layout_item_info(
     cells_h_variable: &str,
     cells_v_variable: &str,
+    flex_props_variable: &str,
     repeated_indices_var_name: Option<&str>,
-    elements: &[Either<(Expression, Expression), llr::LayoutRepeatedElement>],
+    elements: &[Either<(Expression, Expression, Expression), llr::LayoutRepeatedElement>],
     repeated_cross_width: Option<&Expression>,
     sub_expression: &Expression,
     ctx: &EvaluationContext,
@@ -5427,13 +5431,15 @@ fn generate_with_flexbox_layout_item_info(
 
     for item in elements {
         match item {
-            Either::Left((value_h, value_v)) => {
+            Either::Left((value_h, value_v, value_flex)) => {
                 let value_h = compile_expression(value_h, ctx);
                 let value_v = compile_expression(value_v, ctx);
+                let value_flex = compile_expression(value_flex, ctx);
                 fixed_count += 1;
                 push_code.push(quote!(
                     items_vec_h.push(#value_h);
                     items_vec_v.push(#value_v);
+                    items_vec_flex.push(#value_flex);
                 ))
             }
             Either::Right(repeater) => {
@@ -5449,7 +5455,7 @@ fn generate_with_flexbox_layout_item_info(
                 let repeater_id = format_ident!("repeater{}", usize::from(repeater.repeater_index));
                 // For a column flex, measure each instance's vertical info at the
                 // container width; otherwise use its preferred-width default.
-                let v_push = if let Some(w) = &cross_width {
+                let v_query = if let Some(w) = &cross_width {
                     quote!(sub_comp.as_pin_ref().flexbox_layout_item_info_at_cross_width((#w) as f32))
                 } else {
                     quote!(
@@ -5458,17 +5464,21 @@ fn generate_with_flexbox_layout_item_info(
                             .flexbox_layout_item_info(sp::Orientation::Vertical, None)
                     )
                 };
+                // The instance vtable returns the bundled `FlexboxLayoutItemInfo`;
+                // split it into the constraint cell and the flex props.
                 let loop_code = quote!(for i in 0.._self.#repeater_id.len() {
                     if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
-                        items_vec_h.push(
-                            sub_comp.as_pin_ref().flexbox_layout_item_info(sp::Orientation::Horizontal, None),
-                        );
-                        items_vec_v.push(#v_push);
+                        let info_h = sub_comp.as_pin_ref().flexbox_layout_item_info(sp::Orientation::Horizontal, None);
+                        let info_v = #v_query;
+                        items_vec_flex.push(info_h.props);
+                        items_vec_h.push(sp::LayoutItemInfo { constraint: info_h.constraint });
+                        items_vec_v.push(sp::LayoutItemInfo { constraint: info_v.constraint });
                     } else {
                         // Not-yet-instantiated slot: push placeholder cells so the cell
                         // count stays in sync with the repeater length written above.
                         items_vec_h.push(::core::default::Default::default());
                         items_vec_v.push(::core::default::Default::default());
+                        items_vec_flex.push(::core::default::Default::default());
                     }
                 });
                 push_code.push(quote!(
@@ -5489,15 +5499,18 @@ fn generate_with_flexbox_layout_item_info(
         repeated_indices_var_name.map(|ri| quote!(let #ri = sp::Slice::from_slice(&#ri);));
     let cells_h_variable = ident(cells_h_variable);
     let cells_v_variable = ident(cells_v_variable);
+    let flex_props_variable = ident(flex_props_variable);
     let sub_expression = compile_expression(sub_expression, ctx);
 
     quote! { {
         #ri_init_code
         let mut items_vec_h = sp::Vec::with_capacity(#fixed_count #repeated_count_code);
         let mut items_vec_v = sp::Vec::with_capacity(#fixed_count #repeated_count_code);
+        let mut items_vec_flex = sp::Vec::with_capacity(#fixed_count #repeated_count_code);
         #(#push_code)*
         let #cells_h_variable = sp::Slice::from_slice(&items_vec_h);
         let #cells_v_variable = sp::Slice::from_slice(&items_vec_v);
+        let #flex_props_variable = sp::Slice::from_slice(&items_vec_flex);
         #ri_from_slice
         #sub_expression
     } }

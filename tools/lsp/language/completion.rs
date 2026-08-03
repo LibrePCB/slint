@@ -712,7 +712,11 @@ fn resolve_element_scope(
         ) -> (bool, bool, Vec<SmolStr>) {
             match element_type {
                 ElementType::Component(component) => {
-                    let base_type = match &*component.child_insertion_point.borrow() {
+                    let base_type = match component
+                        .child_insertion_points
+                        .borrow()
+                        .get(i_slint_compiler::object_tree::DEFAULT_SLOT_NAME)
+                    {
                         Some(insert_in) => insert_in.parent.borrow().base_type.clone(),
                         None => {
                             let base_type = component.root_element.borrow().base_type.clone();
@@ -1535,11 +1539,8 @@ mod tests {
 
     fn assert_completion_found(expected: &CompletionItem, results: &[CompletionItem]) {
         let Some(found) = results.iter().find(|actual| actual.label == expected.label) else {
-            let labels = results
-                .iter()
-                .map(|ci| format!("\t'{}'", &ci.label))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let labels =
+                results.iter().map(|ci| format!("\t'{}'", ci.label)).collect::<Vec<_>>().join("\n");
             panic!("missing completion for {}\nLabels:\n{labels}", expected.label,);
         };
 

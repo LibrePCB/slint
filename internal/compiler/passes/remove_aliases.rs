@@ -8,7 +8,7 @@ use crate::expression_tree::{BindingExpression, Expression, NamedReference, TwoW
 use crate::langtype::Type;
 use crate::object_tree::*;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, btree_map::Entry};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 // The property in the key is to be removed, and replaced by the property in the value
@@ -74,7 +74,7 @@ pub fn remove_aliases(doc: &Document, diag: &mut BuildDiagnostics) {
     let mut property_sets = PropertySets::default();
 
     let mut process_element = |e: &ElementRc| {
-        'bindings: for (name, binding) in &e.borrow().bindings {
+        'bindings: for (name, binding) in e.borrow().real_bindings() {
             for twb in &binding.borrow().two_way_bindings {
                 if let TwoWayBinding::Property { property, field_access } = twb {
                     if !field_access.is_empty() {
@@ -120,12 +120,9 @@ pub fn remove_aliases(doc: &Document, diag: &mut BuildDiagnostics) {
                 let elem = nr.element();
                 let elem = elem.borrow();
                 elem.enclosing_component.upgrade().is_some_and(|c| c.is_global())
-                    && elem.bindings.get(nr.name()).is_some_and(|b| {
-                        !matches!(
-                            super::ignore_debug_hooks(&b.borrow().expression),
-                            Expression::Invalid
-                        )
-                    })
+                    && elem
+                        .binding(nr.name())
+                        .is_some_and(|b| !matches!(b.value_expression(), Expression::Invalid))
             })
             .cloned()
             .collect();
@@ -133,10 +130,10 @@ pub fn remove_aliases(doc: &Document, diag: &mut BuildDiagnostics) {
             for nr in &implementers {
                 let elem = nr.element();
                 let elem = elem.borrow();
-                if let Some(b) = elem.bindings.get(nr.name()) {
+                if let Some(b) = elem.binding(nr.name()) {
                     diag.push_error(
                         format!("Callback '{}' is implemented in more than one global", nr.name()),
-                        &*b.borrow(),
+                        &*b,
                     );
                 }
             }
@@ -158,9 +155,8 @@ pub fn remove_aliases(doc: &Document, diag: &mut BuildDiagnostics) {
                     let elem = elem.borrow();
                     let carries_local_state = elem.change_callbacks.contains_key(x.name())
                         || elem
-                            .bindings
-                            .get(x.name())
-                            .is_some_and(|b| b.borrow().animation.is_some());
+                            .binding(x.name())
+                            .is_some_and(|binding| binding.animation.is_some());
                     if best_is_global
                         && !elem.enclosing_component.upgrade().unwrap().is_global()
                         && carries_local_state
@@ -193,16 +189,15 @@ pub fn remove_aliases(doc: &Document, diag: &mut BuildDiagnostics) {
         let to_elem = to.element();
 
         // adjust the bindings
-        let old_binding = elem.borrow_mut().bindings.remove(remove.name());
-        let mut old_binding = old_binding.map(RefCell::into_inner).unwrap_or_else(|| {
+        let old_binding = elem.borrow_mut().take_binding(remove.name());
+        let mut old_binding = old_binding.unwrap_or_else(|| {
             // ensure that we set an expression, because the right hand side of a binding always wins,
-            // and if that was not set, we must still kee the default then
+            // and if that was not set, we must still keep the default then
             let mut b = BindingExpression::from(Expression::default_value_for_type(&to.ty()));
             b.priority = to_elem
-                .borrow_mut()
-                .bindings
-                .get(to.name())
-                .map_or(i32::MAX, |x| x.borrow().priority.saturating_add(1));
+                .borrow()
+                .binding(to.name())
+                .map_or(i32::MAX, |to_binding| to_binding.priority.saturating_add(1));
             b
         });
 
@@ -217,9 +212,12 @@ pub fn remove_aliases(doc: &Document, diag: &mut BuildDiagnostics) {
         let both_global =
             elem.borrow().enclosing_component.upgrade().is_some_and(|c| c.is_global())
                 && to_elem.borrow().enclosing_component.upgrade().is_some_and(|c| c.is_global());
-        match to_elem.borrow_mut().bindings.entry(to.name().clone()) {
-            Entry::Occupied(mut e) => {
-                let b = e.get_mut().get_mut();
+        {
+            let mut to_elem = to_elem.borrow_mut();
+            // use if let else here instead of match so that to_elem is no longer borrowed
+            // in the else path.
+            if let Some(mut b) = to_elem.binding_mut(to.name()) {
+                let b = &mut *b;
                 remove_from_binding_expression(b, &to);
                 if !same_component || b.priority < old_binding.priority || !b.has_binding() {
                     b.merge_with(&old_binding);
@@ -227,13 +225,12 @@ pub fn remove_aliases(doc: &Document, diag: &mut BuildDiagnostics) {
                     old_binding.merge_with(b);
                     *b = old_binding;
                 }
-            }
-            Entry::Vacant(e) => {
+            } else {
                 if (same_component || both_global) && old_binding.has_binding() {
-                    e.insert(old_binding.into());
+                    to_elem.set_binding(to.name().clone(), old_binding);
                 }
             }
-        };
+        }
 
         // Adjust the change callbacks
         {
@@ -281,9 +278,9 @@ pub fn remove_aliases(doc: &Document, diag: &mut BuildDiagnostics) {
                 }
             } else {
                 // This is not a declaration, we must re-create the binding
-                elem.bindings.insert(
+                elem.set_binding(
                     remove.name().clone(),
-                    BindingExpression::new_two_way(to.clone().into()).into(),
+                    BindingExpression::new_two_way(to.clone().into()),
                 );
                 drop(elem);
                 if remove.is_externally_modified() {

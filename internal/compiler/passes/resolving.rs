@@ -2183,6 +2183,16 @@ fn lookup_qualified_name_node(
     let global_lookup = crate::lookup::global_lookup();
     let result = match global_lookup.lookup(ctx, &first_str) {
         None => {
+            if let Some(slot_element) =
+                resolve_slot_reference_element(first_str.as_str(), ctx, &node)
+            {
+                return continue_lookup_within_element(&slot_element, &mut it, node, ctx);
+            }
+            if first_str == "children" || is_declared_slot_in_scope(first_str.as_str(), ctx) {
+                // resolve_slot_reference_element() already emitted a slot-specific diagnostic.
+                return None;
+            }
+
             if let Some(minus_pos) = first.text().find('-') {
                 // Attempt to recover if the user wanted to write "-" for minus
                 let first_str = &first.text()[0..minus_pos];
@@ -2246,6 +2256,63 @@ fn lookup_qualified_name_node(
         }
         result => maybe_lookup_object(result, it, ctx),
     }
+}
+
+fn resolve_slot_reference_element(
+    name: &str,
+    ctx: &mut LookupCtx,
+    node: &dyn Spanned,
+) -> Option<ElementRc> {
+    if name == "children" {
+        ctx.diag.push_error(
+            "The default slot '@children' cannot be referenced in expressions".into(),
+            node,
+        );
+        return None;
+    }
+
+    for scope_elem in ctx.component_scope.iter().rev() {
+        let scope_elem_ref = scope_elem.borrow();
+        let repeated = scope_elem_ref.repeated.is_some();
+        let mut matches = scope_elem_ref.children.iter().filter(|child| {
+            child.borrow().slot_target.as_ref().is_some_and(|slot| slot.as_str() == name)
+        });
+        if let Some(found) = matches.next() {
+            if matches.next().is_some() {
+                ctx.diag.push_error(format!("Duplicate assignment to slot '{name}'"), node);
+                return None;
+            }
+
+            if repeated {
+                ctx.diag.push_error(
+                    format!(
+                        "Slot '{name}' cannot be referenced inside repeated or conditional elements"
+                    ),
+                    node,
+                );
+                return None;
+            }
+
+            return Some(found.clone());
+        }
+    }
+
+    if is_declared_slot_in_scope(name, ctx) {
+        ctx.diag.push_error(format!("Slot '{name}' is not assigned in this instance"), node);
+        return None;
+    }
+
+    None
+}
+
+fn is_declared_slot_in_scope(name: &str, ctx: &LookupCtx) -> bool {
+    ctx.component_scope.iter().rev().any(|scope_elem| {
+        let scope_elem_ref = scope_elem.borrow();
+        let ElementType::Component(component) = &scope_elem_ref.base_type else {
+            return false;
+        };
+        component.declared_slots.borrow().iter().any(|slot| slot.name == name)
+    })
 }
 
 fn continue_lookup_within_element(
@@ -2507,13 +2574,13 @@ fn resolve_two_way_bindings_for_element(
     // borrow on `elem` that blocks `borrow_mut`.
     let mut to_infer: Vec<(SmolStr, Type)> = Vec::new();
 
-    for (prop_name, binding) in &elem.borrow().bindings {
+    for (prop_name, binding) in elem.borrow().real_bindings() {
         let mut binding = binding.borrow_mut();
         // The alias node is normally the binding's own (uncompiled) expression. But a
         // global callback may both alias another global's callback and provide a handler:
         // the handler then occupies the expression slot and the alias node lives on the
         // callback declaration, in which case the handler expression must be preserved.
-        let twb_from_expression = match binding.expression.ignore_debug_hooks() {
+        let twb_from_expression = match binding.value_expression() {
             Expression::Uncompiled(node) => syntax_nodes::TwoWayBinding::new(node.clone()),
             _ => None,
         };
@@ -2626,7 +2693,7 @@ fn resolve_two_way_bindings_for_element(
                             if lookup_ctx.is_legacy_component() {
                                 diag.push_warning(
                                     format!(
-                                        "Link to a {} property is deprecated",
+                                        "Link to an '{}' property is deprecated",
                                         rhs_lookup.property_visibility
                                     ),
                                     &node,
@@ -2634,7 +2701,7 @@ fn resolve_two_way_bindings_for_element(
                             } else {
                                 diag.push_error(
                                     format!(
-                                        "Cannot link to a {} property",
+                                        "Cannot link to an '{}' property",
                                         rhs_lookup.property_visibility
                                     ),
                                     &node,
@@ -2649,12 +2716,18 @@ fn resolve_two_way_bindings_for_element(
                         if lookup_ctx.is_legacy_component() {
                             debug_assert!(!diag.is_empty()); // warning should already be reported
                         } else {
-                            diag.push_error("Cannot link input property".into(), &node);
+                            diag.push_error(
+                                format!("Cannot link '{}' property", PropertyVisibility::Input),
+                                &node,
+                            );
                         }
                     } else if rhs_lookup.property_visibility == PropertyVisibility::InOut {
                         diag.push_warning(
-                            "Linking input properties to input output properties is deprecated"
-                                .into(),
+                            format!(
+                                "Linking '{}' properties to '{}' properties is deprecated",
+                                PropertyVisibility::Input,
+                                PropertyVisibility::InOut
+                            ),
                             &node,
                         );
                         marked_linked_read_only(&nr.element(), nr.name());
@@ -2826,7 +2899,7 @@ fn check_callback_alias_validity(
         }
         return;
     };
-    let Some(b) = elem_borrow.bindings.get(name) else { return };
+    let Some(b) = elem_borrow.binding_cell_including_synthetic(name) else { return };
     // `try_borrow` because we might be called for the current binding
     let Some(alias) = b
         .try_borrow()

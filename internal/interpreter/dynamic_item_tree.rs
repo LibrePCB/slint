@@ -227,11 +227,12 @@ impl RepeatedItemTree for ErasedItemTreeBox {
 
         let flex_grow = load_f32("flex-grow");
         let flex_shrink = load_f32("flex-shrink");
-        let flex_basis = if root_element.borrow().bindings.contains_key("flex-basis") {
-            load_f32("flex-basis")
-        } else {
-            -1.0
-        };
+        let flex_basis =
+            if root_element.borrow().binding_cell_including_synthetic("flex-basis").is_some() {
+                load_f32("flex-basis")
+            } else {
+                -1.0
+            };
         let flex_align_self = eval::load_property(instance_ref, root_element, "flex-align-self")
             .ok()
             .and_then(|v| v.try_into().ok())
@@ -240,11 +241,13 @@ impl RepeatedItemTree for ErasedItemTreeBox {
 
         i_slint_core::layout::FlexboxLayoutItemInfo {
             constraint: self.layout_item_info(o, child_index).constraint,
-            flex_grow,
-            flex_shrink,
-            flex_basis,
-            flex_align_self,
-            flex_order,
+            props: i_slint_core::layout::FlexItemProps {
+                flex_grow,
+                flex_shrink,
+                flex_basis,
+                flex_align_self,
+                flex_order,
+            },
         }
     }
 }
@@ -2570,6 +2573,10 @@ extern "C" fn accessibility_action(
         AccessibilityAction::SetValue(a) => {
             perform("accessible-action-set-value", &[Value::String(a.clone())])
         }
+        AccessibilityAction::SetSelection(anchor, focus) => perform(
+            "accessible-action-set-selection",
+            &[Value::Number(*anchor as f64), Value::Number(*focus as f64)],
+        ),
     };
 }
 

@@ -3,13 +3,12 @@
 
 //! Module containing interfaces related types and functions.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use itertools::Itertools;
-use smol_str::{SmolStr, ToSmolStr};
+use smol_str::SmolStr;
 
 use crate::diagnostics::BuildDiagnostics;
 use crate::expression_tree::{BindingExpression, Callable, Expression};
@@ -155,7 +154,7 @@ fn filter_conflicting_implement_statements(
             seen_interfaces.push(stmt.interface.clone());
 
             let mut valid = true;
-            for (prop_name, _) in stmt.interface.borrow().property_declarations.iter() {
+            for prop_name in stmt.interface.borrow().property_declarations.keys() {
                 if let Some(existing_interface) = seen_interface_api.get(prop_name) {
                     diagnostics.push_error(
                         format!(
@@ -309,7 +308,7 @@ fn validate_interface_member_implementation(
             source,
         });
     }
-    return Some(conflicts);
+    Some(conflicts)
 }
 
 pub(super) fn apply_child_implement_statements(
@@ -378,12 +377,11 @@ pub(super) fn apply_child_implement_statements(
                 Type::Function(func) => {
                     apply_uses_statement_function_binding(element, &child, name, func)
                 }
-                _ => element.borrow_mut().bindings.insert(
+                _ => element.borrow_mut().set_binding(
                     name.clone(),
                     BindingExpression::new_two_way(
                         NamedReference::new(&child, name.clone()).into(),
-                    )
-                    .into(),
+                    ),
                 ),
             };
             debug_assert!(
@@ -470,9 +468,8 @@ fn missing_type_description(interface_declaration: &PropertyDeclaration) -> Stri
 }
 
 fn syntax_for(interface_declaration: &PropertyDeclaration, name: &SmolStr) -> String {
-    let display_args = |arguments: &Vec<Type>| -> String {
-        arguments.iter().map(|t| t.to_string()).join(", ").into()
-    };
+    let display_args =
+        |arguments: &Vec<Type>| -> String { arguments.iter().map(|t| t.to_string()).join(", ") };
     let return_type = |return_type: &Type| -> String {
         if *return_type == Type::Void { String::new() } else { format!(" -> {return_type}") }
     };
@@ -588,7 +585,7 @@ fn apply_uses_statement_function_binding(
     child: &ElementRc,
     name: &SmolStr,
     function: &Arc<Function>,
-) -> Option<RefCell<BindingExpression>> {
+) -> Option<BindingExpression> {
     let args_expr: Vec<Expression> = function
         .args
         .iter()
@@ -603,5 +600,5 @@ fn apply_uses_statement_function_binding(
     };
 
     let body = Expression::CodeBlock(vec![call_expr]);
-    element.borrow_mut().bindings.insert(name.clone(), RefCell::new(BindingExpression::from(body)))
+    element.borrow_mut().set_binding(name.clone(), BindingExpression::from(body))
 }

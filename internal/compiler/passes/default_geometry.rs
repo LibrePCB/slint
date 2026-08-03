@@ -281,9 +281,9 @@ fn gen_layout_info_prop(
     }
 
     let expr_v = BindingExpression::new_with_span(expr_v, elem.borrow().to_source_location());
-    li_v.element().borrow_mut().bindings.insert(li_v.name().clone(), expr_v.into());
+    li_v.element().borrow_mut().set_binding(li_v.name().clone(), expr_v);
     let expr_h = BindingExpression::new_with_span(expr_h, elem.borrow().to_source_location());
-    li_h.element().borrow_mut().bindings.insert(li_h.name().clone(), expr_h.into());
+    li_h.element().borrow_mut().set_binding(li_h.name().clone(), expr_h);
 }
 
 fn merge_explicit_constraints(
@@ -322,10 +322,8 @@ fn merge_explicit_constraints(
             let e = nr
                 .element()
                 .borrow()
-                .bindings
-                .get(nr.name())
+                .binding(nr.name())
                 .expect("constraint must have binding")
-                .borrow()
                 .expression
                 .clone();
             debug_assert!(!matches!(e, Expression::Invalid));
@@ -582,11 +580,11 @@ fn adjust_image_clip_rect(elem: &ElementRc, builtin: &Rc<BuiltinElement>) {
     debug_assert_eq!(builtin.native_class.class_name, "ClippedImage");
 
     if builtin.native_class.properties.keys().any(|p| {
-        // Deliberately count synthetic debug hooks here (raw map access): they also count as
+        // Deliberately count synthetic debug hooks here (via binding_cell_including_synthetic): they also count as
         // "used" in resolve_native_classes, so the ClippedImage native class gets selected —
         // and a ClippedImage without the synthesized clip defaults renders/measures as a
         // zero-size clip. This condition must match the class-selection semantics.
-        elem.borrow().bindings.contains_key(p)
+        elem.borrow().binding_cell_including_synthetic(p).is_some()
             || elem.borrow().property_analysis.borrow().get(p).is_some_and(|a| a.is_used())
     }) {
         let source = NamedReference::new(elem, SmolStr::new_static("source"));
@@ -652,20 +650,20 @@ fn test_no_property_for_100pc() {
 
     // const propagation must have seen that the x and y property are literal 0
     assert!(matches!(
-        &root_elem.bindings.get("r2x").unwrap().borrow().expression,
+        root_elem.binding("r2x").unwrap().value_expression(),
         Expression::NumberLiteral(v, _) if *v == 0.
     ));
     assert!(matches!(
-        &root_elem.bindings.get("r2y").unwrap().borrow().expression,
+        root_elem.binding("r2y").unwrap().value_expression(),
         Expression::NumberLiteral(v, _) if *v == 0.
     ));
     assert!(matches!(
-        &root_elem.bindings.get("r3y").unwrap().borrow().expression,
+        root_elem.binding("r3y").unwrap().value_expression(),
         Expression::NumberLiteral(v, _) if *v == 0.
     ));
     // this one is 50% so it should be set to be in the center
     assert!(!matches!(
-        &root_elem.bindings.get("r3x").unwrap().borrow().expression,
+        root_elem.binding("r3x").unwrap().value_expression(),
         Expression::BinaryExpression { .. }
     ));
 }

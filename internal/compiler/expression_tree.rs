@@ -1830,12 +1830,17 @@ impl Expression {
                 } else if ctx.is_legacy_component()
                     && lookup.property_visibility == PropertyVisibility::Output
                 {
-                    ctx.diag
-                        .push_warning(format!("{what} on an output property is deprecated"), node);
+                    ctx.diag.push_warning(
+                        format!(
+                            "{what} on an '{}' property is deprecated",
+                            PropertyVisibility::Output
+                        ),
+                        node,
+                    );
                     true
                 } else {
                     ctx.diag.push_error(
-                        format!("{what} on an {} property", lookup.property_visibility),
+                        format!("{what} on an '{}' property", lookup.property_visibility),
                         node,
                     );
                     false
@@ -2074,6 +2079,27 @@ impl BindingExpression {
         (!matches!(self.expression, Expression::Invalid)
             && !self.expression.is_synthetic_debug_hook())
             || !self.two_way_bindings.is_empty()
+    }
+
+    /// The bound expression with any debug-hook wrapper removed.
+    /// Use before matching on the expression variant.
+    pub fn value_expression(&self) -> &Expression {
+        self.expression.ignore_debug_hooks()
+    }
+
+    /// Replace the bound value, leaving priority, animation and two-way bindings untouched.
+    ///
+    /// A synthetic debug hook is upgraded in place — its wrapper and id are kept and it becomes
+    /// real — so the property stays live-editable. Any other expression (including a real,
+    /// non-synthetic hook) is replaced wholesale.
+    pub fn set_value_expression(&mut self, expr: Expression) {
+        match &mut self.expression {
+            Expression::DebugHook { expression, synthetic, .. } if *synthetic => {
+                **expression = expr;
+                *synthetic = false;
+            }
+            expression => *expression = expr,
+        }
     }
 }
 

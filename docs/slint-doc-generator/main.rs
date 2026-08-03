@@ -3,10 +3,12 @@
 
 #![cfg(not(target_os = "android"))]
 
+mod coverage;
 mod element_docs;
 mod headless;
 mod mdx;
 mod screenshots;
+mod test_results;
 mod traceability;
 
 use clap::Parser;
@@ -24,6 +26,23 @@ struct Cli {
     /// attributes are stripped.
     #[arg(long, action)]
     slint_sc: bool,
+
+    /// Report the coverage from this `cargo llvm-cov report --json` export in
+    /// the safety manual's Test Coverage chapter. Without it the chapter is a
+    /// placeholder explaining how to build with coverage.
+    #[arg(long, value_name = "FILE")]
+    coverage_json: Option<PathBuf>,
+
+    /// Also ship this `cargo llvm-cov report --html` report with the manual
+    /// and link its per-line pages from the Test Coverage chapter.
+    #[arg(long, value_name = "DIR", requires = "coverage_json")]
+    coverage_html: Option<PathBuf>,
+
+    /// Report the test outcomes collected in this directory by
+    /// scripts/slint_sc_test_suite.sh in the safety manual's Test Results
+    /// chapter. Without it the chapter is a placeholder.
+    #[arg(long, value_name = "DIR")]
+    test_results: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -63,6 +82,16 @@ pub struct Config {
     /// `<CodeSnippetMD>`.
     pub skip_screenshots: bool,
     pub include_experimental: bool,
+    /// `cargo llvm-cov report --json` export to report in the safety manual's
+    /// Test Coverage chapter; without it the chapter is a placeholder.
+    pub coverage_json: Option<PathBuf>,
+    /// `cargo llvm-cov report --html` report to ship with the manual for
+    /// per-line detail.
+    pub coverage_html: Option<PathBuf>,
+    /// Test outcomes collected by scripts/slint_sc_test_suite.sh, for the
+    /// safety manual's Test Results chapter; without them the chapter is a
+    /// placeholder.
+    pub test_results: Option<PathBuf>,
 }
 
 /// Path of the generated content root, relative to the site's `src` directory.
@@ -79,6 +108,9 @@ impl Config {
             sc_only: false,
             skip_screenshots: false,
             include_experimental,
+            coverage_json: None,
+            coverage_html: None,
+            test_results: None,
         }
     }
     pub fn safety_manual(include_experimental: bool) -> Self {
@@ -89,6 +121,9 @@ impl Config {
             sc_only: true,
             skip_screenshots: true,
             include_experimental,
+            coverage_json: None,
+            coverage_html: None,
+            test_results: None,
         }
     }
 
@@ -100,6 +135,20 @@ impl Config {
     /// Generated pages of the qualification plan (safety manual only).
     pub fn qualification_plan_dir(&self) -> PathBuf {
         self.generated_dir.join("qualification-plan")
+    }
+
+    /// Create a page of the qualification plan, ready for writing.
+    pub fn qualification_page(
+        &self,
+        file_name: &str,
+    ) -> anyhow::Result<std::io::BufWriter<std::fs::File>> {
+        use anyhow::Context;
+        let dir = self.qualification_plan_dir();
+        std::fs::create_dir_all(&dir).with_context(|| format!("error creating {dir:?}"))?;
+        let path = dir.join(file_name);
+        Ok(std::io::BufWriter::new(
+            std::fs::File::create(&path).with_context(|| format!("error creating {path:?}"))?,
+        ))
     }
 }
 
@@ -118,11 +167,14 @@ fn build_astro(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
     let experimental = args.experimental;
-    let cfg = if args.slint_sc {
+    let mut cfg = if args.slint_sc {
         Config::safety_manual(experimental)
     } else {
         Config::slint_docs(experimental)
     };
+    cfg.coverage_json = args.coverage_json;
+    cfg.coverage_html = args.coverage_html;
+    cfg.test_results = args.test_results;
 
     match args.command {
         Some(Command::GenerateMdx) => {

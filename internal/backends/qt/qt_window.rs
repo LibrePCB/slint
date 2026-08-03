@@ -12,7 +12,7 @@ use i_slint_core::graphics::rendering_metrics_collector::{
 };
 use i_slint_core::graphics::{
     Brush, Color, ImageCacheKey, IntRect, Point, Rgba8Pixel, SharedImageBuffer, SharedPixelBuffer,
-    euclid,
+    adjust_rect_and_border_for_inner_drawing, euclid,
 };
 use i_slint_core::input::{InternalKeyEvent, KeyEvent, KeyEventType, MouseEvent, TouchPhase};
 use i_slint_core::item_rendering::{
@@ -823,16 +823,6 @@ macro_rules! check_geometry {
     }};
 }
 
-fn adjust_rect_and_border_for_inner_drawing(rect: &mut qttypes::QRectF, border_width: &mut f32) {
-    // If the border width exceeds the width, just fill the rectangle.
-    *border_width = border_width.min((rect.width as f32) / 2.);
-    // adjust the size so that the border is drawn within the geometry
-    rect.x += *border_width as f64 / 2.;
-    rect.y += *border_width as f64 / 2.;
-    rect.width -= *border_width as f64;
-    rect.height -= *border_width as f64;
-}
-
 struct QtItemRenderer<'a> {
     painter: QPainterPtr,
     cache: &'a ItemCache<qttypes::QPixmap>,
@@ -1126,18 +1116,17 @@ impl ItemRenderer for QtItemRenderer<'_> {
 
     fn combine_clip(
         &mut self,
-        rect: LogicalRect,
+        mut rect: LogicalRect,
         radius: LogicalBorderRadius,
-        border_width: LogicalLength,
+        mut border_width: LogicalLength,
     ) -> bool {
-        let mut border_width: f32 = border_width.get();
-        let mut clip_rect = qttypes::QRectF {
+        adjust_rect_and_border_for_inner_drawing(&mut rect, &mut border_width);
+        let clip_rect = qttypes::QRectF {
             x: rect.min_x() as _,
             y: rect.min_y() as _,
             width: rect.width() as _,
             height: rect.height() as _,
         };
-        adjust_rect_and_border_for_inner_drawing(&mut clip_rect, &mut border_width);
         let painter: &mut QPainterPtr = &mut self.painter;
         let top_left_radius = radius.top_left;
         let top_right_radius = radius.top_right;
@@ -1180,8 +1169,8 @@ impl ItemRenderer for QtItemRenderer<'_> {
         self.painter.restore()
     }
 
-    fn scale_factor(&self) -> f32 {
-        1.
+    fn scale_factor(&self) -> ScaleFactor {
+        ScaleFactor::new(1.)
         /* cpp! { unsafe [painter as "QPainterPtr*"] -> f32 as "float" {
             return (*painter)->paintEngine()->paintDevice()->devicePixelRatioF();
         }} */
@@ -1207,7 +1196,7 @@ impl ItemRenderer for QtItemRenderer<'_> {
             self,
             std::pin::pin!((SharedString::from(string), Brush::from(color))),
             None,
-            logical_size_from_api(self.window.size().to_logical(self.scale_factor())),
+            logical_size_from_api(self.window.size().to_logical(self.scale_factor().get())),
             None,
         );
     }
@@ -1217,7 +1206,7 @@ impl ItemRenderer for QtItemRenderer<'_> {
         if source_size.is_empty() {
             return;
         }
-        let scale_factor = ScaleFactor::new(self.scale_factor());
+        let scale_factor = self.scale_factor();
         let target_size = LogicalSize::from_untyped(source_size.cast()) * scale_factor;
         let image_inner: &ImageInner = (&image).into();
         // Rasterize scalable sources at scale_factor so SVGs are crisp on high-DPI displays
@@ -1710,7 +1699,7 @@ impl QtItemRenderer<'_> {
                     // Source size & clipping is not implemented yet
                     None
                 } else {
-                    let scale_factor = ScaleFactor::new(self.scale_factor());
+                    let scale_factor = self.scale_factor();
                     let actual_target_size = i_slint_core::graphics::fit(
                         image.image_fit(),
                         // Query target_width/height here again to ensure that changes will invalidate the item rendering cache.
@@ -1759,7 +1748,7 @@ impl QtItemRenderer<'_> {
         let image_size = pixmap.size();
         let source_rect = source_rect
             .unwrap_or_else(|| euclid::rect(0, 0, image_size.width as _, image_size.height as _));
-        let scale_factor = ScaleFactor::new(self.scale_factor());
+        let scale_factor = self.scale_factor();
 
         let fit = if let ImageInner::NineSlice(nine) = <&ImageInner>::from(&image.source()) {
             i_slint_core::graphics::fit9slice(

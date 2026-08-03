@@ -81,8 +81,7 @@ impl<'a> LocalFocusForwards<'a> {
         let mut forwards = HashMap::new();
 
         recurse_elem_no_borrow(&component.root_element, &(), &mut |elem, _| {
-            let Some(forward_focus_binding) =
-                elem.borrow_mut().bindings.remove("forward-focus").map(RefCell::into_inner)
+            let Some(forward_focus_binding) = elem.borrow_mut().take_binding("forward-focus")
             else {
                 return;
             };
@@ -235,10 +234,8 @@ impl<'a> LocalFocusForwards<'a> {
                             ..Default::default()
                         },
                     );
-                    elem.borrow_mut().bindings.insert(
-                        function.name().into(),
-                        RefCell::new(set_or_clear_focus_code.into()),
-                    );
+                    elem.borrow_mut()
+                        .set_binding(function.name().into(), set_or_clear_focus_code.into());
                 }
             }
         }
