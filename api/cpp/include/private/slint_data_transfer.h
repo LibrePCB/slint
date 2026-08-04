@@ -168,19 +168,20 @@ public:
 #if !defined(SLINT_FEATURE_FREESTANDING) || defined(DOXYGEN)
     /// Returns the list of local file paths transferred by this `DataTransfer`, or
     /// `std::nullopt` if no file paths are available.
-    std::optional<std::vector<std::filesystem::path>> file_paths() const
-    {
-        SharedVector<SharedVector<cbindgen_private::types::PathValueType>> out;
-        if (!cbindgen_private::types::slint_data_transfer_file_paths(this, &out)) {
-            return std::nullopt;
-        }
-        std::vector<std::filesystem::path> paths;
-        paths.reserve(out.size());
-        for (const auto &units : out) {
-            paths.emplace_back(std::basic_string_view(units.begin(), units.size()));
-        }
-        return paths;
-    }
+    // NOT COMPATIBLE WITH MACOS 10.14!
+    //std::optional<std::vector<std::filesystem::path>> file_paths() const
+    //{
+    //    SharedVector<SharedVector<cbindgen_private::types::PathValueType>> out;
+    //    if (!cbindgen_private::types::slint_data_transfer_file_paths(this, &out)) {
+    //        return std::nullopt;
+    //    }
+    //    std::vector<std::filesystem::path> paths;
+    //    paths.reserve(out.size());
+    //    for (const auto &units : out) {
+    //        paths.emplace_back(std::basic_string_view(units.begin(), units.size()));
+    //    }
+    //    return paths;
+    //}
 #endif
 
 #if !defined(SLINT_FEATURE_FREESTANDING) || defined(DOXYGEN)
