@@ -106,19 +106,20 @@ public:
 #if !defined(SLINT_FEATURE_FREESTANDING) || defined(DOXYGEN)
     /// Sets the list of local file paths transferred by this `DataTransfer`,
     /// overwriting any previously set list. An empty list clears the file paths.
-    void set_file_paths(std::span<const std::filesystem::path> paths)
-    {
-        // Each path crosses the FFI in its native representation, so that no
-        // path is mangled by an encoding conversion.
-        std::vector<cbindgen_private::Slice<cbindgen_private::types::PathValueType>> slices;
-        slices.reserve(paths.size());
-        for (const auto &path : paths) {
-            const auto &native = path.native();
-            slices.push_back(private_api::make_slice(native.data(), native.size()));
-        }
-        cbindgen_private::types::slint_data_transfer_set_file_paths(
-                this, private_api::make_slice(slices.data(), slices.size()));
-    }
+    // NOT COMPATIBLE WITH MACOS 10.14!
+    //void set_file_paths(std::span<const std::filesystem::path> paths)
+    //{
+    //    // Each path crosses the FFI in its native representation, so that no
+    //    // path is mangled by an encoding conversion.
+    //    std::vector<cbindgen_private::Slice<cbindgen_private::types::PathValueType>> slices;
+    //    slices.reserve(paths.size());
+    //    for (const auto &path : paths) {
+    //        const auto &native = path.native();
+    //        slices.push_back(private_api::make_slice(native.data(), native.size()));
+    //    }
+    //    cbindgen_private::types::slint_data_transfer_set_file_paths(
+    //            this, private_api::make_slice(slices.data(), slices.size()));
+    //}
 #endif
 
     /// Returns `true` if this data transfer advertises a plain text representation.

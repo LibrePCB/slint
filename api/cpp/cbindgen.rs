@@ -716,12 +716,11 @@ fn gen_corelib(
             namespace slint { struct DataTransfer; struct SharedString; }\n\
             namespace slint::cbindgen_private::types {\n\
             #ifndef SLINT_FEATURE_FREESTANDING\n\
-            using PathValueType = std::filesystem::path::value_type;\n\
             // The Rust side uses u16 path units on Windows and u8 elsewhere.\n\
             #    ifdef _WIN32\n\
-            static_assert(sizeof(PathValueType) == 2);\n\
+            using PathValueType = wchar_t;\n\
             #    else\n\
-            static_assert(sizeof(PathValueType) == 1);\n\
+            using PathValueType = char;\n\
             #    endif\n\
             #else\n\
             using PathValueType = uint8_t;\n\
