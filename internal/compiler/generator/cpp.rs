@@ -62,39 +62,48 @@ pub fn concatenate_ident(ident: &str) -> SmolStr {
     if ident.contains('-') { ident.replace_smolstr("-", "_") } else { ident.into() }
 }
 
-/// Given a property reference to a native item (eg, the property name is empty)
-/// return tokens to the `ItemRc`
-fn access_item_rc(pr: &llr::MemberReference, ctx: &EvaluationContext) -> String {
-    let mut component_access = "self->".into();
+/// The component instance that holds the native item `pr` refers to, as an expression ready to be
+/// followed by `->`.
+///
+/// This is an `std::optional` when the item lives in an ancestor component: that chain can die
+/// while a callback of a repeated element is still running — the enclosing popup closed itself, or
+/// the model dropped the row the element belongs to — and then nothing must be emitted at all.
+fn item_owner(pr: &llr::MemberReference) -> MemberAccess {
+    let llr::MemberReference::Relative { parent_level, .. } = pr else { unreachable!() };
+    parent_access_path(*parent_level).with_member("->".into())
+}
 
+/// Expressions for the native item `pr` is about, relative to the component instance holding it
+/// (see [`item_owner`]): the member `pr` designates — the item itself or one of its functions —
+/// and the arguments to build the item's `ItemRc` from.
+///
+/// Taking the owner as a parameter is what lets a caller that needs both get them out of a single
+/// walk of the parent chain.
+fn native_item_from_owner(
+    pr: &llr::MemberReference,
+    ctx: &EvaluationContext,
+    owner: &str,
+) -> (String, String) {
     let llr::MemberReference::Relative { parent_level, local_reference } = pr else {
         unreachable!()
     };
     let llr::LocalMemberIndex::Native { item_index, .. } = &local_reference.reference else {
         unreachable!()
     };
-
-    for _ in 0..*parent_level {
-        component_access = format!("{component_access}parent.lock().value()->");
-    }
-
-    let (sub_compo_path, sub_component) = follow_sub_component_path(
+    let (compo_path, sub_component) = follow_sub_component_path(
         ctx.compilation_unit,
         ctx.parent_sub_component_idx(*parent_level).unwrap(),
         &local_reference.sub_component_path,
     );
-    if !local_reference.sub_component_path.is_empty() {
-        component_access += &sub_compo_path;
-    }
-    let component_rc = format!("{component_access}self_weak.lock()->into_dyn()");
+    let compo = format!("{owner}{compo_path}");
+    let item_name = field_name(&sub_component.items[*item_index].name);
     let item_index_in_tree = sub_component.items[*item_index].index_in_tree;
     let item_index = if item_index_in_tree == 0 {
-        format!("{component_access}tree_index")
+        format!("{compo}tree_index")
     } else {
-        format!("{component_access}tree_index_of_first_child + {item_index_in_tree} - 1")
+        format!("{compo}tree_index_of_first_child + {item_index_in_tree} - 1")
     };
-
-    format!("{component_rc}, {item_index}")
+    (format!("{compo}{item_name}"), format!("{compo}self_weak.lock()->into_dyn(), {item_index}"))
 }
 
 /// This module contains some data structure that helps represent a C++ code.
@@ -424,12 +433,18 @@ pub mod cpp_ast {
     pub struct TypeAlias {
         pub new_name: SmolStr,
         pub old_name: SmolStr,
+        /// When set, the alias is marked `[[deprecated]]` with this message.
+        pub deprecated: Option<String>,
     }
 
     impl Display for TypeAlias {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
             indent(f)?;
-            writeln!(f, "using {} = {};", self.new_name, self.old_name)
+            let deprecated = match &self.deprecated {
+                Some(message) => format!("[[deprecated(\"{}\")]] ", escape_string(message)),
+                None => String::new(),
+            };
+            writeln!(f, "using {} {deprecated}= {};", self.new_name, self.old_name)
         }
     }
 
@@ -915,7 +930,11 @@ pub fn generate(
         };
 
         file.definitions.extend(glob.aliases.iter().map(|name| {
-            Declaration::TypeAlias(TypeAlias { old_name: ident(&glob.name), new_name: ident(name) })
+            Declaration::TypeAlias(TypeAlias {
+                old_name: ident(&glob.name),
+                new_name: ident(name),
+                deprecated: None,
+            })
         }));
 
         clone_constructor_global_inits.push(format!("{name}(source.{name})"));
@@ -1016,7 +1035,7 @@ pub fn generate(
         generate_public_component(&mut file, &conditional_includes, p, &llr);
     }
 
-    generate_type_aliases(&mut file, doc);
+    generate_type_aliases(&mut file, &llr);
 
     if conditional_includes.iostream.get() {
         file.includes.push("<iostream>".into());
@@ -1108,6 +1127,11 @@ fn embed_resource(
 ) {
     match &resource.kind {
         crate::embedded_resources::EmbeddedResourcesKind::ListOnly => {}
+        // Only the slint-sc generator produces these resources.
+        #[cfg(feature = "slint-sc")]
+        crate::embedded_resources::EmbeddedResourcesKind::StaticPixels { .. } => {
+            unreachable!("slint-sc resources in the C++ generator")
+        }
         crate::embedded_resources::EmbeddedResourcesKind::FileData => {
             let resource_file = crate::fileaccess::load_file(std::path::Path::new(
                 resource.path.as_deref().unwrap(),
@@ -1643,9 +1667,14 @@ fn generate_item_tree(
 
     let mut item_tree_array: Vec<String> = Default::default();
     let mut item_array: Vec<String> = Default::default();
+    let mut z_sorted_nodes: Vec<(usize, &llr::TreeNode)> = Vec::new();
 
     sub_tree.tree.visit_in_array(&mut |node, children_offset, parent_index| {
         let parent_index = parent_index as u32;
+
+        if node.z_sort_order_property.is_some() {
+            z_sorted_nodes.push((item_tree_array.len(), node));
+        }
 
         match node.item_index {
             Either::Right(mut repeater_index) => {
@@ -1700,7 +1729,7 @@ fn generate_item_tree(
     });
 
     let mut visit_children_statements = vec![
-        "static const auto dyn_visit = [] (const void *base,  [[maybe_unused]] slint::private_api::TraversalOrder order, [[maybe_unused]] slint::private_api::ItemVisitorRefMut visitor, [[maybe_unused]] uint32_t dyn_index) -> uint64_t {".to_owned(),
+        "static const auto dyn_visit = [] (const void *base,  [[maybe_unused]] slint::private_api::TraversalOrder order, [[maybe_unused]] slint::private_api::ItemVisitorRefMut visitor, [[maybe_unused]] uint32_t dyn_index, [[maybe_unused]] uint32_t instance) -> uint64_t {".to_owned(),
         format!("    [[maybe_unused]] auto self = reinterpret_cast<const {}*>(base);", item_tree_class_name)];
     let mut subtree_range_statement = vec!["    std::abort();".into()];
     let mut subtree_component_statement = vec!["    std::abort();".into()];
@@ -1708,8 +1737,10 @@ fn generate_item_tree(
     if target_struct.members.iter().any(|(_, declaration)| {
         matches!(&declaration, Declaration::Function(func @ Function { .. }) if func.name == "visit_dynamic_children")
     }) {
-        visit_children_statements
-            .push("    return self->visit_dynamic_children(dyn_index, order, visitor);".into());
+        visit_children_statements.push(
+            "    return self->visit_dynamic_children(dyn_index, order, visitor, instance);"
+                .into(),
+        );
         subtree_range_statement = vec![
                 format!("auto self = reinterpret_cast<const {}*>(component.instance);", item_tree_class_name),
                 "return self->subtree_range(dyn_index);".to_owned(),
@@ -1724,9 +1755,87 @@ fn generate_item_tree(
 
     visit_children_statements.extend([
         "};".into(),
-        format!("auto self_rc = reinterpret_cast<const {item_tree_class_name}*>(component.instance)->self_weak.lock()->into_dyn();"),
-        "return slint::cbindgen_private::slint_visit_item_tree(&self_rc, get_item_tree(component) , index, order, visitor, dyn_visit);".to_owned(),
+        format!("auto self = reinterpret_cast<const {item_tree_class_name}*>(component.instance);"),
+        "auto self_rc = self->self_weak.lock()->into_dyn();".into(),
     ]);
+
+    if !z_sorted_nodes.is_empty() {
+        let ctx = EvaluationContext::new_sub_component(
+            root,
+            sub_tree.root,
+            CppGeneratorContext { global_access: "self->globals".into(), conditional_includes },
+            parent_ctx,
+        );
+        visit_children_statements.push("switch (index) {".into());
+        for (node_idx, node) in &z_sorted_nodes {
+            let sources = node.z_sort_order_property.as_ref().unwrap();
+            let compile_z = |e: &llr::MutExpression| {
+                format!("float({})", compile_expression(&e.borrow(), &ctx))
+            };
+            visit_children_statements.push(format!("case {node_idx}: {{"));
+            if sources.iter().any(|s| matches!(s, llr::ZSource::RepeaterInstances)) {
+                // Repeated children are expanded to one entry per instance, so the
+                // number of entries is only known at runtime
+                visit_children_statements
+                    .push("    std::vector<slint::cbindgen_private::ZSortedChild> sorted;".into());
+                for (k, (source, child)) in sources.iter().zip(&node.children).enumerate() {
+                    match source {
+                        llr::ZSource::Expression(e) => {
+                            let e = compile_z(e);
+                            visit_children_statements.push(format!(
+                                "    sorted.push_back({{ {e}, {k}, std::numeric_limits<uint32_t>::max() }});"
+                            ));
+                        }
+                        llr::ZSource::RepeaterInstances => {
+                            let Either::Right(repeater_index) = child.item_index else {
+                                unreachable!("per-instance z is only set on repeated children")
+                            };
+                            let (compo_path, _) = follow_sub_component_path(
+                                root,
+                                sub_tree.root,
+                                &child.sub_component_path,
+                            );
+                            visit_children_statements.push(format!(
+                                "    self->{compo_path}repeater_{repeater_index}.for_each_instance_z([&](uint32_t instance, float z) {{ sorted.push_back({{ z, {k}, instance }}); }});"
+                            ));
+                        }
+                    }
+                }
+                visit_children_statements.push(
+                    "    slint::cbindgen_private::slint_sort_z_entries(sorted.data(), sorted.size());".into(),
+                );
+                visit_children_statements.push(
+                    "    return slint::cbindgen_private::slint_visit_item_tree_with_sorted_children(&self_rc, get_item_tree(component), index, order, visitor, dyn_visit, slint::cbindgen_private::Slice<slint::cbindgen_private::ZSortedChild>{sorted.data(), sorted.size()});".into(),
+                );
+            } else {
+                let count = sources.len();
+                let entries: Vec<String> = sources
+                    .iter()
+                    .map(|source| {
+                        let llr::ZSource::Expression(e) = source else { unreachable!() };
+                        compile_z(e)
+                    })
+                    .enumerate()
+                    .map(|(k, e)| format!("{{ {e}, {k}, std::numeric_limits<uint32_t>::max() }}"))
+                    .collect();
+                let entries = entries.join(", ");
+                visit_children_statements.push(format!(
+                    "    slint::cbindgen_private::ZSortedChild sorted[{count}] = {{{entries}}};"
+                ));
+                visit_children_statements.push(format!(
+                    "    slint::cbindgen_private::slint_sort_z_entries(sorted, {count});"
+                ));
+                visit_children_statements.push(format!(
+                    "    return slint::cbindgen_private::slint_visit_item_tree_with_sorted_children(&self_rc, get_item_tree(component), index, order, visitor, dyn_visit, slint::cbindgen_private::Slice<slint::cbindgen_private::ZSortedChild>{{sorted, {count}}});"
+                ));
+            }
+            visit_children_statements.push("}".into());
+        }
+        visit_children_statements.push("}".into());
+    }
+    visit_children_statements.push(
+        "return slint::cbindgen_private::slint_visit_item_tree(&self_rc, get_item_tree(component), index, order, visitor, dyn_visit);".into(),
+    );
 
     target_struct.members.push((
         Access::Private,
@@ -2388,7 +2497,7 @@ fn generate_sub_component(
 
             children_visitor_cases.push(format!(
                 "\n        {case_code} {{
-                        return self->{sub_field}.visit_dynamic_children(dyn_index - {repeater_offset}, order, visitor);
+                        return self->{sub_field}.visit_dynamic_children(dyn_index - {repeater_offset}, order, visitor, instance);
                     }}",
             ));
             subtrees_ranges_cases.push(format!(
@@ -2517,7 +2626,7 @@ fn generate_sub_component(
             children_visitor_cases.push(format!(
                 "\n        case {idx}: {{
                 self->{repeater_id}.track_changes_listview({content_w}, {content_h}, &{content_y}, {lv_w}.get(), &{lv_h});
-                return self->{repeater_id}.visit(order, visitor);
+                return self->{repeater_id}.visit_maybe_instance(instance, order, visitor);
             }}",
             ));
             ensure_instantiated_stmts.push(format!(
@@ -2526,7 +2635,7 @@ fn generate_sub_component(
         } else {
             children_visitor_cases.push(format!(
                 "\n        case {idx}: {{
-                return self->{repeater_id}.visit(order, visitor);
+                return self->{repeater_id}.visit_maybe_instance(instance, order, visitor);
             }}",
             ));
             ensure_instantiated_stmts
@@ -2826,7 +2935,7 @@ fn generate_sub_component(
             field_access,
             Declaration::Function(Function {
                 name: "visit_dynamic_children".into(),
-                signature: "(uint32_t dyn_index, [[maybe_unused]] slint::private_api::TraversalOrder order, [[maybe_unused]] slint::private_api::ItemVisitorRefMut visitor) const -> uint64_t".into(),
+                signature: "(uint32_t dyn_index, [[maybe_unused]] slint::private_api::TraversalOrder order, [[maybe_unused]] slint::private_api::ItemVisitorRefMut visitor, [[maybe_unused]] uint32_t instance) const -> uint64_t".into(),
                 statements: Some(vec![
                     "    auto self = this;".to_owned(),
                     format!("    switch(dyn_index) {{ {} }};", children_visitor_cases.join("")),
@@ -2877,13 +2986,35 @@ fn generate_layout_item_info_decl(
         || (root_sc.grid_layout_children.is_empty()
             && !llr::has_inner_repeaters(&root_sc.row_child_templates))
     {
+        // The cell's `cross-axis-self-alignment` in a box layout, returned for
+        // the cross axis only, so the main-axis cache stays independent of it.
+        // The aggregate init otherwise leaves the field value-initialized (`Auto`).
+        let statement = match &root_sc.cross_axis_self_alignment_for_repeated {
+            Some((cross_o, expr)) => {
+                let align_self = compile_expression(&expr.borrow(), ctx);
+                let cross_o = match cross_o {
+                    crate::layout::Orientation::Horizontal => "Horizontal",
+                    crate::layout::Orientation::Vertical => "Vertical",
+                };
+                format!(
+                    "[[maybe_unused]] auto self = this; \
+                     return {{ layout_info({{&static_vtable, const_cast<void *>(static_cast<const void *>(this))}}, o), \
+                     (o == slint::cbindgen_private::Orientation::{cross_o}) ? ({align_self}) : slint::cbindgen_private::CrossAxisSelfAlignment::Auto }};"
+                )
+            }
+            None => "return { layout_info({&static_vtable, const_cast<void *>(static_cast<const void *>(this))}, o), {} };".to_owned(),
+        };
         return Declaration::Function(Function {
             name: "layout_item_info".into(),
             signature: SIGNATURE.to_owned(),
-            statements: Some(vec!["return { layout_info({&static_vtable, const_cast<void *>(static_cast<const void *>(this))}, o) };".into()]),
+            statements: Some(vec![statement]),
             ..Function::default()
         });
     }
+
+    // Row templates only exist for repeated grid Rows, which cannot carry
+    // cross-axis-self-alignment; the scan below hardcodes `{}` for the field.
+    debug_assert!(root_sc.cross_axis_self_alignment_for_repeated.is_none());
 
     let templates = root_sc.row_child_templates.as_ref().unwrap();
     let n = templates.len();
@@ -2908,7 +3039,7 @@ fn generate_layout_item_info_decl(
                 write!(
                     body,
                     "if (count == index) {{\n\
-                         return {{ (o == slint::cbindgen_private::Orientation::Horizontal) ? ({layout_info_h_code}) : ({layout_info_v_code}) }};\n\
+                         return {{ (o == slint::cbindgen_private::Orientation::Horizontal) ? ({layout_info_h_code}) : ({layout_info_v_code}), {{}} }};\n\
                      }}\n\
                      {advance}",
                 )
@@ -2926,7 +3057,7 @@ fn generate_layout_item_info_decl(
                      if (index >= count && index - count < inner_len) {{\n\
                          if (auto vrc = {inner_rep_id}.instance_at(index - count).lock()) {{\n\
                              auto vref = vrc->borrow();\n\
-                             return {{ vref.vtable->layout_info(vref, o) }};\n\
+                             return {{ vref.vtable->layout_info(vref, o), {{}} }};\n\
                          }}\n\
                      }}\n\
                      {advance}}}\n",
@@ -2938,9 +3069,9 @@ fn generate_layout_item_info_decl(
     body.push_str(
         // Phantom cell: return "unconstrained" info (matches Rust's LayoutInfo::default()).
         // field order: max, max_percent, min, min_percent, preferred, stretch
-        "return { slint::cbindgen_private::LayoutInfo{ std::numeric_limits<float>::max(), 100.f, 0, 0, 0, 0 } };\n\
+        "return { slint::cbindgen_private::LayoutInfo{ std::numeric_limits<float>::max(), 100.f, 0, 0, 0, 0 }, {} };\n\
          }\n\
-         return { layout_info({&static_vtable, const_cast<void *>(static_cast<const void *>(this))}, o) };",
+         return { layout_info({&static_vtable, const_cast<void *>(static_cast<const void *>(this))}, o), {} };",
     );
     Declaration::Function(Function {
         name: "layout_item_info".into(),
@@ -3000,10 +3131,10 @@ fn generate_flexbox_layout_item_info_decl(
              return info;"
         )
     } else {
-        // Equivalent of the Rust trait default `layout_item_info(o).into()`, whose
-        // props are FlexItemProps::default() (note flex_shrink defaults to 1, not 0).
+        // Equivalent of the Rust trait default `layout_item_info(o).into()`,
+        // whose props are FlexItemProps::default().
         "auto base = layout_item_info(o, child_index); \
-         return { base.constraint, { 0.0f, 1.0f, -1.0f, slint::cbindgen_private::FlexboxLayoutAlignSelf::Auto, 0 } };"
+         return { base.constraint, { slint::cbindgen_private::CrossAxisSelfAlignment::Auto, 0 } };"
             .to_owned()
     };
 
@@ -3248,6 +3379,22 @@ fn generate_repeated_component(
             ..Function::default()
         }),
     ));
+
+    if let Some(dynamic_z) = &repeated.dynamic_z {
+        let z_value = access_member(dynamic_z, &ctx).map_or_default(|x| format!("{x}.get()"));
+        repeater_struct.members.push((
+            Access::Public, // Because Repeater detects and accesses it
+            Declaration::Function(Function {
+                name: "z_order".into(),
+                signature: "() const -> float".into(),
+                statements: Some(vec![
+                    "[[maybe_unused]] auto self = this;".into(),
+                    format!("return {z_value};"),
+                ]),
+                ..Function::default()
+            }),
+        ));
+    }
 
     if let Some(listview) = &repeated.listview {
         let p_y = access_member(&listview.prop_y, &ctx).unwrap();
@@ -3906,15 +4053,24 @@ enum MemberAccess {
 impl MemberAccess {
     /// Used for code that is meant to return `()`
     fn then(&self, f: impl FnOnce(&str) -> String) -> String {
+        self.then_named("x", f)
+    }
+
+    /// Like [`Self::then`], but names the binding the member is spliced from, so that this access
+    /// can be nested inside another one without shadowing it.
+    fn then_named(&self, binding: &str, f: impl FnOnce(&str) -> String) -> String {
         match self {
             MemberAccess::Direct(t) => f(t),
             MemberAccess::Option(t) => {
-                format!("slint::private_api::optional_then({t}, [&](auto&&x) {{ {}; }})", f("x"))
+                format!(
+                    "slint::private_api::optional_then({t}, [&](auto&&{binding}) {{ {}; }})",
+                    f(binding)
+                )
             }
             MemberAccess::OptionWithMember(t, m) => {
                 format!(
-                    "slint::private_api::optional_then({t}, [&](auto&&x) {{ {}; }})",
-                    f(&format!("x{}", m))
+                    "slint::private_api::optional_then({t}, [&](auto&&{binding}) {{ {}; }})",
+                    f(&format!("{binding}{m}"))
                 )
             }
         }
@@ -4097,8 +4253,6 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             }
         }
         Expression::ItemMemberFunctionCall { function } => {
-            let item = access_member(function, ctx);
-            let item_rc = access_item_rc(function, ctx);
             let window = access_window_field(ctx);
             let (native, name) = native_prop_info(function, ctx);
             let function_name = format!(
@@ -4106,14 +4260,14 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                 native.class_name.to_lowercase(),
                 ident(name).to_lowercase()
             );
+            let call = |owner: &str| {
+                let (item, item_rc) = native_item_from_owner(function, ctx, owner);
+                format!("{function_name}(&{item}, &{window}.handle(), &{item_rc})")
+            };
             if expr.ty(ctx) == Type::Void {
-                item.then(|item| {
-                    format!("{function_name}(&{item}, &{window}.handle(), &{item_rc})")
-                })
+                item_owner(function).then(call)
             } else {
-                item.map_or_default(|item| {
-                    format!("{function_name}(&{item}, &{window}.handle(), &{item_rc})")
-                })
+                item_owner(function).map_or_default(call)
             }
         }
         Expression::ExtraBuiltinFunctionCall { function, arguments, return_ty: _ } => {
@@ -4638,156 +4792,27 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
         } => generate_with_flexbox_layout_item_info(
             cells_h_variable,
             cells_v_variable,
-            flex_props_variable,
+            flex_props_variable.as_deref(),
             repeater_indices_var_name.as_ref().map(SmolStr::as_str),
             elements.as_ref(),
             repeated_cross_width.as_deref(),
             sub_expression,
             ctx,
         ),
-        Expression::SolveFlexboxLayoutWithMeasure {
-            data,
-            repeater_indices,
-            measure_cells,
-            default_cells,
-            cells_variables,
-        } => {
+        Expression::SolveFlexboxLayoutWithMeasure { data, repeater_indices, measure_cells } => {
             let data = compile_expression(data, ctx);
             let repeater_indices = compile_expression(repeater_indices, ctx);
-            // cbindgen does not expose `LayoutInfo::preferred_bounded()`, so
-            // inline it: preferred_bounded = max(min(preferred, max), min).
-            const BOUNDED: &str = "std::max(std::min(li.preferred, li.max), li.min)";
-            // Without a repeater the cell index is known at compile time, so switch
-            // on it (O(1) dispatch). With a repeater the count is only known at
-            // runtime: walk the elements, advancing `cursor` by 1 per static cell
-            // and by the repeater's instance count per repeater, until `index`'s
-            // range is found.
-            let (v_body, h_body) = if cells_variables.is_none() {
-                let mut v_cases = String::new();
-                let mut h_cases = String::new();
-                for (i, item) in measure_cells.iter().enumerate() {
-                    if let Either::Left((h_info, v_info)) = item {
-                        let v = compile_expression(v_info, ctx);
-                        let h = compile_expression(h_info, ctx);
-                        v_cases.push_str(&format!(
-                            "case {i}: {{ auto li = {v}; return {{ w, {BOUNDED} }}; }}\n"
-                        ));
-                        h_cases.push_str(&format!(
-                            "case {i}: {{ auto li = {h}; return {{ {BOUNDED}, h }}; }}\n"
-                        ));
-                    }
-                }
-                (
-                    format!("switch (index) {{\n{v_cases}default: break;\n}}\n"),
-                    format!("switch (index) {{\n{h_cases}default: break;\n}}\n"),
-                )
-            } else {
-                let mut v_steps = String::new();
-                let mut h_steps = String::new();
-                for item in measure_cells {
-                    match item {
-                        Either::Left((h_info, v_info)) => {
-                            let v = compile_expression(v_info, ctx);
-                            let h = compile_expression(h_info, ctx);
-                            v_steps.push_str(&format!(
-                                "if (index == cursor) {{ auto li = {v}; return {{ w, {BOUNDED} }}; }}\n\
-                                 cursor += 1;\n"
-                            ));
-                            h_steps.push_str(&format!(
-                                "if (index == cursor) {{ auto li = {h}; return {{ {BOUNDED}, h }}; }}\n\
-                                 cursor += 1;\n"
-                            ));
-                        }
-                        Either::Right(repeater) => {
-                            let i = usize::from(repeater.repeater_index);
-                            v_steps.push_str(&format!(
-                                "{{ auto len = self->repeater_{i}.len(); \
-                                 if (index >= cursor && index < cursor + len) {{ \
-                                     if (auto *sub_comp = self->repeater_{i}.typed_instance_at(index - cursor)) {{ \
-                                         auto li = sub_comp->flexbox_layout_item_info_at_cross_width(w).constraint; \
-                                         return {{ w, {BOUNDED} }}; }} \
-                                     return {{ w, h }}; }} \
-                                 cursor += len; }}\n"
-                            ));
-                            h_steps.push_str(&format!(
-                                "{{ auto len = self->repeater_{i}.len(); \
-                                 if (index >= cursor && index < cursor + len) {{ \
-                                     if (auto *sub_comp = self->repeater_{i}.typed_instance_at(index - cursor)) {{ \
-                                         auto li = sub_comp->flexbox_layout_item_info_at_cross_height(h).constraint; \
-                                         return {{ {BOUNDED}, h }}; }} \
-                                     return {{ w, h }}; }} \
-                                 cursor += len; }}\n"
-                            ));
-                        }
-                    }
-                }
-                (
-                    format!("[[maybe_unused]] uintptr_t cursor = 0;\n{v_steps}"),
-                    format!("[[maybe_unused]] uintptr_t cursor = 0;\n{h_steps}"),
-                )
-            };
-            // Preferred size per cell, returned when taffy asks for a dimension
-            // without a known cross-axis size. With a repeater the cell count is
-            // only known at runtime, so read the flat cell arrays the enclosing
-            // `WithFlexboxLayoutItemInfo` built; otherwise inline the constants.
-            let (defaults_decl, default_w, default_h) = match cells_variables {
-                Some((cells_h, cells_v)) => {
-                    let (cells_h, cells_v) = (ident(cells_h), ident(cells_v));
-                    (
-                        String::new(),
-                        format!(
-                            "index < {cells_h}.len ? [&]{{ auto li = {cells_h}.ptr[index].constraint; return {BOUNDED}; }}() : 0.0f"
-                        ),
-                        format!(
-                            "index < {cells_v}.len ? [&]{{ auto li = {cells_v}.ptr[index].constraint; return {BOUNDED}; }}() : 0.0f"
-                        ),
-                    )
-                }
-                None => {
-                    let mut pref_w = String::new();
-                    let mut pref_h = String::new();
-                    for item in default_cells {
-                        if let Either::Left((h_info, v_info)) = item {
-                            let h = compile_expression(h_info, ctx);
-                            let v = compile_expression(v_info, ctx);
-                            pref_w.push_str(&format!(
-                                "[&]{{ auto li = {h}; return {BOUNDED}; }}(),\n"
-                            ));
-                            pref_h.push_str(&format!(
-                                "[&]{{ auto li = {v}; return {BOUNDED}; }}(),\n"
-                            ));
-                        }
-                    }
-                    (
-                        format!(
-                            "const float pref_w[] = {{ {pref_w} }};\n\
-                             const float pref_h[] = {{ {pref_h} }};\n\
-                             const size_t cell_count = sizeof(pref_w) / sizeof(float);\n"
-                        ),
-                        "index < cell_count ? pref_w[index] : 0.0f".to_owned(),
-                        "index < cell_count ? pref_h[index] : 0.0f".to_owned(),
-                    )
-                }
-            };
+            let lambda = generate_flexbox_measure_lambda(measure_cells, ctx);
             format!(
-                "slint::private_api::solve_flexbox_layout_with_measure({data}, {repeater_indices}, \
-                 [&](uintptr_t index, std::optional<float> known_w, std::optional<float> known_h) \
-                 -> std::pair<float, float> {{\n\
-                    {defaults_decl}\
-                    float w = known_w.value_or({default_w});\n\
-                    float h = known_h.value_or({default_h});\n\
-                    if (known_w.has_value() && !known_h.has_value()) {{\n\
-                        [[maybe_unused]] float measure_known_w = w;\n\
-                        {v_body}\
-                        return {{ w, h }};\n\
-                    }}\n\
-                    if (known_h.has_value() && !known_w.has_value()) {{\n\
-                        [[maybe_unused]] float measure_known_h = h;\n\
-                        {h_body}\
-                        return {{ w, h }};\n\
-                    }}\n\
-                    return {{ w, h }};\n\
-                 }})"
+                "slint::private_api::solve_flexbox_layout_with_measure({data}, {repeater_indices}, {lambda})"
+            )
+        }
+        Expression::FlexboxLayoutInfoCrossAxisWithMeasure { arguments, measure_cells } => {
+            let mut a = arguments.iter().map(|a| compile_expression(a, ctx));
+            let lambda = generate_flexbox_measure_lambda(measure_cells, ctx);
+            format!(
+                "slint::private_api::flexbox_layout_info_cross_axis_with_measure({}, {lambda})",
+                a.join(",")
             )
         }
         Expression::WithGridInputData {
@@ -4835,6 +4860,14 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                 ),
             }
         }
+        Expression::Closure { arg_name, expression } => {
+            let arg = ident(arg_name);
+            let expr = compile_expression(expression, ctx);
+
+            format!("[&](auto const &{arg}) -> bool {{ return {expr}; }}")
+        }
+        // Generated code has no debug hooks; use the wrapped expression.
+        Expression::DebugHook { expression, .. } => compile_expression(expression, ctx),
     }
 }
 
@@ -4958,8 +4991,10 @@ fn compile_builtin_function_call(
         BuiltinFunction::SetFocusItem => {
             if let [llr::Expression::PropertyReference(pr)] = arguments {
                 let window = access_window_field(ctx);
-                let focus_item = access_item_rc(pr, ctx);
-                format!("{window}.set_focus_item({focus_item}, true, slint::cbindgen_private::FocusReason::Programmatic);")
+                item_owner(pr).then(|owner| {
+                    let (_, focus_item) = native_item_from_owner(pr, ctx, owner);
+                    format!("{window}.set_focus_item({focus_item}, true, slint::cbindgen_private::FocusReason::Programmatic)")
+                })
             } else {
                 panic!("internal error: invalid args to SetFocusItem {arguments:?}")
             }
@@ -4967,8 +5002,10 @@ fn compile_builtin_function_call(
         BuiltinFunction::ClearFocusItem => {
             if let [llr::Expression::PropertyReference(pr)] = arguments {
                 let window = access_window_field(ctx);
-                let focus_item = access_item_rc(pr, ctx);
-                format!("{window}.set_focus_item({focus_item}, false, slint::cbindgen_private::FocusReason::Programmatic);")
+                item_owner(pr).then(|owner| {
+                    let (_, focus_item) = native_item_from_owner(pr, ctx, owner);
+                    format!("{window}.set_focus_item({focus_item}, false, slint::cbindgen_private::FocusReason::Programmatic)")
+                })
             } else {
                 panic!("internal error: invalid args to ClearFocusItem {arguments:?}")
             }
@@ -5008,6 +5045,11 @@ fn compile_builtin_function_call(
         }
         BuiltinFunction::StringEndsWith => {
             format!("{}.ends_with({})", a.next().unwrap(), a.next().unwrap())
+        }
+        BuiltinFunction::StringReplaceAll => {
+            format!("[](const auto &s, const auto &from, const auto &to){{ auto out = slint::SharedString(); slint::cbindgen_private::slint_shared_string_replace_all(&out, &s, slint::private_api::string_to_slice(from), slint::private_api::string_to_slice(to)); return out; }}({}, {}, {})",
+                a.next().unwrap(), a.next().unwrap(), a.next().unwrap(),
+            )
         }
         BuiltinFunction::KeysToString => {
             format!("{}.to_string()", a.next().unwrap())
@@ -5112,14 +5154,8 @@ fn compile_builtin_function_call(
             let access_entries = access_member(entries_r, ctx).unwrap();
             let access_sub_menu = access_member(sub_menu_r, ctx).unwrap();
             let access_activated = access_member(activated_r, ctx).unwrap();
-            if *no_native {
-                format!(r"{{
-                    auto item_tree = {item_tree_id}::create(self);
-                    auto item_tree_dyn = item_tree.into_dyn();
-                    auto menu_wrapper = slint::private_api::create_menu_wrapper(item_tree_dyn);
-                    slint::private_api::slint_windowrc_setup_menu_bar_shortcuts(&{window}.handle(), &menu_wrapper);
-                    slint::private_api::setup_popup_menu_from_menu_item_tree(menu_wrapper, {access_entries}, {access_sub_menu}, {access_activated});
-                }}")
+            let menu_wrapper = if *no_native {
+                "slint::private_api::create_menu_wrapper(item_tree_dyn)".into()
             } else {
                 let compile_prop = |prop_expr: &llr::Expression| {
                     let binding = compile_expression(prop_expr, ctx);
@@ -5129,22 +5165,17 @@ fn compile_builtin_function_call(
                                 return {binding};
                             }}")
                 };
-
                 let condition = compile_prop(condition);
                 let visible = compile_prop(visible);
+                format!("slint::private_api::create_menu_wrapper(item_tree_dyn, {condition}, {visible})")
+            };
 
-                format!(r"{{
+            format!(r"{{
                     auto item_tree = {item_tree_id}::create(self);
                     auto item_tree_dyn = item_tree.into_dyn();
-                    auto menu_wrapper = slint::private_api::create_menu_wrapper(item_tree_dyn, {condition}, {visible});
-                    slint::private_api::slint_windowrc_setup_menu_bar_shortcuts(&{window}.handle(), &menu_wrapper);
-                    if ({window}.supports_native_menu_bar()) {{
-                        slint::cbindgen_private::slint_windowrc_setup_native_menu_bar(&{window}.handle(), &menu_wrapper);
-                    }} else {{
-                        slint::private_api::setup_popup_menu_from_menu_item_tree(menu_wrapper, {access_entries}, {access_sub_menu}, {access_activated});
-                    }}
+                    auto menu_wrapper = {menu_wrapper};
+                    slint::private_api::setup_menu_bar_from_menu_item_tree(&{window}.handle(), {no_native}, menu_wrapper, {access_entries}, {access_sub_menu}, {access_activated});
                 }}")
-            }
         }
         BuiltinFunction::SetupSystemTrayIcon => {
             let [
@@ -5163,7 +5194,7 @@ fn compile_builtin_function_call(
                     .name,
             );
             let system_tray = access_member(system_tray_ref, ctx).unwrap();
-            let system_tray_rc = access_item_rc(system_tray_ref, ctx);
+            let (_, system_tray_rc) = native_item_from_owner(system_tray_ref, ctx, "self->");
 
             // `if cond : Menu { ... }` is lowered to a condition lambda passed
             // alongside the menu wrapper. `create_menu_wrapper` already accepts
@@ -5245,7 +5276,7 @@ fn compile_builtin_function_call(
                     ctx.parent_sub_component_idx(*parent_level).unwrap(),
                     &local_reference.sub_component_path,
                 );
-                let parent_component = access_item_rc(anchor_ref, ctx);
+
                 ctx.with_reference_scope(*parent_level, &local_reference.sub_component_path, |parent_ctx| {
                 let popup = &ctx.compilation_unit.sub_components[parent_ctx.sub_component]
                     .popup_windows[*popup_index as usize];
@@ -5284,7 +5315,9 @@ fn compile_builtin_function_call(
                     }
                     _ => "[](bool) {}".to_string(),
                 };
-                component_access.then(|component_access| {
+                item_owner(anchor_ref).then_named("anchor_owner", |owner| {
+                    let (_, parent_component) = native_item_from_owner(anchor_ref, ctx, owner);
+                    component_access.then(|component_access| {
                     let compo_ptr = if compo_path.is_empty() {
                         format!("&*({component_access})")
                     } else {
@@ -5301,6 +5334,7 @@ fn compile_builtin_function_call(
                                                                             {window_kind},  \
                                                                             {is_open_setter})"
                     )
+                    })
                 })
                 })
             } else {
@@ -5333,7 +5367,6 @@ fn compile_builtin_function_call(
             };
 
             let context_menu = access_member(context_menu_ref, ctx);
-            let context_menu_rc = access_item_rc(context_menu_ref, ctx);
             let position = compile_expression(position, ctx);
             let popup = ctx
                 .compilation_unit
@@ -5354,6 +5387,8 @@ fn compile_builtin_function_call(
             let access_activated = access_member(&popup.activated, &popup_ctx).unwrap();
             let access_close = access_member(&popup.close, &popup_ctx).unwrap();
 
+            item_owner(context_menu_ref).then_named("context_menu_owner", |owner| {
+            let (_, context_menu_rc) = native_item_from_owner(context_menu_ref, ctx, owner);
             let close_popup = context_menu.then(|context_menu| {
                 format!("{window}.close_popup({context_menu}.popup_id)")
             });
@@ -5409,15 +5444,15 @@ fn compile_builtin_function_call(
                     {set_id};
                 ", globals = ctx.generator_state.global_access)
             }
+            })
         }
         BuiltinFunction::SetSelectionOffsets => {
             if let [llr::Expression::PropertyReference(pr), from, to] = arguments {
-                let item = access_member(pr, ctx);
-                let item_rc = access_item_rc(pr, ctx);
                 let window = access_window_field(ctx);
                 let start = compile_expression(from, ctx);
                 let end = compile_expression(to, ctx);
-                item.then(|item| {
+                item_owner(pr).then(|owner| {
+                    let (item, item_rc) = native_item_from_owner(pr, ctx, owner);
                     format!("slint_textinput_set_selection_offsets(&{item}, &{window}.handle(), &{item_rc}, static_cast<int>({start}), static_cast<int>({end}))")
                 })
             } else {
@@ -5426,19 +5461,23 @@ fn compile_builtin_function_call(
         }
         BuiltinFunction::ItemFontMetrics => {
             if let [llr::Expression::PropertyReference(pr)] = arguments {
-                let item_rc = access_item_rc(pr, ctx);
                 let window = access_window_field(ctx);
-                format!(
-                    "[&]{{ slint::cbindgen_private::FontMetrics fm; slint_cpp_text_item_fontmetrics(&{window}.handle(), &{item_rc}, &fm); return fm; }}()"
-                )
+                item_owner(pr).map_or_default(|owner| {
+                    let (_, item_rc) = native_item_from_owner(pr, ctx, owner);
+                    format!(
+                        "[&]{{ slint::cbindgen_private::FontMetrics fm; slint_cpp_text_item_fontmetrics(&{window}.handle(), &{item_rc}, &fm); return fm; }}()"
+                    )
+                })
             } else {
                 panic!("internal error: invalid args to ItemFontMetrics {arguments:?}")
             }
         }
         BuiltinFunction::ItemAbsolutePosition => {
             if let [llr::Expression::PropertyReference(pr)] = arguments {
-                let item_rc = access_item_rc(pr, ctx);
-                format!("slint::LogicalPosition(slint::cbindgen_private::slint_item_absolute_position(&{item_rc}))")
+                item_owner(pr).map_or_default(|owner| {
+                    let (_, item_rc) = native_item_from_owner(pr, ctx, owner);
+                    format!("slint::LogicalPosition(slint::cbindgen_private::slint_item_absolute_position(&{item_rc}))")
+                })
             } else {
                 panic!("internal error: invalid args to ItemAbsolutePosition {arguments:?}")
             }
@@ -5476,16 +5515,17 @@ fn compile_builtin_function_call(
         BuiltinFunction::ImplicitLayoutInfo(orient) => {
             if let [llr::Expression::PropertyReference(pr), constraint_expr] = arguments {
                 let native = native_prop_info(pr, ctx).0;
-                let item_rc = access_item_rc(pr, ctx);
                 let constraint = compile_expression(constraint_expr, ctx);
-                access_member(pr, ctx).then(|item|
-                format!(
-                    "slint::private_api::item_layout_info({vt}, const_cast<slint::cbindgen_private::{ty}*>(&{item}), {o}, {constraint}, &{window}, {item_rc})",
-                    vt = native.cpp_vtable_getter,
-                    ty = native.class_name,
-                    o = to_cpp_orientation(orient),
-                    window = access_window_field(ctx),
-                ))
+                item_owner(pr).map_or_default(|owner| {
+                    let (item, item_rc) = native_item_from_owner(pr, ctx, owner);
+                    format!(
+                        "slint::private_api::item_layout_info({vt}, const_cast<slint::cbindgen_private::{ty}*>(&{item}), {o}, {constraint}, &{window}, {item_rc})",
+                        vt = native.cpp_vtable_getter,
+                        ty = native.class_name,
+                        o = to_cpp_orientation(orient),
+                        window = access_window_field(ctx),
+                    )
+                })
             } else {
                 panic!("internal error: invalid args to ImplicitLayoutInfo {arguments:?}")
             }
@@ -5531,6 +5571,45 @@ fn compile_builtin_function_call(
             let color = a.next().unwrap();
             format!("slint::private_api::color_to_styled_text({})", color)
         }
+        BuiltinFunction::PathPointAt => {
+            if let [llr::Expression::PropertyReference(pr), t] = arguments {
+                let t = compile_expression(t, ctx);
+                item_owner(pr).map_or_default(|owner| {
+                    let (_, item_rc) = native_item_from_owner(pr, ctx, owner);
+                    format!(
+                        "slint::LogicalPosition(slint::cbindgen_private::slint_path_point_at(&{item_rc}, static_cast<float>({t})))"
+                    )
+                })
+            } else {
+                panic!("internal error: invalid args to PathPointAt {arguments:?}")
+            }
+        }
+        BuiltinFunction::PathAngleAt => {
+            if let [llr::Expression::PropertyReference(pr), t] = arguments {
+                let t = compile_expression(t, ctx);
+                item_owner(pr).map_or_default(|owner| {
+                    let (_, item_rc) = native_item_from_owner(pr, ctx, owner);
+                    format!(
+                        "slint::cbindgen_private::slint_path_angle_at(&{item_rc}, static_cast<float>({t}))"
+                    )
+                })
+            } else {
+                panic!("internal error: invalid args to PathAngleAt {arguments:?}")
+            }
+        }
+        BuiltinFunction::ArrayAny => {
+            format!("slint::private_api::model_any({}, {})", a.next().unwrap(), a.next().unwrap())
+        },
+        BuiltinFunction::ArrayAll => {
+            format!("slint::private_api::model_all({}, {})", a.next().unwrap(), a.next().unwrap())
+        },
+        BuiltinFunction::ArrayFindIndex => {
+            format!(
+                "slint::private_api::model_find_index({}, {})",
+                a.next().unwrap(),
+                a.next().unwrap()
+            )
+        },
     }
 }
 
@@ -5709,10 +5788,141 @@ fn generate_with_layout_item_info(
     )
 }
 
+/// Emit the measure-callback lambda shared by
+/// `solve_flexbox_layout_with_measure` and
+/// `flexbox_layout_info_cross_axis_with_measure` calls. For each static cell,
+/// `measure_cells[i]` carries `(h_info_given_known_h, v_info_given_known_w)` —
+/// `LayoutInfo` expressions that read the `measure_known_w` /
+/// `measure_known_h` locals. taffy calls the callback with at most one of
+/// width/height known (the cross axis), so we recompute that cell's
+/// perpendicular info at the assigned dimension. A call with neither dimension
+/// known is a content-size probe (see `FlexboxMeasureFn` in i-slint-core): it
+/// measures the free axis at the default size — the horizontal axis for a
+/// width-for-height-only cell, the vertical one otherwise.
+fn generate_flexbox_measure_lambda(
+    measure_cells: &[llr::FlexboxMeasureCell],
+    ctx: &EvaluationContext,
+) -> String {
+    // cbindgen does not expose `LayoutInfo::preferred_bounded()`, so
+    // inline it: preferred_bounded = max(min(preferred, max), min).
+    const BOUNDED: &str = "std::max(std::min(li.preferred, li.max), li.min)";
+    let has_repeater = measure_cells
+        .iter()
+        .any(|item| matches!(item.kind, llr::FlexboxMeasureCellKind::Repeated(_)));
+    // Without a repeater the cell index is known at compile time, so switch
+    // on it (O(1) dispatch). With a repeater the count is only known at
+    // runtime: walk the elements, advancing `cursor` by 1 per static cell
+    // and by the repeater's instance count per repeater, until `index`'s
+    // range is found.
+    let (v_body, h_body, probe_body) = if !has_repeater {
+        let mut v_cases = String::new();
+        let mut h_cases = String::new();
+        let mut probe_cases = String::new();
+        for (i, item) in measure_cells.iter().enumerate() {
+            if let llr::FlexboxMeasureCellKind::Static { h_info, v_info } = &item.kind {
+                let v = compile_expression(v_info, ctx);
+                let h = compile_expression(h_info, ctx);
+                let v_case = format!("case {i}: {{ auto li = {v}; return {{ w, {BOUNDED} }}; }}\n");
+                let h_case = format!("case {i}: {{ auto li = {h}; return {{ {BOUNDED}, h }}; }}\n");
+                probe_cases.push_str(if item.w4h_only { &h_case } else { &v_case });
+                v_cases.push_str(&v_case);
+                h_cases.push_str(&h_case);
+            }
+        }
+        (
+            format!("switch (index) {{\n{v_cases}default: break;\n}}\n"),
+            format!("switch (index) {{\n{h_cases}default: break;\n}}\n"),
+            format!("switch (index) {{\n{probe_cases}default: break;\n}}\n"),
+        )
+    } else {
+        let mut v_steps = String::new();
+        let mut h_steps = String::new();
+        let mut probe_steps = String::new();
+        for item in measure_cells {
+            match &item.kind {
+                llr::FlexboxMeasureCellKind::Static { h_info, v_info } => {
+                    let v = compile_expression(v_info, ctx);
+                    let h = compile_expression(h_info, ctx);
+                    let v_step = format!(
+                        "if (index == cursor) {{ auto li = {v}; return {{ w, {BOUNDED} }}; }}\n\
+                         cursor += 1;\n"
+                    );
+                    let h_step = format!(
+                        "if (index == cursor) {{ auto li = {h}; return {{ {BOUNDED}, h }}; }}\n\
+                         cursor += 1;\n"
+                    );
+                    probe_steps.push_str(if item.w4h_only { &h_step } else { &v_step });
+                    v_steps.push_str(&v_step);
+                    h_steps.push_str(&h_step);
+                }
+                llr::FlexboxMeasureCellKind::Repeated(repeater) => {
+                    let i = usize::from(repeater.repeater_index);
+                    let v_step = format!(
+                        "{{ auto len = self->repeater_{i}.len(); \
+                         if (index >= cursor && index < cursor + len) {{ \
+                             if (auto *sub_comp = self->repeater_{i}.typed_instance_at(index - cursor)) {{ \
+                                 auto li = sub_comp->flexbox_layout_item_info_at_cross_width(w).constraint; \
+                                 return {{ w, {BOUNDED} }}; }} \
+                             return {{ w, h }}; }} \
+                         cursor += len; }}\n"
+                    );
+                    let h_step = format!(
+                        "{{ auto len = self->repeater_{i}.len(); \
+                         if (index >= cursor && index < cursor + len) {{ \
+                             if (auto *sub_comp = self->repeater_{i}.typed_instance_at(index - cursor)) {{ \
+                                 auto li = sub_comp->flexbox_layout_item_info_at_cross_height(h).constraint; \
+                                 return {{ {BOUNDED}, h }}; }} \
+                             return {{ w, h }}; }} \
+                         cursor += len; }}\n"
+                    );
+                    probe_steps.push_str(if item.w4h_only { &h_step } else { &v_step });
+                    v_steps.push_str(&v_step);
+                    h_steps.push_str(&h_step);
+                }
+                llr::FlexboxMeasureCellKind::Fixed => {
+                    probe_steps.push_str("cursor += 1;\n");
+                    v_steps.push_str("cursor += 1;\n");
+                    h_steps.push_str("cursor += 1;\n");
+                }
+            }
+        }
+        (
+            format!("[[maybe_unused]] uintptr_t cursor = 0;\n{v_steps}"),
+            format!("[[maybe_unused]] uintptr_t cursor = 0;\n{h_steps}"),
+            format!("[[maybe_unused]] uintptr_t cursor = 0;\n{probe_steps}"),
+        )
+    };
+    // A dimension taffy didn't assign (`known_* == false`) arrives pre-resolved
+    // to the cell's preferred size by resolve_measure_defaults in i-slint-core.
+    format!(
+        "[&](uintptr_t index, float w, float h, bool known_w, bool known_h) \
+         -> std::pair<float, float> {{\n\
+            if (known_w && known_h)\n\
+                return {{ w, h }};\n\
+            if (known_w) {{ // measure the height at the width w\n\
+                [[maybe_unused]] float measure_known_w = w;\n\
+                {v_body}\
+                return {{ w, h }};\n\
+            }}\n\
+            if (known_h) {{ // measure the width at the height h\n\
+                [[maybe_unused]] float measure_known_h = h;\n\
+                {h_body}\
+                return {{ w, h }};\n\
+            }}\n\
+            // Content-size probe: measure the free axis at the default size, so\n\
+            // the returned pair is self-consistent.\n\
+            [[maybe_unused]] float measure_known_w = w;\n\
+            [[maybe_unused]] float measure_known_h = h;\n\
+            {probe_body}\
+            return {{ w, h }};\n\
+         }}"
+    )
+}
+
 fn generate_with_flexbox_layout_item_info(
     cells_h_variable: &str,
     cells_v_variable: &str,
-    flex_props_variable: &str,
+    flex_props_variable: Option<&str>,
     repeated_indices_var_name: Option<&str>,
     elements: &[Either<
         (llr::Expression, llr::Expression, llr::Expression),
@@ -5723,11 +5933,20 @@ fn generate_with_flexbox_layout_item_info(
     ctx: &llr_EvaluationContext<CppGeneratorContext>,
 ) -> String {
     let repeated_indices_var_name = repeated_indices_var_name.map(ident);
+    // With no flex-props variable the sub-expression only reads the cells, so
+    // don't evaluate (and thus depend on) a static cell's flex properties. A
+    // repeated cell still computes its props inside the bundled item-info call,
+    // whose constraint half is needed either way.
+    let wants_flex_props = flex_props_variable.is_some();
     // Container width forwarded to repeated cells' vertical query (column flex),
     // so a height-for-width instance wraps to the real width like a static cell.
     let cross_width = repeated_cross_width.map(|w| compile_expression(w, ctx));
     let mut push_code =
-        "std::vector<slint::cbindgen_private::LayoutItemInfo> cells_vector_h; std::vector<slint::cbindgen_private::LayoutItemInfo> cells_vector_v; std::vector<slint::cbindgen_private::FlexItemProps> flex_props_vector;".to_owned();
+        "std::vector<slint::cbindgen_private::LayoutItemInfo> cells_vector_h; std::vector<slint::cbindgen_private::LayoutItemInfo> cells_vector_v;".to_owned();
+    if wants_flex_props {
+        push_code
+            .push_str(" std::vector<slint::cbindgen_private::FlexItemProps> flex_props_vector;");
+    }
     let mut repeater_idx = 0usize;
 
     for item in elements {
@@ -5735,12 +5954,19 @@ fn generate_with_flexbox_layout_item_info(
             Either::Left((value_h, value_v, value_flex)) => {
                 write!(
                     push_code,
-                    "cells_vector_h.push_back({{ {} }}); cells_vector_v.push_back({{ {} }}); flex_props_vector.push_back({{ {} }});",
+                    "cells_vector_h.push_back({{ {} }}); cells_vector_v.push_back({{ {} }});",
                     compile_expression(value_h, ctx),
                     compile_expression(value_v, ctx),
-                    compile_expression(value_flex, ctx)
                 )
                 .unwrap();
+                if wants_flex_props {
+                    write!(
+                        push_code,
+                        "flex_props_vector.push_back({{ {} }});",
+                        compile_expression(value_flex, ctx)
+                    )
+                    .unwrap();
+                }
             }
             Either::Right(repeater) => {
                 let repeater_index = usize::from(repeater.repeater_index);
@@ -5775,6 +6001,16 @@ fn generate_with_flexbox_layout_item_info(
                 };
                 // The instance vtable returns the bundled FlexboxLayoutItemInfo; split
                 // it into the constraint cell and the (axis-independent) flex props.
+                let flex_push = if wants_flex_props {
+                    "flex_props_vector.push_back(info_h.props); "
+                } else {
+                    ""
+                };
+                let flex_resize = if wants_flex_props {
+                    "flex_props_vector.resize(start_offset + repeater_len); "
+                } else {
+                    ""
+                };
                 write!(
                     push_code,
                     "{{ \
@@ -5782,13 +6018,13 @@ fn generate_with_flexbox_layout_item_info(
                      self->repeater_{repeater_index}.for_each([&](const auto &sub_comp){{ \
                      auto info_h = sub_comp->flexbox_layout_item_info(slint::cbindgen_private::Orientation::Horizontal, std::nullopt); \
                      auto info_v = {v_query}; \
-                     flex_props_vector.push_back(info_h.props); \
-                     cells_vector_h.push_back({{ info_h.constraint }}); \
-                     cells_vector_v.push_back({{ info_v.constraint }}); }}); \
+                     {flex_push}\
+                     cells_vector_h.push_back({{ info_h.constraint, {{}} }}); \
+                     cells_vector_v.push_back({{ info_v.constraint, {{}} }}); }}); \
                      auto repeater_len = self->repeater_{repeater_index}.len(); \
                      cells_vector_h.resize(start_offset + repeater_len); \
                      cells_vector_v.resize(start_offset + repeater_len); \
-                     flex_props_vector.resize(start_offset + repeater_len); }}"
+                     {flex_resize}}}"
                 )
                 .unwrap();
             }
@@ -5803,12 +6039,17 @@ fn generate_with_flexbox_layout_item_info(
         .unwrap();
         format!("std::array<int, {}> {ri}_array;", 2 * repeater_idx)
     });
+    let flex_slice = flex_props_variable.map_or(String::new(), |v| {
+        format!(
+            "[[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::FlexItemProps>{} = slint::private_api::make_slice(std::span(flex_props_vector)); ",
+            ident(v)
+        )
+    });
     format!(
-        "[&]{{ {ri} {push_code} [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{cells_h} = slint::private_api::make_slice(std::span(cells_vector_h)); [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{cells_v} = slint::private_api::make_slice(std::span(cells_vector_v)); [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::FlexItemProps>{flex_props} = slint::private_api::make_slice(std::span(flex_props_vector)); return {}; }}()",
+        "[&]{{ {ri} {push_code} [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{cells_h} = slint::private_api::make_slice(std::span(cells_vector_h)); [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{cells_v} = slint::private_api::make_slice(std::span(cells_vector_v)); {flex_slice}return {}; }}()",
         compile_expression(sub_expression, ctx),
         cells_h = ident(cells_h_variable),
         cells_v = ident(cells_v_variable),
-        flex_props = ident(flex_props_variable),
     )
 }
 
@@ -5953,32 +6194,17 @@ fn return_compile_expression(
     }
 }
 
-pub fn generate_type_aliases(file: &mut File, doc: &Document) {
-    let type_aliases = doc
-        .exports
-        .iter()
-        .filter_map(|export| match &export.1 {
-            Either::Left(component) if !component.is_global() => {
-                Some((&export.0.name, component.id.clone()))
-            }
-            Either::Right(ty) => match &ty {
-                Type::Struct(s) if s.node().is_some() => {
-                    Some((&export.0.name, s.name.cpp_type().unwrap()))
-                }
-                Type::Enumeration(en) => Some((&export.0.name, en.name.clone())),
-                _ => None,
-            },
-            _ => None,
+pub fn generate_type_aliases(file: &mut File, unit: &llr::CompilationUnit) {
+    // C++ defines every type in the namespace, so only the entries that rename a type
+    // (an export alias, or a deprecated pre-rename name) need a `using` declaration.
+    let aliases = unit.type_exports.iter().filter(|e| e.is_alias());
+    file.declarations.extend(aliases.map(|e| {
+        Declaration::TypeAlias(TypeAlias {
+            new_name: ident(&e.exported_name),
+            old_name: ident(&e.internal_name),
+            deprecated: e.deprecation_note(),
         })
-        .filter(|(export_name, type_name)| *export_name != type_name)
-        .map(|(export_name, type_name)| {
-            Declaration::TypeAlias(TypeAlias {
-                old_name: ident(&type_name),
-                new_name: ident(export_name),
-            })
-        });
-
-    file.declarations.extend(type_aliases);
+    }));
 }
 
 #[cfg(feature = "bundle-translations")]

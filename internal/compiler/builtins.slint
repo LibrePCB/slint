@@ -12,21 +12,20 @@
 
    comments starting by `//-` have some meanings
 
-   Properties with two way bindings (aliases) are deprecated in favor of the property they point to
+   Properties with two way bindings (aliases) are deprecated and must be marked `@deprecated`
 
    Properties can have default binding which must be an expression without any reference to
    another properties. These binding will be then set by the compiler.
    `output` property mean that the property can be modified by the native Item,
    otherwise it is assumed the native item don't write to that property.
 
-   A property, callback, or function can be preceded by a `//-shadowable` comment.
-   Components may declare a member with the same name as a shadowable member: this is
-   a warning instead of an error, and the declaration shadows the builtin member.
-   Members added to an already released element must be marked shadowable, so that
-   older code that already declares a member with that name keeps compiling.
-   This only works for members that the compiler itself never accesses by name —
-   no default binding, and no compiler pass that looks the name up on user elements —
-   as such accesses would resolve to the shadowing declaration and generate wrong code.
+   Mark a property `//-constexpr` (value known at compile time)
+   or `//-fake` (exists only at compile time).
+
+   A function names its `BuiltinFunction` implementation as its body:
+   `function start() { BuiltinFunction.StartTimer }`.
+   The declaration provides the signature and the docs.
+   An empty body declares a signature handled by a compiler pass.
  */
 
  component Empty {
@@ -37,6 +36,8 @@ component Rectangle inherits Empty {
     /// The background brush of this `Rectangle`, filling its geometry. \{#sls.ref.rectangle.background}
     ///
     /// Without a `background` and without a border, the `Rectangle` paints nothing. \{#sls.ref.rectangle.empty}
+    ///
+    /// A translucent background lets the content underneath show through. \{#sls.ref.rectangle.translucent}
     ///
     /// ```slint imageAlt="rectangle background" width="200" height="400"
     /// property <brush> rainbow-gradient: @linear-gradient(40deg, rgba(255, 0, 0, 1) 0%, rgba(255, 154, 0, 1) 10%, rgba(208, 222, 33, 1) 20%,rgba(79, 220, 74, 1) 30%, rgba(63, 218, 216, 1) 40%, rgba(47, 201, 226, 1) 50%, rgba(28, 127, 238, 1) 60%, rgba(95, 21, 242, 1) 70%, rgba(186, 12, 248, 1) 80%, rgba(251, 7, 217, 1) 90%, rgba(255, 0, 0, 1) 100%);
@@ -61,7 +62,7 @@ component Rectangle inherits Empty {
     /// \sc
     /// \default transparent
     in property <brush> background;
-    in property <brush> color <=> background;
+    @deprecated in property <brush> color <=> background;
 }
 
 component BasicBorderRectangle inherits Rectangle {
@@ -284,46 +285,23 @@ component ImageItem inherits Empty {
     /// }
     /// ```
     in property <brush> colorize;
-    /// The `image` type is a reference to an image. It's defined using the `@image-url("...")` construct.
-    /// The address within the `@image-url` function must be known at compile time.
+    /// The [image](/reference/property-types/images/) to draw, created with
+    /// [`@image-url()`](/reference/language/expressions/#sls.expr.image.form)
+    /// or set by the application: by default no image, drawing
+    /// nothing. \{#sls.ref.image.source}
     ///
-    /// Slint looks for images in the following places:
-    ///
-    /// 1. The absolute path or the path relative to the current `.slint` file.
-    /// 2. The include path used by the compiler to look up `.slint` files.
-    ///
-    /// Images can also be loaded from [`data:` URIs](https://developer.mozilla.org/en-US/docs/Web/URI/Reference/Schemes/data), with either base64 or URL-encoded content.
-    /// For example: `@image-url("data:image/png;base64,iVBORw0KGgo...")`.
-    ///
-    /// Access an `image`'s source dimension using its `source.width` and `source.height` properties.
+    /// Access an `image`'s source dimension using its `source.width` and
+    /// `source.height` properties. \{#sls.ref.image.source.dimensions}
     ///
     /// ```slint
     /// export component Example inherits Window {
-    ///     preferred-width: 150px;
-    ///     preferred-height: 50px;
+    ///     in property <image> some_image: @image-url("images/logo.png");
     ///
-    ///     in property <image> some_image: @image-url("https://slint.dev/logo/slint-logo-full-light.svg");
-    ///
-    ///     Text {
-    ///         text: "The image is " + some_image.width + "x" + some_image.height;
-    ///     }
+    ///     out property <int> image-width: some_image.width;
+    ///     out property <int> image-height: some_image.height;
     /// }
     /// ```
-    ///
-    /// ```slint
-    /// // nine-slice scaling
-    /// export component Example inherits Window {
-    ///     width: 100px;
-    ///     height: 150px;
-    ///     VerticalLayout {
-    ///         Image {
-    ///             source: @image-url("https://interactive-examples.mdn.mozilla.net/media/examples/border-diamonds.png", nine-slice(30 30 30 30));
-    ///         }
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// Use the <Link type="ImageType" label="`@image-url` macro" /> to specify the image's path.
+    /// \sc
     in property <image> source;
     /// ```slint imageAlt="image fill example" width="300" height="200"
     /// Image {
@@ -376,7 +354,7 @@ component ImageItem inherits Empty {
     /// \default smooth
     in property <ImageRendering> image-rendering;
 
-    in property <angle> rotation-angle <=> transform-rotation;
+    @deprecated in property <angle> rotation-angle <=> transform-rotation;
 }
 
 /// ```slint imageAlt="image example" width="300" height="200"
@@ -385,9 +363,21 @@ component ImageItem inherits Empty {
 /// }
 /// ```
 ///
-/// Use the `Image` element to display an <Link type="ImageType" label="image" />.
+/// Use the `Image` element to display an
+/// [image](/reference/property-types/images/). \{#sls.meta.image.purpose}
+///
+/// <OnlyInSC>
+/// The element draws the image of its `source` property pixel for pixel:
+/// the image's top-left pixel is at the element's position, and one image
+/// pixel covers one frame-buffer pixel, without scaling. \{#sls.ref.image.draw}
+///
+/// The element is always the size of its source image: `width` and `height`
+/// hold the dimensions of that image, and setting them is an
+/// error. \{#sls.ref.image.size}
+/// </OnlyInSC>
 ///
 /// \footer
+/// <NotInSC>
 /// ## Accessibility
 ///
 /// ### Alternative text
@@ -415,6 +405,8 @@ component ImageItem inherits Empty {
 ///     accessible-role: none;
 /// }
 /// ```
+/// </NotInSC>
+/// \sc
 /// \group:elements
 export component ClippedImage inherits ImageItem {
     /// The horizontal alignment of the image within the element.
@@ -567,7 +559,7 @@ component SimpleText inherits Empty {
     in property <TextVerticalAlignment> vertical-alignment;
     //-default_size_binding:implicit_size
 
-    in property <angle> rotation-angle <=> transform-rotation;
+    @deprecated in property <angle> rotation-angle <=> transform-rotation;
 }
 
 /// ```slint playground
@@ -658,6 +650,23 @@ component ComplexText inherits SimpleText {
     /// }
     /// ```
     in property <length> letter-spacing;
+    /// The line height as a unitless factor (or a percentage: `150%` equals `1.5`) applied to
+    /// the font's natural line height (ascent + descent + line gap). The default of `1` keeps
+    /// the natural line height; larger values spread the lines apart, smaller values pull them
+    /// together, and `0` collapses them onto each other. Negative or non-numeric values behave
+    /// like `1`. Unlike CSS `line-height`, the factor is relative to the natural line height,
+    /// not the font size, and keyword or length values aren't supported.
+    ///
+    /// ```slint "line-height-factor: 1.5;" imageAlt="text with increased line height" width="200" height="200" needsBackground
+    /// Text {
+    ///     text: "Two lines\nof text";
+    ///     color: black;
+    ///     font-size: 30pt;
+    ///     line-height-factor: 1.5;
+    /// }
+    /// ```
+    /// \default 1
+    in property <float> line-height-factor: 1;
     /// The brush used for the text outline.
     /// ```slint "stroke: darkblue;" imageAlt="text stroke" width="300" height="200" needsBackground
     /// Text {
@@ -683,6 +692,7 @@ component ComplexText inherits SimpleText {
     /// }
     /// ```
     in property <TextStrokeStyle> stroke-style;
+    // Inserted in typeregister.rs: the default value is computed per element.
     //! ### font-metrics
     //! <SlintProperty propName="font-metrics" typeName="struct" structName="FontMetrics" propertyVisibility="out">
     //! The design metrics of the font scaled to the font pixel size used by the element.
@@ -768,10 +778,15 @@ component StyledTextItem inherits Empty {
 export { StyledTextItem as StyledText }
 
 /// Use `TouchArea` to control what happens when the region it covers is touched or interacted with
-/// using the mouse.
+/// using the mouse. \{#sls.meta.toucharea.purpose}
 ///
-/// When not part of a layout, its width or height default to 100% of the parent element.
+/// When not part of a layout, its width or height default to 100% of the parent element. \{#sls.ref.toucharea.size}
 ///
+/// <OnlyInSC>
+/// Of the members of `TouchArea`, only `clicked` and the geometry properties are part of Slint SC. \{#sls.ref.toucharea.members}
+/// </OnlyInSC>
+///
+/// <NotInSC>
 /// ```slint playground
 /// export component Example inherits Window {
 ///     width: 200px;
@@ -796,7 +811,9 @@ export { StyledTextItem as StyledText }
 ///     }
 /// }
 /// ```
+/// </NotInSC>
 /// \group:gestures
+/// \sc
 export component TouchArea {
     /// When disabled, the `TouchArea` doesn't recognize any touch or mouse events and they are
     /// passed through to elements underneath.
@@ -843,7 +860,12 @@ export component TouchArea {
     out property <length> pressed_y;
     /// Set to `true` by the `TouchArea` when the mouse is pressed over it.
     out property <bool> pressed;
-    /// Invoked when clicked: A finger or the left mouse button is pressed, then released on this element.
+    /// Invoked when clicked: A finger or the left mouse button is pressed, then released on this element. \{#sls.ref.toucharea.clicked}
+    ///
+    /// <OnlyInSC>
+    /// The Touch Input chapter specifies when a press and a release count as a click. \{#sls.ref.toucharea.clicked.input}
+    /// </OnlyInSC>
+    /// \sc
     callback clicked;
     /// Invoked when double-clicked. The left mouse button is pressed and released twice on this element in a short
     /// period of time, or the same is done with a finger. The `clicked()` callbacks will be triggered before the `double-clicked()` callback is triggered.
@@ -1049,17 +1071,17 @@ export component Flickable inherits Empty {
     /// Panning with a touch screen is only affected by `interactive`.
     in property <bool> mouse-drag-pan-enabled: true;
     /// The total width of the scrollable content.
-    in property <length> content-width;
+    @shadowable in property <length> content-width;
     /// The total height of the scrollable content.
-    in property <length> content-height;
+    @shadowable in property <length> content-height;
     /// The position of the scrollable content relative to the `Flickable`. This is usually a negative value.
-    in-out property <length> content-x;
+    @shadowable in-out property <length> content-x;
     /// The position of the scrollable content relative to the `Flickable`. This is usually a negative value.
-    in-out property <length> content-y;
-    in property <length> viewport-width <=> content-width;
-    in property <length> viewport-height <=> content-height;
-    in-out property <length> viewport-x <=> content-x;
-    in-out property <length> viewport-y <=> content-y;
+    @shadowable in-out property <length> content-y;
+    @deprecated in property <length> viewport-width <=> content-width;
+    @deprecated in property <length> viewport-height <=> content-height;
+    @deprecated in-out property <length> viewport-x <=> content-x;
+    @deprecated in-out property <length> viewport-y <=> content-y;
     /// Invoked when `content-x` or `content-y` is changed by a user action (dragging, scrolling).
     callback flicked();
     //-default_size_binding:expands_to_parent_geometry
@@ -1530,7 +1552,21 @@ export component ContextMenuArea inherits Empty {
 }
 
 component WindowItem {
+    /// The width of the window. \{#sls.ref.window.width}
+    ///
+    /// <OnlyInSC>
+    /// The application gives the window its size when it creates the component, so this is a value the file reads,
+    /// and binding it is an error. \{#sls.ref.window.width-out}
+    /// </OnlyInSC>
+    /// \sc
     in-out property <length> width;
+    /// The height of the window. \{#sls.ref.window.height}
+    ///
+    /// <OnlyInSC>
+    /// The application gives the window its size when it creates the component, so this is a value the file reads,
+    /// and binding it is an error. \{#sls.ref.window.height-out}
+    /// </OnlyInSC>
+    /// \sc
     in-out property <length> height;
     /// Whether the window should be placed above all other windows on window managers supporting it.
     /// \default false
@@ -1539,16 +1575,20 @@ component WindowItem {
     /// \default true if 'SLINT_FULLSCREEN' environment variable is set, otherwise false
     in-out property <bool> full-screen;
     /// Whether the window is minimized. Setting this to true minimizes the window.
-    //-shadowable
-    in-out property <bool> minimized;
+    @shadowable in-out property <bool> minimized;
     /// Whether the window is maximized. Setting this to true maximizes the window.
-    //-shadowable
-    in-out property <bool> maximized;
+    @shadowable in-out property <bool> maximized;
     /// The background brush of the `Window`. It is painted first, covering the whole window. \{#sls.ref.window.background}
+    ///
+    /// <OnlyInSC>
+    /// This background must be an opaque color literal.
+    /// Rendering writes every pixel of the frame buffer, and there's nothing
+    /// underneath the window for a translucent background to blend with. \{#sls.ref.window.opaque}
+    /// </OnlyInSC>
     /// \sc
     /// \default depends on the style
     in property <brush> background; // StyleMetrics.background  set in apply_default_properties_from_style
-    in property <brush> color <=> background;
+    @deprecated in property <brush> color <=> background;
     /// The font family to use as default in text elements inside this window, that don't have their `font-family` property set.
     in property <string> default-font-family;
     /// The font size to use as default in text elements inside this window, that don't have their `font-size` property set. The value of this property also forms the basis for relative font sizes.
@@ -1579,13 +1619,11 @@ component WindowItem {
     /// This triggers the `close-requested` callback, giving the application a chance to cancel the close.
     /// Returns `true` if the application accepted the close request; false otherwise.
     /// Returns `false` if called on a child `Window` element, which can't be closed independently.
-    //-shadowable
-    function close() -> bool {
+    @shadowable function close() -> bool {
     }
     /// Hide this window. This also drops the strong reference on the window, so if this was
     /// the last reference, the event loop will quit.
-    //-shadowable
-    function hide() {
+    @shadowable function hide() {
     }
 }
 
@@ -1742,6 +1780,14 @@ export component TextInput {
     /// The letter spacing allows changing the spacing between the glyphs. A positive value increases the spacing and a negative value decreases the distance.
     /// \default 0
     in property <length> letter-spacing;
+    /// The line height as a unitless factor (or a percentage: `150%` equals `1.5`) applied to
+    /// the font's natural line height (ascent + descent + line gap). The default of `1` keeps
+    /// the natural line height; larger values spread the lines apart, smaller values pull them
+    /// together, and `0` collapses them onto each other. Negative or non-numeric values behave
+    /// like `1`. Unlike CSS `line-height`, the factor is relative to the natural line height,
+    /// not the font size, and keyword or length values aren't supported.
+    /// \default 1
+    in property <float> line-height-factor: 1;
     in property <length> width;
     in property <length> height;
     /// The height of the page used to compute how much to scroll when the user presses page up or page down.
@@ -1782,6 +1828,7 @@ export component TextInput {
     in property <bool> read-only: false;
     // Internal, undocumented property, only exposed for IME.
     out property <string> preedit-text;
+    // Inserted in typeregister.rs: the default value is computed per element.
     //! ### font-metrics
     //! <SlintProperty propName="font-metrics" typeName="struct" structName="FontMetrics" propertyVisibility="out">
     //! The design metrics of the font scaled to the font pixel size used by the element.
@@ -1790,6 +1837,7 @@ export component TextInput {
     //-accepts_focus
     /// Selects the text between two UTF-8 offsets.
     function set-selection-offsets(start: int, end: int) {
+        BuiltinFunction.SetSelectionOffsets
     }
     /// Selects all text.
     function select-all() {
@@ -2001,6 +2049,15 @@ export component GridLayout {
 /// Places its children next to each other vertically.
 /// The size of elements can either be fixed with the `width` or `height` property, or if they aren't set
 /// they will be computed by the layout respecting the minimum and maximum sizes and the stretch factor.
+/// \footer
+/// ## Cell elements
+/// Cell elements inside a `VerticalLayout` obtain the following new property:
+///
+/// ### cross-axis-self-alignment
+/// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisSelfAlignment" defaultValue="auto">
+/// Overrides the container's `cross-axis-alignment` for this element.
+/// The default value `auto` uses the container's `cross-axis-alignment`.
+/// </SlintProperty>
 /// \group:layouts
 export component VerticalLayout {
     //! ## Spacing Properties
@@ -2066,6 +2123,15 @@ export component VerticalLayout {
 /// Places its children next to each other horizontally.
 /// The size of elements can either be fixed with the `width` or `height` property, or if they aren't set
 /// they will be computed by the layout respecting the minimum and maximum sizes and the stretch factor.
+/// \footer
+/// ## Cell elements
+/// Cell elements inside a `HorizontalLayout` obtain the following new property:
+///
+/// ### cross-axis-self-alignment
+/// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisSelfAlignment" defaultValue="auto">
+/// Overrides the container's `cross-axis-alignment` for this element.
+/// The default value `auto` uses the container's `cross-axis-alignment`.
+/// </SlintProperty>
 /// \group:layouts
 export component HorizontalLayout {
     //! ## Spacing Properties
@@ -2123,7 +2189,7 @@ export component HorizontalLayout {
 /// // This example demonstrates FlexboxLayout with row direction (default)
 /// export component Foo inherits Window {
 ///     width: 300px;
-///     height: 200px;
+///     height: 150px;
 ///     FlexboxLayout {
 ///         spacing: 8px;
 ///         padding: 8px;
@@ -2138,10 +2204,10 @@ export component HorizontalLayout {
 /// ```
 ///
 ///
-/// ```slint playground imageAlt="flexboxlayout example with column direction" width="150" height="250"
+/// ```slint playground imageAlt="flexboxlayout example with column direction" width="200" height="300"
 /// // This example demonstrates FlexboxLayout with column direction
 /// export component Foo inherits Window {
-///     width: 300px;
+///     width: 200px;
 ///     height: 300px;
 ///     FlexboxLayout {
 ///         spacing: 8px;
@@ -2161,40 +2227,37 @@ export component HorizontalLayout {
 /// In row direction, items are placed from left to right. When the available width is exceeded, items automatically wrap to the next row. In column direction, items are placed from top to bottom and wrap to the next column when the available height is exceeded.
 ///
 /// \footer
-/// ## Per-Item Properties
+/// ## Cell elements
+/// Cell elements inside a `FlexboxLayout` obtain the following new properties:
 ///
-/// The following properties can be set on individual children of a `FlexboxLayout`:
-///
-/// ### flex-grow
-/// <SlintProperty propName="flex-grow" typeName="float">
-/// Controls how much an item grows relative to other flex items when there is extra space along the main axis.
-/// A value of `0` (default) means the item does not grow. Items with higher values receive proportionally more extra space.
+/// ### cross-axis-self-alignment
+/// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisSelfAlignment" defaultValue="auto">
+/// Overrides the container's `cross-axis-alignment` for this element. CSS Flexbox calls this "align-self".
+/// The default value `auto` uses the container's `cross-axis-alignment`.
 /// </SlintProperty>
 ///
-/// ### flex-shrink
-/// <SlintProperty propName="flex-shrink" typeName="float">
-/// Controls how much an item shrinks relative to other flex items when items overflow the container along the main axis.
-/// Default is `1` (matching CSS behavior). A value of `0` means the item does not shrink. Items with higher values shrink proportionally more.
+/// ### layout-order
+/// <SlintProperty propName="layout-order" typeName="int" defaultValue="0">
+/// Controls the visual order of the items, like the CSS `order` property:
+/// items are laid out in ascending order value, and items with the same value keep
+/// their declaration order.
+/// ```slint no-test
+/// FlexboxLayout {
+///     Rectangle { layout-order: 2; }
+///     Rectangle { layout-order: 1; }  // appears first
+/// }
+/// ```
 /// </SlintProperty>
 ///
-/// ### flex-basis
-/// <SlintProperty propName="flex-basis" typeName="length">
-/// Sets the initial main size of a flex item before growing or shrinking is applied.
-/// If not set, the item's `preferred-width` (row) or `preferred-height` (column) is used.
-/// </SlintProperty>
+/// The other CSS per-item flexbox properties are expressed with the properties the
+/// other layouts already use:
 ///
-/// ### flex-align-self
-/// <SlintProperty propName="flex-align-self" typeName="enum" enumName="FlexboxLayoutAlignSelf">
-/// Overrides the container's `cross-axis-alignment` for this specific item.
-/// The default value is `auto`, which inherits the container's `cross-axis-alignment` setting.
-/// </SlintProperty>
-///
-/// ### flex-order
-/// <SlintProperty propName="flex-order" typeName="int">
-/// Controls the visual order of flex items. Items with lower values appear first.
-/// Items with the same order value preserve their declaration order.
-/// The default value is `0`.
-/// </SlintProperty>
+/// | CSS           | Slint                                                          |
+/// | ------------- | -------------------------------------------------------------- |
+/// | `flex-grow`   | `alignment: stretch` on the container, weighted per item by `horizontal-stretch` / `vertical-stretch`; `max-width` / `max-height` caps growing (space a capped item cannot take stays free) |
+/// | `flex-shrink` | nothing to opt into: every item shrinks, in proportion to its preferred size; `min-width` / `min-height` refuses shrinking |
+/// | `flex-basis`  | `preferred-width` (row) / `preferred-height` (column)          |
+/// | `align-self`  | `cross-axis-self-alignment`                                    |
 ///
 /// ## Layout Behavior
 ///
@@ -2203,7 +2266,6 @@ export component HorizontalLayout {
 /// You can learn more about the CSS Flexbox specification from
 /// - <a href="https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Flexible_box_layout/Basic_concepts">the Mozilla developer website</a>
 /// - <a href="https://css-tricks.com/snippets/css/a-guide-to-flexbox/">A Complete Guide To Flexbox by CSS Tricks</a>. This is detailed guide with illustrations and comprehensive written explanation of the different Flexbox properties and how they work.
-/// \draft
 /// \group:layouts
 export component FlexboxLayout {
     //! ## Spacing Properties
@@ -2237,15 +2299,21 @@ export component FlexboxLayout {
     //!
     //! ## Alignment Properties
     /// Set the alignment of items along the main axis. CSS Flexbox calls this "justify-content".
-    /// Note that the `stretch` value has no effect on FlexboxLayout (main-axis stretching in CSS Flexbox is controlled by `flex-grow`).
+    /// With `stretch`, items grow along the main axis to fill each line,
+    /// weighted by their `horizontal-stretch` (row) or `vertical-stretch` (column) factor.
+    /// When every factor is 0, the free space is split evenly.
+    /// Use `max-width`/`max-height` to cap an item's growth;
+    /// space a capped item cannot take stays free at the end of the line.
+    /// CSS Flexbox expresses this per item with `flex-grow` instead.
     in property <LayoutAlignment> alignment: LayoutAlignment.start;  // CSS default is flex-start
     //! ## Direction Properties
     /// The primary direction in which items are placed. Set to `row` to place items horizontally left-to-right (default), or `column` to place items vertically top-to-bottom.
     /// It also supports `row-reverse` and `column-reverse` which invert the flow: `row-reverse` places items right-to-left (starting at the right edge), and `column-reverse` places items bottom-to-top (starting at the bottom edge).
     in property <FlexboxLayoutDirection> flex-direction;
-    /// Set the distribution of flex lines along the cross axis.
+    /// Set the distribution of flex lines along the cross axis. CSS Flexbox calls this "align-content";
+    /// the name here pairs with `cross-axis-alignment`, which aligns the items within one line.
     /// The default value is `stretch`.
-    in property <FlexboxLayoutAlignContent> align-content;
+    in property <CrossAxisLineAlignment> cross-axis-line-alignment;
     /// Set the alignment of individual items along the cross axis within each flex line.
     /// The default value is `stretch`.
     in property <CrossAxisAlignment> cross-axis-alignment;
@@ -2392,7 +2460,8 @@ export component Path {
     //! If non-zero, the path will be scaled to fit into the specified height.
     //! </SlintProperty>
     //!
-    in property <string> commands;  // 'fake' hardcoded in typeregister.rs
+    //-fake
+    in property <string> commands;
     /// Defines how the path's view box is scaled to fit the element's width and height.
     /// If no view box is defined, the implicit bounding rectangle is used.
     /// \default contain
@@ -2421,6 +2490,22 @@ export component Path {
     in property <float> viewbox-width;
     ///
     in property <float> viewbox-height;
+    /// Returns a point at the given percent along the path in the Path element's coordinate space.
+    /// Returns (0, 0) if the path is empty.
+    ///
+    /// If a `t` outside the bounds of 0 and 1 is passed, it will be converted to its decimal fraction.
+    /// Ex: 1.5 -> 0.5 and 2.0 -> 1.0. This allows for N iterations of a loop
+    /// by animating t from 0 to N. If `t` is animated from N to 0, it will loop N times backwards.
+    function point-at(t: float) -> Point {
+        BuiltinFunction.PathPointAt
+    }
+    /// Returns the angle (in degrees) between the x-axis and the path's tangent vector at the given `t`.
+    /// The tangent points in the direction the path was defined, so this reflects the path's shape and not
+    /// the object's current direction of travel. Returns 0 if the path is empty.
+    /// If a `t` outside the bounds of 0 and 1 is passed, the decimal fraction will be passed.
+    function angle-at(t: float) -> angle {
+        BuiltinFunction.PathAngleAt
+    }
     //!
     //! ## Path Using SVG Commands
     //!
@@ -2509,6 +2594,7 @@ component Tab {
 // Note: not a native class, handled in the lower_tabs pass
 export component TabWidget {
     in-out property <int> current-index;
+    //-constexpr
     in property <Orientation> orientation;
 
     //-disallow_global_types_as_child_elements
@@ -2570,22 +2656,25 @@ export component PopupWindow {
     in property <length> anchor_y;
     in property <length> anchor_height;
     in property <length> anchor_width;*/
+    //-constexpr
     in property <bool> close-on-click;
     /// By default, a PopupWindow closes when the user clicks. Set this to false to prevent that behavior and close it manually using the `close()` function.
     /// \default close-on-click
-    in property <PopupClosePolicy> close-policy; // constexpr hardcoded in typeregister.rs
+    //-constexpr
+    in property <PopupClosePolicy> close-policy;
     /// Use this read-only property to style the element that opened the popup, for example
     /// to rotate a ComboBox's arrow while the dropdown is open.
     /// `true` while the popup is shown on the screen, and `false` once it is closed, for example
     /// when dismissed by a click, by a selection, or by a programmatic `close()`.
     out property <bool> is-open;
-    //! ## Functions
-    //!
-    //! ### show()
-    //! Show the popup on the screen.
-    //!
-    //! ### close()
-    //! Closes the popup. Use this if you set the `close-policy` property to `no-auto-close`.
+    /// Show the popup on the screen.
+    function show() {
+        BuiltinFunction.ShowPopupWindow
+    }
+    /// Closes the popup. Use this if you set the `close-policy` property to `no-auto-close`.
+    function close() {
+        BuiltinFunction.ClosePopupWindow
+    }
 }
 
 // Internal hover tracker used with `Tooltip` lowering (the compiler inserts `TooltipArea` so `Tooltip` can react to hover and pointer position).
@@ -2801,12 +2890,15 @@ export component Timer {
     callback triggered;
     /// Start the timer (equivalent to setting `running` to true).
     function start() {
+        BuiltinFunction.StartTimer
     }
     /// Stop the timer (equivalent to setting `running` to false).
     function stop() {
+        BuiltinFunction.StopTimer
     }
     /// Restarts the timer if it was previously started.
     function restart() {
+        BuiltinFunction.RestartTimer
     }
     //-is_non_item_type
     //-disallow_global_types_as_child_elements
@@ -2903,6 +2995,53 @@ export global Platform {
     /// When Slint is ported to new operating systems in the future, new enum values will be added.
     /// :::
     out property <OperatingSystemType> os;
+    /// `true` when the user interface is driven by a host application — your business logic written
+    /// in Rust, C++, JavaScript or Python — and `false` when the `.slint` file is being interpreted on
+    /// its own, with nothing behind it, such as when previewed with `slint-viewer` or the editor's preview.
+    ///
+    /// Use it to provide placeholder data and preview-only decorations that are removed from your
+    /// compiled application. This property is a compile-time constant, so branches that depend on it
+    /// are optimized away when the value is known to be `false` or `true`.
+    //
+    // ```slint playground
+    // import { ListView, VerticalBox } from "std-widgets.slint";
+    //
+    // export struct Data {
+    //     text: string,
+    //     color: color,
+    //     bg: color,
+    // }
+    // export component Example inherits Window {
+    //     width: 150px;
+    //     height: 150px;
+    //     in property<[Data]> data: Platform.is-app ? [] : [
+    //                 { text: "Blue", color: #0000ff, bg: #eeeeee},
+    //                 { text: "Red", color: #ff0000, bg: #eeeeee},
+    //                 { text: "Green", color: #00ff00, bg: #eeeeee},
+    //                 { text: "Yellow", color: #ffff00, bg: #222222 },
+    //                 { text: "Black", color: #000000, bg: #eeeeee },
+    //                 { text: "White", color: #ffffff, bg: #222222 },
+    //                 { text: "Magenta", color: #ff00ff, bg: #eeeeee },
+    //                 { text: "Cyan", color: #00ffff, bg: #222222 },
+    //             ];
+    //
+    //     VerticalBox {
+    //         ListView {
+    //             for data in root.data : Rectangle {
+    //                 height: 30px;
+    //                 background: data.bg;
+    //                 width: parent.width;
+    //                 Text {
+    //                     x: 0;
+    //                     text: data.text;
+    //                     color: data.color;
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+    // ```
+    out property <bool> is-app;
     /// The name of the currently selected <Link type="StyleWidgets" label="widget style"/>. Some widget
     /// styles have dark and light variant suffixes, such as `fluent-light`. This property contains the
     /// style name without the suffix. Use <Link type="Palette" label="Palette"/>'s `color-scheme` to

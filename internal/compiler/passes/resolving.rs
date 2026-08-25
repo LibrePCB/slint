@@ -12,7 +12,9 @@
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::*;
 use crate::langtype;
-use crate::langtype::{ElementType, KeyboardModifiers, Struct, StructName, Type};
+use crate::langtype::{
+    ElementType, KeyboardModifiers, PropertyLookupMode, Struct, StructName, Type,
+};
 use crate::lookup::{LookupCtx, LookupObject, LookupResult, LookupResultCallable};
 use crate::object_tree::*;
 use crate::parser::{NodeOrToken, SyntaxKind, SyntaxNode, identifier_text, syntax_nodes};
@@ -64,7 +66,10 @@ fn resolve_expression(
                 if let Some(property_name) = property_name {
                     check_callback_alias_validity(&node, elem, property_name, lookup_ctx.diag);
                 }
-                Expression::from_callback_connection(node, &mut lookup_ctx)
+                let expr = Expression::from_callback_connection(node.clone(), &mut lookup_ctx);
+                #[cfg(feature = "slint-sc")]
+                check_slint_sc_handler_body(&expr, &node, &mut lookup_ctx);
+                expr
             }
             SyntaxKind::Function => Expression::from_function(node.clone().into(), &mut lookup_ctx),
             SyntaxKind::Expression => {
@@ -110,65 +115,201 @@ fn resolve_expression(
             Expression::DebugHook { expression, .. } => **expression = new_expr,
             _ => *expr = new_expr,
         }
-    // Specifically used to resolve match expressions
-    } else if let Expression::BinaryExpression { lhs, rhs, op } = expr {
-        let op = *op;
-        let rhs_node =
-            if let Expression::Uncompiled(node) = rhs.as_ref() { Some(node.clone()) } else { None };
+    }
+}
 
+/// Resolve the subject and the case values to create a standard conditional element
+fn resolve_match_elements(
+    elem: &ElementRc,
+    scope: &[ElementRc],
+    type_register: &TypeRegister,
+    type_loader: &crate::typeloader::TypeLoader,
+    diag: &mut BuildDiagnostics,
+) {
+    let mut match_elements = std::mem::take(&mut elem.borrow_mut().match_elements);
+    for match_element in &mut match_elements {
+        if match_element.cases.is_empty()
+            && matches!(match_element.wildcard, WildcardMatchCaseInfo::None)
+        {
+            continue;
+        }
         resolve_expression(
             elem,
-            lhs,
-            property_name,
+            &mut match_element.subject,
+            None,
             Type::Invalid,
             scope,
             type_register,
             type_loader,
             diag,
         );
-        resolve_expression(
-            elem,
-            rhs,
-            property_name,
-            lhs.ty(),
-            scope,
-            type_register,
-            type_loader,
-            diag,
-        );
-        if op == '=' {
-            let is_literal = matches!(
-                rhs.as_ref(),
-                Expression::NumberLiteral(..)
-                    | Expression::StringLiteral(..)
-                    | Expression::BoolLiteral(..)
-                    | Expression::EnumerationValue(..)
+        let case_type = match_element.subject.ty();
+        for case in &mut match_element.cases {
+            resolve_expression(
+                elem,
+                &mut case.value,
+                None,
+                case_type.clone(),
+                scope,
+                type_register,
+                type_loader,
+                diag,
             );
-            let is_cast = matches!(rhs.as_ref(), Expression::Cast { .. });
-            let is_valid_cast = matches!(
-                rhs.as_ref(),
-                Expression::Cast { from, to, .. }
-                    if matches!(from.as_ref(), Expression::NumberLiteral(..))
-                        && matches!(to, Type::Color | Type::Int32)
-            );
-            if let Expression::NumberLiteral(val, unit) = rhs.as_ref()
-                && *unit == Unit::None
-                && val.fract() != 0.0
-                && let Some(node) = &rhs_node
-            {
-                diag.push_warning("Floating point comparison is not recommended".into(), node);
-            }
-
-            if let Some(node) = rhs_node {
-                if is_literal || is_valid_cast {
-                    // pass
-                } else if is_cast {
-                    diag.push_error("Cannot perform type conversion".into(), &node);
-                } else {
-                    diag.push_error("Match expressions must be literal values".into(), &node);
-                }
-            }
+            check_case_value(&case.value, &case.node, diag);
         }
+        let values: Vec<Option<CaseValue>> =
+            match_element.cases.iter().map(|case| CaseValue::new(&case.value)).collect();
+        check_duplicate_cases(&match_element.cases, &values, diag);
+        check_exhaustiveness(match_element, &values, diag);
+        match_element.lower_to_conditional_elements();
+    }
+}
+
+/// Confirms that each case is a literal value and matches the type of the subject
+fn check_case_value(value: &Expression, node: &SyntaxNode, diag: &mut BuildDiagnostics) {
+    let is_literal = as_number_literal(value).is_some()
+        || matches!(
+            value,
+            Expression::StringLiteral(..)
+                | Expression::BoolLiteral(..)
+                | Expression::EnumerationValue(..)
+        );
+    let is_valid_cast = matches!(
+        value,
+        Expression::Cast { from, to, .. }
+            if as_number_literal(from).is_some()
+                && matches!(to, Type::Color | Type::Int32)
+    );
+
+    if let Some((number, Unit::None)) = as_number_literal(value)
+        && number.fract() != 0.0
+    {
+        diag.push_warning("Floating point comparison is not recommended".into(), node);
+    }
+
+    if is_literal || is_valid_cast {
+        // pass
+    } else if matches!(value, Expression::Cast { .. }) {
+        diag.push_error("Cannot perform type conversion".into(), node);
+    } else {
+        diag.push_error("Cases must be literal values".into(), node);
+    }
+}
+
+fn as_number_literal(value: &Expression) -> Option<(f64, Unit)> {
+    match value {
+        Expression::NumberLiteral(number, unit) => Some((*number, *unit)),
+        Expression::UnaryOp { sub, op: '-' } => as_number_literal(sub).map(|(n, u)| (-n, u)),
+        _ => None,
+    }
+}
+
+#[derive(PartialEq)]
+enum CaseValue {
+    Number(f64, Unit),
+    String(SmolStr),
+    Bool(bool),
+    Enumeration(langtype::EnumerationValue),
+}
+
+impl CaseValue {
+    fn new(value: &Expression) -> Option<Self> {
+        match value {
+            Expression::Cast { from, .. } => Self::new(from),
+            Expression::UnaryOp { sub, op: '-' } => match Self::new(sub)? {
+                Self::Number(number, unit) => Some(Self::Number(-number, unit)),
+                _ => None,
+            },
+            Expression::NumberLiteral(number, unit) => Some(Self::Number(*number, *unit)),
+            Expression::StringLiteral(string) => Some(Self::String(string.clone())),
+            Expression::BoolLiteral(boolean) => Some(Self::Bool(*boolean)),
+            Expression::EnumerationValue(value) => Some(Self::Enumeration(value.clone())),
+            _ => None, // For invalid non-literals
+        }
+    }
+}
+
+/// Reports every case whose value is already covered by an earlier case
+fn check_duplicate_cases(
+    cases: &[MatchCaseInfo],
+    values: &[Option<CaseValue>],
+    diag: &mut BuildDiagnostics,
+) {
+    let mut seen: Vec<&CaseValue> = Vec::with_capacity(values.len());
+    for (case, value) in cases.iter().zip(values) {
+        let Some(value) = value else {
+            continue; // not a valid literal
+        };
+        if seen.contains(&value) {
+            diag.push_error("Duplicate case value".into(), &case.node);
+        } else {
+            seen.push(value);
+        }
+    }
+}
+
+impl std::fmt::Display for CaseValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CaseValue::Number(number, _) => write!(f, "{number}"),
+            CaseValue::String(string) => write!(f, "{string:?}"),
+            CaseValue::Bool(boolean) => write!(f, "{boolean}"),
+            CaseValue::Enumeration(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+/// Reports a match element that does not cover every value its subject can take
+fn check_exhaustiveness(
+    match_element: &MatchElementInfo,
+    values: &[Option<CaseValue>],
+    diag: &mut BuildDiagnostics,
+) {
+    if !matches!(match_element.wildcard, WildcardMatchCaseInfo::None) {
+        return;
+    }
+    // Prevents duplicated errors if both not a literal and not exhaustive
+    let mut covered: Vec<&CaseValue> = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(value) = value else {
+            return;
+        };
+        covered.push(value);
+    }
+    let subject_node = match_element.node.Expression();
+    let subject_type = match_element.subject.ty();
+    let expected: Vec<CaseValue> = match &subject_type {
+        Type::Bool => vec![CaseValue::Bool(true), CaseValue::Bool(false)],
+        Type::Enumeration(enumeration) => (0..enumeration.values.len())
+            .map(|value| {
+                CaseValue::Enumeration(langtype::EnumerationValue {
+                    value,
+                    enumeration: enumeration.clone(),
+                })
+            })
+            .collect(),
+        // The subject expression failed to resolve, so an error was already reported
+        Type::Invalid => return,
+        _ => {
+            diag.push_error(
+                format!("Non-exhaustive match on {subject_type}: a '*' case is required"),
+                &subject_node,
+            );
+            return;
+        }
+    };
+
+    let mut missing = Vec::new();
+    for value in &expected {
+        if !covered.contains(&value) {
+            missing.push(format!("'{value}'"));
+        }
+    }
+    if !missing.is_empty() {
+        diag.push_error(
+            format!("Non-exhaustive match on {subject_type}: missing {}", missing.join(", ")),
+            &subject_node,
+        );
     }
 }
 
@@ -218,6 +359,8 @@ pub fn resolve_expressions(
                         );
                     });
                 }
+
+                resolve_match_elements(elem, &scope.0, &doc.local_registry, type_loader, diag);
 
                 resolve_two_way_bindings_for_element(elem, &scope.0, &doc.local_registry, diag);
 
@@ -458,8 +601,6 @@ impl Expression {
                 NodeOrToken::Node(node) => match node.kind() {
                     SyntaxKind::Expression => return Self::from_expression_node(node.into(), ctx),
                     SyntaxKind::AtImageUrl => {
-                        #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("@image-url() expressions are", &node);
                         return Self::from_at_image_url_node(node.into(), ctx);
                     }
                     SyntaxKind::AtGradient => {
@@ -483,18 +624,29 @@ impl Expression {
                         return Self::from_at_keys_node(node.into(), ctx);
                     }
                     SyntaxKind::QualifiedName => {
-                        #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("Identifier references are", &node);
-                        return Self::from_qualified_name_node(node.clone().into(), ctx);
+                        return Self::from_qualified_name_node(node.into(), ctx);
                     }
                     SyntaxKind::FunctionCallExpression => {
+                        let expr = Self::from_function_call_node(node.clone().into(), ctx);
+                        // Invoking a callback from a handler is the one call the
+                        // Slint SC subset has.
                         #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("Function calls are", &node);
-                        return Self::from_function_call_node(node.into(), ctx);
+                        if !matches!(
+                            (&expr, &ctx.property_type),
+                            (Expression::Invalid, _)
+                                | (
+                                    Expression::FunctionCall {
+                                        function: Callable::Callback(..),
+                                        ..
+                                    },
+                                    Type::Callback(..)
+                                )
+                        ) {
+                            ctx.diag.slint_sc_error("Function calls are", &node);
+                        }
+                        return expr;
                     }
                     SyntaxKind::MemberAccess => {
-                        #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("Member access expressions are", &node);
                         return Self::from_member_access_node(node.into(), ctx);
                     }
                     SyntaxKind::IndexExpression => {
@@ -508,23 +660,19 @@ impl Expression {
                         return Self::from_self_assignment_node(node.into(), ctx);
                     }
                     SyntaxKind::BinaryExpression => {
-                        #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("Binary expressions are", &node);
                         return Self::from_binary_expression_node(node.into(), ctx);
                     }
                     SyntaxKind::UnaryOpExpression => {
-                        #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("Unary expressions are", &node);
+                        // Every unary operator (`+`, `-`, `!`) is in the Slint SC
+                        // subset, so there is nothing to reject here.
                         return Self::from_unaryop_expression_node(node.into(), ctx);
                     }
                     SyntaxKind::ConditionalExpression => {
-                        #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("Conditional expressions are", &node);
+                        // A conditional is in the Slint SC subset; its condition,
+                        // branches, and result type are each restricted on their own.
                         return Self::from_conditional_expression_node(node.into(), ctx);
                     }
                     SyntaxKind::ObjectLiteral => {
-                        #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("Object literal expressions are", &node);
                         return Self::from_object_literal_node(node.into(), ctx);
                     }
                     SyntaxKind::Array => {
@@ -541,6 +689,9 @@ impl Expression {
                         #[cfg(feature = "slint-sc")]
                         ctx.diag.slint_sc_error("String interpolation expressions are", &node);
                         return Self::from_string_template_node(node.into(), ctx);
+                    }
+                    SyntaxKind::Closure => {
+                        return Self::from_closure_node(node.into(), ctx, None);
                     }
                     _ => {}
                 },
@@ -567,10 +718,12 @@ impl Expression {
                                             .diag
                                             .slint_sc_error("Non-integral lengths are", &token),
                                         WrittenUnit::Px => {}
-                                        WrittenUnit::None => ctx.diag.slint_sc_error(
-                                            "Number literals without a unit are",
-                                            &token,
-                                        ),
+                                        // A unit-less integer is an `int` literal; a
+                                        // fractional one would be a `float`.
+                                        WrittenUnit::None if value.fract() != 0. => ctx
+                                            .diag
+                                            .slint_sc_error("Non-integral numbers are", &token),
+                                        WrittenUnit::None => {}
                                         _ => ctx.diag.slint_sc_error(
                                             &format!("Number literals with the unit '{unit}' are"),
                                             &token,
@@ -648,6 +801,17 @@ impl Expression {
             ImageReference::from_resolved(absolute_source_path)
         };
 
+        // Slint SC decodes the image at compile time, so only a file on disk
+        // can be referenced.
+        #[cfg(feature = "slint-sc")]
+        match &resource_ref {
+            ImageReference::DataUri(_) => {
+                ctx.diag.slint_sc_error("Data URIs in @image-url() are", &node)
+            }
+            ImageReference::Url(_) => ctx.diag.slint_sc_error("URLs in @image-url() are", &node),
+            _ => {}
+        }
+
         let nine_slice = node
             .children_with_tokens()
             .filter_map(|n| n.into_token())
@@ -679,6 +843,11 @@ impl Expression {
                 None
             }
         };
+
+        #[cfg(feature = "slint-sc")]
+        if nine_slice.is_some() {
+            ctx.diag.slint_sc_error("Nine-slice borders in @image-url() are", &node);
+        }
 
         Expression::ImageReference {
             resource_ref,
@@ -1571,8 +1740,32 @@ impl Expression {
             }
             return Self::Invalid;
         };
-        // Convert the arguments once the parameter types are known, so a bare color/enum
-        // literal in argument position resolves against its parameter type.
+        // For `.any(predicate)` / `.all(predicate)` / `.find-index(predicate)` the
+        // closure's argument type is structurally derived from the base array's
+        // element type. Compute it here so we can hand it to the closure when
+        // resolving that specific argument.
+        let expected_closure_arg_type = match &function {
+            Some(LookupResult::Callable(LookupResultCallable::MemberFunction {
+                base,
+                member,
+                ..
+            })) if matches!(
+                **member,
+                LookupResultCallable::Callable(Callable::Builtin(
+                    BuiltinFunction::ArrayAny
+                        | BuiltinFunction::ArrayAll
+                        | BuiltinFunction::ArrayFindIndex
+                ))
+            ) =>
+            {
+                let Type::Array(elem_ty) = base.ty() else { unreachable!() };
+                Some((*elem_ty).clone())
+            }
+            _ => None,
+        };
+
+        // Convert the arguments once the parameter types are known, so type-directed
+        // literals resolve against the parameter type at their exact argument position.
         let arg_nodes = sub_expr.collect::<Vec<_>>();
         let convert_args = |ctx: &mut LookupCtx, expected: &[Type]| {
             arg_nodes
@@ -1580,21 +1773,26 @@ impl Expression {
                 .enumerate()
                 .map(|(i, n)| {
                     let ty = expected.get(i).cloned().unwrap_or(Type::Invalid);
-                    let e = ctx.with_expected_type(ty, |ctx| {
-                        Self::from_expression_node((*n).clone(), ctx)
+                    let expression = ctx.with_expected_type(ty, |ctx| {
+                        Self::from_argument_expression_node(
+                            (*n).clone(),
+                            ctx,
+                            &expected_closure_arg_type,
+                        )
                     });
-                    (e, Some(NodeOrToken::from((**n).clone())))
+                    (expression, Some(NodeOrToken::from((**n).clone())))
                 })
                 .collect::<Vec<_>>()
         };
+
         let Some(function) = function else {
-            // Check sub expressions anyway
+            // Check sub-expressions anyway.
             convert_args(ctx, &[]);
             assert!(ctx.diag.has_errors());
             return Self::Invalid;
         };
         let LookupResult::Callable(function) = function else {
-            // Check sub expressions anyway
+            // Check sub-expressions anyway.
             convert_args(ctx, &[]);
             ctx.diag.push_error("The expression is not a function".into(), &node);
             return Self::Invalid;
@@ -1613,8 +1811,8 @@ impl Expression {
                     &ctx.symbol_counters,
                 );
             }
-            LookupResultCallable::MemberFunction { member, base, base_node } => {
-                arguments.push((base, base_node));
+            LookupResultCallable::MemberFunction { member, base, source_node } => {
+                arguments.push((base, source_node));
                 adjust_arg_count = 1;
                 match *member {
                     LookupResultCallable::Callable(c) => c,
@@ -1771,6 +1969,15 @@ impl Expression {
                 _ => None,
             })
             .unwrap_or('_');
+
+        // In Slint SC, arithmetic (`+`, `-`, `*`), logical (`&&`, `||`), and
+        // comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`) are in the subset; `/` is
+        // not. Operands are checked as they resolve, and a result that leaves the
+        // subset (a `length * length` unit product) is rejected where it is used.
+        #[cfg(feature = "slint-sc")]
+        if op == '/' {
+            ctx.diag.slint_sc_error("Operator '/'", &node);
+        }
 
         let op_class = operator_class(op);
         let (lhs_n, rhs_n) = node.Expression();
@@ -2003,6 +2210,95 @@ impl Expression {
         Expression::Array { element_ty, values }
     }
 
+    /// Resolve a closure expression. `arg_type` is `Some` only when the closure appears in a
+    /// position whose callee constrains the argument's type (currently `.any` / `.all`); in
+    /// that case the body is also required to evaluate to `bool`. When `arg_type` is `None`
+    /// the closure is still a valid expression of type [`Type::Closure`], but its body cannot
+    /// be meaningfully typed and any later type-conversion error will be reported at the
+    /// position that consumes it.
+    fn from_closure_node(
+        node: syntax_nodes::Closure,
+        ctx: &mut LookupCtx,
+        arg_type: Option<Type>,
+    ) -> Expression {
+        if crate::reject_experimental_feature(ctx.diag, ctx.type_register, "closures", &node) {
+            return Expression::Invalid;
+        }
+        let has_expected_arg_type = arg_type.is_some();
+        let ty = arg_type.unwrap_or(Type::Invalid);
+        let arg_name = node.DeclaredIdentifier().to_smolstr();
+        let internal_arg_name: SmolStr = format!("local_{arg_name}").into();
+
+        ctx.local_variables.push(vec![(internal_arg_name.clone(), ty)]);
+        let body_expected_type = if has_expected_arg_type { Type::Bool } else { Type::Invalid };
+        let expression = ctx.with_expected_type(body_expected_type, |ctx| {
+            Expression::from_expression_node(node.Expression(), ctx)
+        });
+        ctx.local_variables.pop();
+
+        let body_ty = expression.ty();
+        if has_expected_arg_type && body_ty != Type::Bool && body_ty != Type::Invalid {
+            ctx.diag.push_error(
+                format!("Closure body must be of type bool, but is {body_ty}"),
+                &node.Expression(),
+            );
+            return Expression::Invalid;
+        }
+
+        Expression::Closure { arg_name: internal_arg_name, expression: Box::new(expression) }
+    }
+
+    /// Resolve a function call argument. If the argument is a closure expression (possibly
+    /// nested in zero or more parenthesizing `Expression` wrappers), dispatch directly to
+    /// `from_closure_node` with the expected argument type. Otherwise fall back to the
+    /// generic expression resolver, in which case any closure encountered inside has no
+    /// expected argument type.
+    ///
+    /// A closure-typed argument that is not written inline (for example a local variable
+    /// holding a closure) is rejected: the code generators and the interpreter evaluate
+    /// the closure body directly at the call site, so they require the argument to be a
+    /// literal [`Expression::Closure`].
+    fn from_argument_expression_node(
+        node: syntax_nodes::Expression,
+        ctx: &mut LookupCtx,
+        expected_closure_arg_type: &Option<Type>,
+    ) -> Expression {
+        if expected_closure_arg_type.is_some() {
+            let mut current = node.clone();
+            loop {
+                let first_meaningful_child = current
+                    .children()
+                    .find(|n| matches!(n.kind(), SyntaxKind::Expression | SyntaxKind::Closure));
+                match first_meaningful_child {
+                    Some(child) if child.kind() == SyntaxKind::Closure => {
+                        return Self::from_closure_node(
+                            child.into(),
+                            ctx,
+                            expected_closure_arg_type.clone(),
+                        );
+                    }
+                    Some(child) if child.kind() == SyntaxKind::Expression => {
+                        current = child.into();
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let expression = Self::from_expression_node(node.clone(), ctx);
+        if expected_closure_arg_type.is_some()
+            && expression.ty() == Type::Closure
+            && !matches!(expression, Expression::Closure { .. })
+        {
+            ctx.diag.push_error(
+                "Closures must be written inline as the argument of 'any', 'all' or 'find-index'"
+                    .into(),
+                &node,
+            );
+            return Expression::Invalid;
+        }
+        expression
+    }
+
     fn from_string_template_node(
         node: syntax_nodes::StringTemplate,
         ctx: &mut LookupCtx,
@@ -2224,8 +2520,17 @@ fn lookup_qualified_name_node(
             if it.next().is_some() {
                 ctx.diag.push_error(format!("Cannot access id '{}'", first.text()), &node);
             } else {
+                let mut parts = crate::lookup::enum_or_color_suggestions(ctx, &first_str)
+                    .iter()
+                    .map(|s| format!("'{s}'"))
+                    .collect::<Vec<_>>();
+                let hint = match parts.pop() {
+                    None => String::new(),
+                    Some(last) if parts.is_empty() => format!(". Did you mean {last}?"),
+                    Some(last) => format!(". Did you mean {} or {last}?", parts.join(", ")),
+                };
                 ctx.diag.push_error(
-                    format!("Unknown unqualified identifier '{}'", first.text()),
+                    format!("Unknown unqualified identifier '{}'{hint}", first.text()),
                     &node,
                 );
             }
@@ -2365,10 +2670,19 @@ fn continue_lookup_within_element(
     };
     let prop_name = crate::parser::normalize_identifier(second.text());
 
-    let lookup_result = elem.borrow().lookup_property(&prop_name);
-    let local_to_component = lookup_result.is_local_to_component && ctx.is_local_element(elem);
+    let is_local_element = ctx.is_local_element(elem);
+    let mode = if is_local_element {
+        PropertyLookupMode::ComponentLocal
+    } else {
+        PropertyLookupMode::FromOutside
+    };
+    let lookup_result = elem.borrow().lookup_property(&prop_name, mode);
+    let local_to_component = lookup_result.is_local_to_component && is_local_element;
+    // A property or function whose type is outside the Slint SC subset
+    // doesn't resolve; callbacks do, so a handler can invoke them.
+    let sc_resolves = !ctx.diag.is_slint_sc() || lookup_result.property_type.is_slint_sc();
 
-    if lookup_result.property_type.is_property_type() {
+    if sc_resolves && lookup_result.property_type.is_property_type() {
         if !local_to_component && lookup_result.property_visibility == PropertyVisibility::Private {
             ctx.diag.push_error(format!("The property '{}' is private. Annotate it with 'in', 'out' or 'in-out' to make it accessible from other components", second.text()), &second);
             return None;
@@ -2401,17 +2715,20 @@ fn continue_lookup_within_element(
         }
         let prop = Expression::PropertyReference(NamedReference::new(
             elem,
-            lookup_result.resolved_name.to_smolstr(),
+            lookup_result.internal_or_resolved_name(),
         ));
         maybe_lookup_object(prop.into(), it, ctx)
     } else if matches!(lookup_result.property_type, Type::Callback { .. }) {
+        if let Some(message) = lookup_result.deprecated.as_ref().filter(|_| !local_to_component) {
+            ctx.diag.push_property_deprecation_warning_with_message(&prop_name, message, &second);
+        }
         if let Some(x) = it.next() {
             ctx.diag.push_error("Cannot access fields of callback".into(), &x)
         }
         Some(LookupResult::Callable(LookupResultCallable::Callable(Callable::Callback(
-            NamedReference::new(elem, lookup_result.resolved_name.to_smolstr()),
+            NamedReference::new(elem, lookup_result.internal_or_resolved_name()),
         ))))
-    } else if let Type::Function(fun) = lookup_result.property_type {
+    } else if sc_resolves && let Type::Function(fun) = &lookup_result.property_type {
         if lookup_result.property_visibility == PropertyVisibility::Private && !local_to_component {
             let message = format!(
                 "The function '{}' is private. Annotate it with 'public' to make it accessible from other components",
@@ -2429,6 +2746,9 @@ fn continue_lookup_within_element(
         {
             ctx.diag.push_error(format!("The function '{}' is protected", second.text()), &second);
         }
+        if let Some(message) = lookup_result.deprecated.as_ref().filter(|_| !local_to_component) {
+            ctx.diag.push_property_deprecation_warning_with_message(&prop_name, message, &second);
+        }
         if let Some(x) = it.next() {
             ctx.diag.push_error("Cannot access fields of a function".into(), &x)
         }
@@ -2436,13 +2756,13 @@ fn continue_lookup_within_element(
             Some(builtin) => Callable::Builtin(builtin),
             None => Callable::Function(NamedReference::new(
                 elem,
-                lookup_result.resolved_name.to_smolstr(),
+                lookup_result.internal_or_resolved_name(),
             )),
         };
         if matches!(fun.args.first(), Some(Type::ElementReference)) {
             LookupResult::Callable(LookupResultCallable::MemberFunction {
                 base: Expression::ElementReference(Rc::downgrade(elem)),
-                base_node: Some(NodeOrToken::Node(node.into())),
+                source_node: Some(NodeOrToken::Node(node.into())),
                 member: Box::new(LookupResultCallable::Callable(callable)),
             })
             .into()
@@ -2474,7 +2794,10 @@ fn continue_lookup_within_element(
             // Attempt to recover if the user wanted to write "-"
             if elem
                 .borrow()
-                .lookup_property(&crate::parser::normalize_identifier(&second.text()[0..minus_pos]))
+                .lookup_property(
+                    &crate::parser::normalize_identifier(&second.text()[0..minus_pos]),
+                    mode,
+                )
                 .property_type
                 != Type::Invalid
             {
@@ -2589,14 +2912,22 @@ fn resolve_two_way_bindings_for_element(
             .or_else(|| elem.borrow().callback_alias_declaration_node(prop_name));
         if let Some(n) = twb_node {
             let node: SyntaxNode = n.clone().into();
-            let lhs_lookup = elem.borrow().lookup_property(prop_name);
+            let lhs_lookup =
+                elem.borrow().lookup_property(prop_name, PropertyLookupMode::InternalName);
             if !lhs_lookup.is_valid() {
                 // An attempt to resolve this already failed when trying to resolve the property type
                 assert!(diag.has_errors());
                 continue;
             }
+            // Diagnostics name the property as written in the source, not by its mangled key.
+            let declared_name = elem
+                .borrow()
+                .property_declarations
+                .get(prop_name)
+                .and_then(|d| d.shadowed_name.clone())
+                .unwrap_or_else(|| prop_name.clone());
             let mut lookup_ctx = LookupCtx {
-                property_name: Some(prop_name.as_str()),
+                property_name: Some(declared_name.as_str()),
                 property_type: lhs_lookup.property_type.clone(),
                 expected_type: lhs_lookup.property_type.clone(),
                 component_scope: scope,
@@ -2643,7 +2974,10 @@ fn resolve_two_way_bindings_for_element(
                 }
 
                 // Check the compatibility.
-                let mut rhs_lookup = nr.element().borrow().lookup_property(nr.name());
+                let mut rhs_lookup = nr
+                    .element()
+                    .borrow()
+                    .lookup_property(nr.name(), PropertyLookupMode::InternalName);
                 if rhs_lookup.property_type == Type::Invalid {
                     // An attempt to resolve this already failed when trying to resolve the property type
                     assert!(diag.has_errors());
@@ -2931,5 +3265,38 @@ fn check_callback_alias_validity(
                 &node.child_token(SyntaxKind::Identifier).unwrap(),
             );
         }
+    }
+}
+
+/// Validate a callback handler body against the Slint SC subset: a sequence of
+/// callback invocations, and nothing else.
+///
+/// The expressions a handler body may be made of are each rejected where they
+/// are resolved; what's left to reject here is an expression that's in the
+/// subset on its own but has no effect as a statement, such as a property read.
+#[cfg(feature = "slint-sc")]
+fn check_slint_sc_handler_body(
+    expr: &Expression,
+    node: &syntax_nodes::CallbackConnection,
+    ctx: &mut LookupCtx,
+) {
+    let statements = match expr {
+        Expression::CodeBlock(statements) => statements.as_slice(),
+        single => core::slice::from_ref(single),
+    };
+    if !statements.iter().all(|statement| {
+        matches!(
+            statement,
+            // An error was already reported for this statement.
+            Expression::Invalid | Expression::FunctionCall { function: Callable::Callback(..), .. }
+        )
+    }) {
+        // Report on the name of the callback: the handler itself spans as many
+        // lines as its body.
+        let name = node.child_token(SyntaxKind::Identifier);
+        ctx.diag.slint_sc_error(
+            "A callback handler body that isn't a callback invocation is",
+            name.as_ref().map_or(&**node as &dyn Spanned, |name| name),
+        );
     }
 }

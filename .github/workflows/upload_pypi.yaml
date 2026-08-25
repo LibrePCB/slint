@@ -128,7 +128,7 @@ jobs:
               with:
                   target: "aarch64-apple-ios aarch64-apple-ios-sim"
             - name: Build iOS wheels
-              uses: pypa/cibuildwheel@v4.1.1
+              uses: pypa/cibuildwheel@v4.2.0
               with:
                   package-dir: api/python/slint
                   output-dir: wheelhouse
@@ -185,8 +185,8 @@ jobs:
             # extension's direct DT_NEEDED libraries; apt pulls the rest.
             - name: Install runtime system libraries
               run: |
-                  sudo timeout 300 apt-get update
-                  sudo timeout 300 apt-get install -y \
+                  sudo timeout 600 apt-get update
+                  sudo timeout 600 apt-get install -y \
                     libxkbcommon-x11-0 libxkbcommon0 libgbm1 libinput10 \
                     libfontconfig1 libfreetype6
             - uses: actions/download-artifact@v8

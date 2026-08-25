@@ -536,6 +536,7 @@ fn gen_corelib(
         "Callback",
         "slint_property_listener_scope_evaluate",
         "slint_property_listener_scope_is_dirty",
+        "PropertyTracker",
         "PropertyTrackerOpaque",
         "CallbackOpaque",
         "ChangeTracker",
@@ -952,6 +953,8 @@ fn gen_corelib(
         .body
         .insert("Flickable".to_owned(), "    inline Flickable(); inline ~Flickable();".into());
     config.export.pre_body.insert("FlickableDataBox".to_owned(), "struct FlickableData;".into());
+    config.export.body.insert("Path".to_owned(), "    inline Path(); inline ~Path();".into());
+    config.export.pre_body.insert("FittedPathBox".to_owned(), "struct FittedPathInner;".into());
     config.export.body.insert(
         "SystemTrayIcon".to_owned(),
         "    inline SystemTrayIcon(); inline ~SystemTrayIcon();".into(),
@@ -1034,6 +1037,7 @@ namespace slint {
         using slint::private_api::WindowAdapterRc;
         using namespace vtable;
         using private_api::Property;
+        using private_api::PropertyTracker;
         using private_api::PathData;
         using private_api::Point;
         struct ItemTreeVTable;
@@ -1206,9 +1210,19 @@ fn gen_interpreter(
         "PropertyDescriptor",
         "Box",
         "LiveReloadingComponentInner",
+        // Opaque on the C++ side: slint-interpreter.h defines the struct
+        // itself, and the interpreter's `Instance` fields must not leak.
+        "Instance",
+        "ComponentInstanceInner",
     ])
     .map(String::from)
     .collect();
+    // `ComponentInstance.inner` wraps the instance VRc; spell the field
+    // with the VRc type the C++ side expects.
+    config
+        .export
+        .rename
+        .insert("ComponentInstanceInner".into(), "VRc<ItemTreeVTable, Instance>".into());
     let mut crate_dir = root_dir.to_owned();
 
     crate_dir.extend(["internal", "interpreter"].iter());
@@ -1258,6 +1272,7 @@ fn gen_interpreter(
                 using slint::interpreter::PropertyDescriptor;
                 using slint::interpreter::Diagnostic;
                 struct LiveReloadingComponentInner;
+                struct Instance;
                 template <typename T> using Box = T*;
             }",
         )

@@ -49,7 +49,7 @@ jobs:
                   rgb_version=`grep 'rgb = '  internal/core/Cargo.toml | sed 's/^.*"\(.*\)"/\1/'`
                   echo "RUSTDOCFLAGS=$RUSTDOCFLAGS --extern-html-root-url rgb=https://docs.rs/rgb/$rgb_version/ --extern-html-root-url android_activity=https://docs.rs/android-activity/0.5/ --extern-html-root-url raw_window_handle=https://docs.rs/raw_window_handle/0.6 --extern-html-root-url winit=https://docs.rs/winit/0.30 --extern-html-root-url wgpu=https://docs.rs/wgpu/30 --extern-html-root-url input=https://docs.rs/input/0.9 --extern-html-root-url fontique=https://docs.rs/fontique/0.8" >> $GITHUB_ENV
             - uses: ./.github/actions/install-linux-dependencies
-            - uses: pnpm/action-setup@v6.0.9
+            - uses: pnpm/action-setup@v6.0.10
             - uses: actions/setup-node@v7
               with:
                 node-version: 24
@@ -59,7 +59,7 @@ jobs:
                   toolchain: nightly
                   target: aarch64-linux-android
             - name: Install apt dependencies
-              run: sudo timeout 300 apt-get install doxygen
+              run: sudo timeout 600 apt-get install doxygen
             - name: "Install Node dependencies"
               run: pnpm i --frozen-lockfile
             - name: Test Cpp docs converter
@@ -124,13 +124,14 @@ jobs:
             version: ${{ steps.version.outputs.VERSION }}
         env:
             RUSTFLAGS: -D warnings -W deprecated
+            RUSTDOCFLAGS: -D warnings
             SLINT_NO_QT: 1
             CARGO_INCREMENTAL: false
             RELEASE_INPUT: ${{ inputs.release }}
             BRANCH_NAME: ${{ github.ref_name }}
         steps:
             - uses: actions/checkout@v7
-            - uses: pnpm/action-setup@v6.0.9
+            - uses: pnpm/action-setup@v6.0.10
             - uses: actions/setup-node@v7
               with:
                 node-version: 24
@@ -139,7 +140,7 @@ jobs:
             - name: Install MS fonts for comic sans needed by one of the screenshots in the docs
               run: |
                   echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | sudo debconf-set-selections
-                  sudo timeout 300 apt-get install ttf-mscorefonts-installer -y
+                  sudo timeout 600 apt-get install ttf-mscorefonts-installer -y
             - uses: ./.github/actions/setup-rust
               with:
                   toolchain: stable
@@ -197,12 +198,27 @@ jobs:
                   name: slint-sc-coverage
                   path: coverage
             - name: "Generate SC API reference"
+              id: sc-reference
               run: |
                   COVERAGE_FLAGS=""
                   if [ "${{ inputs['slint-sc-coverage'] }}" = "true" ]; then
-                      COVERAGE_FLAGS="--coverage-json coverage/coverage.json --coverage-html coverage/html --test-results coverage/test-results"
+                      # --fail-on-gaps holds the runtime at complete coverage and
+                      # every requirement paragraph at one test or more. It needs
+                      # the coverage export, so it only applies to these runs.
+                      COVERAGE_FLAGS="--coverage-json coverage/coverage.json --coverage-html coverage/html --test-results coverage/test-results --fail-on-gaps"
                   fi
+                  # A gap exits 2 with the chapters written, so record it and let
+                  # the job build and upload the manual. The last step fails the
+                  # run. Any other non-zero exit is a real failure: stop here.
+                  set +e
                   cargo run --release -p slint-doc-generator -- --slint-sc $COVERAGE_FLAGS generate-mdx
+                  status=$?
+                  set -e
+                  if [ $status -eq 2 ]; then
+                      echo "gaps=true" >> "$GITHUB_OUTPUT"
+                  elif [ $status -ne 0 ]; then
+                      exit $status
+                  fi
             - name: "Compile Slint snippets in Markdown (doctests)"
               run: cargo test --manifest-path tests/Cargo.toml -p doctests
             - name: "Build Safety Manual"
@@ -242,6 +258,12 @@ jobs:
               with:
                 name: docs-astro
                 path: artifact
+            # Last, so the manual is built and uploaded before the run fails.
+            - name: "Fail on slint-sc coverage or traceability gaps"
+              if: ${{ steps.sc-reference.outputs.gaps == 'true' }}
+              run: |
+                echo "The safety manual has gaps. See the \"Generate SC API reference\" step for the list."
+                exit 1
 
     # Job 3: Build Node and Python documentation
     node-python-docs:
@@ -250,7 +272,7 @@ jobs:
             RELEASE_INPUT: ${{ inputs.release }}
         steps:
             - uses: actions/checkout@v7
-            - uses: pnpm/action-setup@v6.0.9
+            - uses: pnpm/action-setup@v6.0.10
             - uses: actions/setup-node@v7
               with:
                 node-version: 24
@@ -306,11 +328,13 @@ jobs:
             - name: "Test the Python docs generator"
               run: uv run pytest
               working-directory: docs/python
+            # ruff and ty come from the dev dependency group, pinned in
+            # docs/python/pyproject.toml so Dependabot can bump them.
             - name: "Lint the Python docs generator"
-              run: uv tool run ruff@0.16.0 check
+              run: uv run ruff check
               working-directory: docs/python
             - name: "Type-check the Python docs generator"
-              run: uvx ty check
+              run: uv run ty check
               working-directory: docs/python
             - name: "Generate Python language stubs"
               # The slint-python build script writes slint/language.pyi (the

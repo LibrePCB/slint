@@ -7,7 +7,7 @@ Hand-written content lives in `src/content/docs/`. Everything under
 gitignored, with one subdirectory per section of the site: `reference/` holds
 the API reference of the items annotated with `\sc` in
 `internal/compiler/builtins.slint` (and later in
-`internal/common/{enums,builtin_structs}.rs`), `qualification-plan/` the
+`internal/common/{enums,builtin_structs}.rs`), `qualification-report/` the
 traceability matrix. The pages set their own `slug`, so their location under
 `generated/` doesn't affect their URL.
 
@@ -17,11 +17,16 @@ gitignored: its canonical source is the main Slint docs
 `scripts/sync-language-spec.mjs` copies it on every `pnpm dev`/`pnpm build`.
 Edit the chapters there, not here.
 
+The runtime API reference under `public/api/` is generated and gitignored too:
+`pnpm gen:api` runs `cargo doc` for the `slint-sc` crate and stages the result
+there, so the manual ships the API of the crate its generated code depends on.
+`pnpm dev` and `pnpm build` run it for you.
+
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) (v22+)
 - [pnpm](https://pnpm.io/)
-- A Rust toolchain (for `slint-doc-generator`)
+- A Rust toolchain (for `slint-doc-generator` and `pnpm gen:api`)
 
 Run `pnpm install` from the repository root first.
 

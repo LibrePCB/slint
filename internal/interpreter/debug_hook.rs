@@ -1,43 +1,41 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-use crate::{Value, dynamic_item_tree};
+//! Runtime side of the `debug_hooks` compiler feature: evaluating an
+//! `Expression::DebugHook` calls the callback installed with
+//! `ComponentInstance::set_debug_hook_callback`, which may override the value.
+
+use crate::Value;
+use crate::eval::EvalContext;
 
 use smol_str::SmolStr;
 
-use std::pin::Pin;
-
 pub type DebugHookCallback = Box<dyn Fn(&str) -> Option<Value>>;
 
+#[cfg(feature = "internal")]
 pub(crate) fn set_debug_hook_callback(
-    component: Pin<&dynamic_item_tree::ItemTreeBox>,
+    instance: &vtable::VRc<i_slint_core::item_tree::ItemTreeVTable, crate::instance::Instance>,
     func: Option<DebugHookCallback>,
 ) {
-    let Some(global_storage) = component.description().compiled_globals() else {
-        return;
-    };
-    *(global_storage.debug_hook_callback.borrow_mut()) = func;
+    *instance.globals.debug_hook_callback.borrow_mut() = func;
 }
 
-pub(crate) fn trigger_debug_hook(
-    component_instance: &dynamic_item_tree::InstanceRef,
-    id: SmolStr,
-) -> Option<Value> {
-    component_instance.description.compiled_globals().and_then(|global_storage| {
-        let callback = global_storage.debug_hook_callback.borrow();
-        callback.as_ref().and_then(|callback| callback(&id))
-    })
+/// `Some` when the installed callback overrides the value, `None` to evaluate the binding.
+pub(crate) fn trigger_debug_hook(ctx: &EvalContext, id: &SmolStr) -> Option<Value> {
+    let globals = ctx.globals.upgrade()?;
+    let callback = globals.debug_hook_callback.borrow();
+    callback.as_ref().and_then(|callback| callback(id))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{Compiler, ComponentInstance};
     use i_slint_compiler::object_tree::Element;
     use i_slint_core::{Property, graphics::ApproxEq};
-    use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc};
+    use std::{cell::RefCell, collections::HashMap, path::PathBuf, pin::Pin, rc::Rc};
 
-    fn compile_with_debug_hooks(code: &str) -> ComponentInstance {
+    pub fn compile_with_debug_hooks(code: &str) -> ComponentInstance {
         i_slint_backend_testing::init_no_event_loop();
 
         let mut compiler = Compiler::default();
@@ -70,7 +68,7 @@ mod tests {
     }
 
     // Make sure to not actually write this file, it's just a synthetic path
-    fn test_path() -> PathBuf {
+    pub fn test_path() -> PathBuf {
         PathBuf::from("/tmp/test.slint")
     }
 
@@ -143,11 +141,6 @@ export component Win inherits Window {
         assert!(reverted.size.width.approx_eq(&base.size.width), "width should revert");
     }
 
-    // Component-instance elements are hooked too: their unbound properties get synthetic hooks
-    // that must be upgraded with the definition's default bindings during inlining (keeping the
-    // *instance* element's hook id). Verifies that the defaults are preserved (regression: they
-    // used to be clobbered, rendering repeated items transparent) and that instance properties
-    // are live-overridable through the hook callback.
     #[test]
     fn debug_hook_component_instance_override() {
         let code = r#"
@@ -201,6 +194,53 @@ export component Win inherits Window {
             "rotation must not move the origin"
         );
         set_override(&store, element_hash, "transform-rotation", None);
+    }
+
+    #[test]
+    fn debug_hook_forwards_live_private_state_per_instance() {
+        let code = r#"
+component Sub inherits Rectangle {
+    in property <length> seed;
+    in property <bool> active;
+    in-out property <length> inherited-value: private-child.x;
+    private-child := Rectangle { x: root.seed; }
+    states [
+        active when root.active: {
+            private-child.x: 50px;
+        }
+    ]
+}
+export component Win inherits Window {
+    in-out property <length> first-seed: 10px;
+    in-out property <bool> first-active;
+    first := Sub { seed: root.first-seed; active: root.first-active; }
+    second := Sub { seed: 20px; }
+    out property <length> first-value: first.inherited-value;
+    out property <length> second-value: second.inherited-value;
+}"#;
+        let instance = compile_with_debug_hooks(code);
+        let store = install_debug_hook_store(&instance);
+        let (_, first_hash) = find_element(&instance, code, "Sub { seed: root.first-seed");
+
+        assert_eq!(instance.get_property("first-value").unwrap(), Value::Number(10.0));
+        assert_eq!(instance.get_property("second-value").unwrap(), Value::Number(20.0));
+
+        instance.set_property("first-seed", Value::Number(15.0)).unwrap();
+        assert_eq!(instance.get_property("first-value").unwrap(), Value::Number(15.0));
+        assert_eq!(instance.get_property("second-value").unwrap(), Value::Number(20.0));
+
+        instance.set_property("first-active", Value::Bool(true)).unwrap();
+        assert_eq!(instance.get_property("first-value").unwrap(), Value::Number(50.0));
+
+        set_override(&store, first_hash, "inherited-value", Some(Value::Number(90.0)));
+        instance.set_property("first-active", Value::Bool(false)).unwrap();
+        instance.set_property("first-seed", Value::Number(25.0)).unwrap();
+        assert_eq!(instance.get_property("first-value").unwrap(), Value::Number(90.0));
+        assert_eq!(instance.get_property("second-value").unwrap(), Value::Number(20.0));
+
+        set_override(&store, first_hash, "inherited-value", None);
+        assert_eq!(instance.get_property("first-value").unwrap(), Value::Number(25.0));
+        assert_eq!(instance.get_property("second-value").unwrap(), Value::Number(20.0));
     }
 
     // Regression test: debug hooks inject bindings for properties the element may not have

@@ -99,7 +99,7 @@
 
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::{BuiltinFunction, Callable, Expression, NamedReference};
-use crate::langtype::{ElementType, Type};
+use crate::langtype::{ElementType, PropertyLookupMode, Type};
 use crate::object_tree::*;
 use core::cell::RefCell;
 use i_slint_common::MENU_SEPARATOR_PLACEHOLDER_TITLE;
@@ -253,6 +253,22 @@ fn process_context_menu(
     components: &UsefulMenuComponents,
     diag: &mut BuildDiagnostics,
 ) -> bool {
+    // This pass runs before inlining, so a component inheriting ContextMenuArea is lowered
+    // through its own root element, the only one whose base_type is the builtin. Skip the
+    // elements instantiating such a component, however deep the inheritance chain.
+    if !matches!(&context_menu_elem.borrow().base_type, ElementType::Builtin(_)) {
+        // A Menu declared here would be dropped silently.
+        for c in &context_menu_elem.borrow().children {
+            if matches!(&c.borrow().base_type, ElementType::Builtin(b) if b.name == "Menu") {
+                diag.push_error(
+                    "Menu must be declared inside the component inheriting ContextMenuArea".into(),
+                    &*c.borrow(),
+                );
+            }
+        }
+        return false;
+    }
+
     let is_internal = matches!(&context_menu_elem.borrow().base_type, ElementType::Builtin(b) if b.name == "ContextMenuInternal");
 
     if is_internal && context_menu_elem.borrow().property_declarations.contains_key(ENTRIES) {
@@ -525,7 +541,10 @@ fn process_window(
 
     for prop in [ENTRIES, SUB_MENU, ACTIVATED] {
         // materialize the properties and callbacks
-        let ty = components.menubar_impl.lookup_property(prop).property_type;
+        let ty = components
+            .menubar_impl
+            .lookup_property(prop, PropertyLookupMode::ComponentLocal)
+            .property_type;
         assert_ne!(ty, Type::Invalid, "Can't lookup type for {prop}");
         let nr = NamedReference::new(&menu_bar, SmolStr::new_static(prop));
         let forward_expr = if let Type::Callback(cb) = &ty {

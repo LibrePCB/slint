@@ -1450,6 +1450,7 @@ impl WindowItem {
         local_font_weight: i32,
         local_font_size: LogicalLength,
         local_letter_spacing: LogicalLength,
+        local_line_height_factor: f32,
         local_italic: bool,
     ) -> FontRequest {
         let Some(window_item_rc) = next_window_item(self_rc) else {
@@ -1489,6 +1490,12 @@ impl WindowItem {
                 }
             },
             letter_spacing: Some(local_letter_spacing),
+            // 1 is neutral and negative or non-finite values behave like 1, all mapping to
+            // None (the font's natural line height); 0 is a valid factor and collapses lines.
+            line_height_factor: (local_line_height_factor.is_finite()
+                && local_line_height_factor >= 0.0
+                && local_line_height_factor != 1.0)
+                .then_some(local_line_height_factor),
             italic: local_italic,
         }
     }
@@ -1628,12 +1635,11 @@ impl Item for ContextMenu {
             MouseEvent::Pressed { position, button: PointerEventButton::Left, .. } => {
                 let self_weak = _self_rc.downgrade();
                 let position = *position;
-                self.long_press_timer.start(
+                let ctx = WindowInner::from_pub(_window_adapter.window()).context();
+                self.long_press_timer.start_on(
+                    ctx,
                     crate::timers::TimerMode::SingleShot,
-                    WindowInner::from_pub(_window_adapter.window())
-                        .context()
-                        .platform()
-                        .long_press_interval(crate::InternalToken),
+                    ctx.platform().long_press_interval(crate::InternalToken),
                     move || {
                         let Some(self_rc) = self_weak.upgrade() else { return };
                         let Some(self_) = self_rc.downcast::<ContextMenu>() else { return };
@@ -2116,7 +2122,12 @@ impl TooltipArea {
         }
 
         let self_weak = self_rc.downgrade();
-        self.timer.start(
+        // Start on the context this item's window belongs to, not on whichever one is
+        // current: a component built with `new_with_context` must keep its timers there.
+        let Some(window_adapter) = self_rc.window_adapter() else { return };
+        let ctx = crate::window::WindowInner::from_pub(window_adapter.window()).context();
+        self.timer.start_on(
+            ctx,
             crate::timers::TimerMode::SingleShot,
             Duration::from_millis(delay_ms),
             move || {

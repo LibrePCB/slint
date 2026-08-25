@@ -9,6 +9,7 @@ import SlintProperty from '@slint/common-files/src/components/SlintProperty.astr
 import Link from '@slint/common-files/src/components/Link.astro';
 import NotInSC from '@slint/common-files/src/components/NotInSC.astro';
 
+<SC>
 ## Primitive Types
 
 ### bool
@@ -16,7 +17,7 @@ import NotInSC from '@slint/common-files/src/components/NotInSC.astro';
 boolean whose value can be either `true` or `false`.
 </SlintProperty>
 
-<SC>
+The default `bool` is `false`. \{#sls.type.bool}
 
 ## Numeric Types
 
@@ -67,12 +68,14 @@ for example `(-10).abs()` or `x.round()`.
 
 Returns a string representation of the number but not localized. This means the decimal separator will always be a dot.
 
+<SC>
+
 ### int
 <SlintProperty propName="int" typeName="int" defaultValue='0'>
 Signed integral number.
 </SlintProperty>
 
-<SC>
+The default `int` is zero. \{#sls.type.int}
 
 ### length
 <SlintProperty propName="length" typeName="length" defaultValue='0px'>

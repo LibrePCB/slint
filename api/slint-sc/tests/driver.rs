@@ -3,7 +3,8 @@
 
 //! Custom test driver for the Slint SC (safety-critical) subset.
 //!
-//! For each `.slint` file under `tests/cases/`, this driver:
+//! For each test case, a `.slint` file in a group directory of `tests/cases/`,
+//! this driver:
 //! 1. Runs `slint-compiler --slint-sc` to generate Rust code
 //! 2. Extracts test code from `` ```rust `` blocks in comments
 //! 3. Calls `rustc` directly to compile the generated + test code
@@ -47,7 +48,7 @@ fn main() {
         rx: &rx,
     };
 
-    let results: Vec<(String, Result<(), String>)> = test_files
+    let mut results: Vec<(String, Result<(), String>)> = test_files
         .par_iter()
         .map(|path| {
             let rel = path.strip_prefix(&cases_dir).unwrap_or(path);
@@ -57,6 +58,8 @@ fn main() {
             (name, result)
         })
         .collect();
+
+    results.push(("version-check".into(), run_version_check(&config)));
 
     // Print results
     eprintln!();
@@ -265,6 +268,59 @@ fn run_test(slint_path: &Path, rel: &Path, config: &TestConfig) -> Result<(), St
     compare_screenshots(tmp.path(), rel, config.create_screenshots)
 }
 
+/// Check that the generated code compiles only against the slint-sc runtime of
+/// the compiler's own version.
+///
+/// The compiler stamps the version it was built with into the generated code,
+/// and this test binary is part of the slint-sc crate, so `CARGO_PKG_VERSION`
+/// here is the runtime's version. The generated code carrying that same version
+/// is what makes the two agree; a reference to any other version fails to
+/// compile against the runtime.
+//#sls.gen.version
+fn run_version_check(config: &TestConfig) -> Result<(), String> {
+    let tmp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let version = env!("CARGO_PKG_VERSION").replace('.', "_");
+
+    // The generated code is stamped with the runtime's version.
+    let slint = tmp.path().join("version.slint");
+    std::fs::write(&slint, "export component Foo inherits Window {}\n")
+        .map_err(|e| format!("write version.slint: {e}"))?;
+    let generated = tmp.path().join("generated.rs");
+    let output = Command::new(config.compiler)
+        .arg("--slint-sc")
+        .arg(&slint)
+        .arg("-o")
+        .arg(&generated)
+        .output()
+        .map_err(|e| format!("slint-compiler spawn: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("slint-compiler failed:\n{}", String::from_utf8_lossy(&output.stderr)));
+    }
+    let generated =
+        std::fs::read_to_string(&generated).map_err(|e| format!("read generated: {e}"))?;
+    let expected = format!("VersionCheck_{version}");
+    if !generated.contains(&expected) {
+        return Err(format!("generated code is not stamped with `{expected}`:\n{generated}"));
+    }
+
+    // A reference to any other version does not compile against the runtime.
+    let mismatch = tmp.path().join("mismatch.rs");
+    std::fs::write(
+        &mismatch,
+        "fn main() {}\nconst _: slint_sc::VersionCheck_0_0_0 = slint_sc::VersionCheck_0_0_0;\n",
+    )
+    .map_err(|e| format!("write mismatch.rs: {e}"))?;
+    let output = compile(config, &mismatch, &tmp.path().join("mismatch"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() || !stderr.contains("VersionCheck_0_0_0") {
+        return Err(format!(
+            "a reference to a different runtime version did not fail to build:\n{stderr}"
+        ));
+    }
+
+    Ok(())
+}
+
 /// Compare the `*.ppm` screenshots that the test binary wrote in `tmp_dir`
 /// against the PNG references, which mirror the layout of the cases directory.
 fn compare_screenshots(tmp_dir: &Path, rel: &Path, create: bool) -> Result<(), String> {
@@ -448,23 +504,29 @@ fn compile(
     rustc_cmd.output().map_err(|e| format!("rustc spawn: {e}"))
 }
 
+/// The cases are the `.slint` files one level below `dir`, in a group
+/// directory. The walk stops there, like the compiler's syntax test driver, so
+/// a group can keep the files its cases import in a subdirectory of its own.
 fn collect_slint_files(dir: &Path) -> Vec<PathBuf> {
     let mut results = Vec::new();
-    collect_slint_files_recursive(dir, &mut results);
+    let Ok(groups) = std::fs::read_dir(dir) else {
+        return results;
+    };
+    for group in groups.flatten() {
+        let group = group.path();
+        if !group.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&group) else {
+            continue;
+        };
+        results.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|e| e == "slint")),
+        );
+    }
     results.sort();
     results
-}
-
-fn collect_slint_files_recursive(dir: &Path, results: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_slint_files_recursive(&path, results);
-        } else if path.extension().is_some_and(|e| e == "slint") {
-            results.push(path);
-        }
-    }
 }

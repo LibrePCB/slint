@@ -366,19 +366,22 @@ declare_syntax! {
         MatchCase -> [ Expression, ?SubElement ],
         /// *: Elem { }
         WildcardMatchCase -> [ ?SubElement ],
-        CallbackDeclaration -> [ DeclaredIdentifier, *CallbackDeclarationParameter, ?ReturnType, ?TwoWayBinding ],
+        CallbackDeclaration -> [ ?PropertyDeprecation, ?ShadowableAttribute, DeclaredIdentifier, *CallbackDeclarationParameter, ?ReturnType, ?TwoWayBinding ],
         // `foo: type` or just `type`
         CallbackDeclarationParameter -> [ ?DeclaredIdentifier, Type],
-        Function -> [DeclaredIdentifier, *ArgumentDeclaration, ?ReturnType, ?CodeBlock ],
+        Function -> [ ?PropertyDeprecation, ?ShadowableAttribute, DeclaredIdentifier, *ArgumentDeclaration, ?ReturnType, ?CodeBlock ],
         ArgumentDeclaration -> [DeclaredIdentifier, Type],
         /// `-> type`  (but without the ->)
         ReturnType -> [Type],
         CallbackConnection -> [ *DeclaredIdentifier, ?CodeBlock, ?Expression ],
         /// Declaration of a property.
-        PropertyDeclaration-> [ ?PropertyDeprecation, ?Type , DeclaredIdentifier, ?BindingExpression, ?TwoWayBinding ],
-        /// `@deprecated` or `@deprecated("message")` prefixing a PropertyDeclaration.
+        PropertyDeclaration-> [ ?PropertyDeprecation, ?ShadowableAttribute, ?Type , DeclaredIdentifier, ?BindingExpression, ?TwoWayBinding ],
+        /// `@deprecated` or `@deprecated("message")` prefixing a member declaration.
         /// The optional message is a StringLiteral token child.
         PropertyDeprecation -> [],
+        /// `@shadowable` prefixing a property, callback or function declaration: a component
+        /// inheriting from this one may declare a member of the same name, shadowing this one.
+        ShadowableAttribute -> [],
         /// QualifiedName are the properties name
         PropertyAnimation-> [ *QualifiedName, *Binding ],
         /// `changed xxx => {...}`  where `xxx` is the DeclaredIdentifier
@@ -405,7 +408,7 @@ declare_syntax! {
         Expression-> [ ?Expression, ?FunctionCallExpression, ?IndexExpression, ?SelfAssignment,
                        ?ConditionalExpression, ?QualifiedName, ?BinaryExpression, ?Array, ?ObjectLiteral,
                        ?UnaryOpExpression, ?CodeBlock, ?StringTemplate, ?AtImageUrl, ?AtGradient, ?AtTr,
-                       ?MemberAccess, ?AtKeys ],
+                       ?MemberAccess, ?AtKeys, ?Closure ],
         /// Concatenate the children Expressions and StringLiteral to make a string
         StringTemplate -> [*Expression],
         /// `@image-url("foo.png")`
@@ -485,6 +488,8 @@ declare_syntax! {
         EnumValue -> [],
         /// `@rust-attr(...)`
         AtRustAttr -> [],
+        /// `(x) => x > 0`
+        Closure -> [DeclaredIdentifier, Expression],
     }
 }
 
@@ -1064,6 +1069,10 @@ pub fn identifier_text(node: &SyntaxNode) -> Option<SmolStr> {
 }
 
 pub fn normalize_identifier(ident: &str) -> SmolStr {
+    if is_identifier_normalized(ident) {
+        // one bulk copy instead of the char-by-char builder below
+        return SmolStr::new(ident);
+    }
     let mut builder = smol_str::SmolStrBuilder::default();
     for (pos, c) in ident.chars().enumerate() {
         match (pos, c) {
@@ -1073,6 +1082,14 @@ pub fn normalize_identifier(ident: &str) -> SmolStr {
         }
     }
     builder.finish()
+}
+
+/// Returns true if [`normalize_identifier`] would return `ident` unchanged.
+/// Lets callers skip the copy (and heap allocation for long identifiers).
+pub fn is_identifier_normalized(ident: &str) -> bool {
+    // '-' and '_' are ASCII, so a byte scan is UTF-8-safe
+    let b = ident.as_bytes();
+    b.first() != Some(&b'-') && !b[1.min(b.len())..].contains(&b'_')
 }
 
 #[test]
@@ -1087,6 +1104,19 @@ fn test_normalize_identifier() {
     assert_eq!(normalize_identifier("__1"), SmolStr::new("_-1"));
     assert_eq!(normalize_identifier("--1"), SmolStr::new("_-1"));
     assert_eq!(normalize_identifier("--1--"), SmolStr::new("_-1--"));
+}
+
+#[test]
+fn test_is_identifier_normalized() {
+    for ident in
+        ["true", "foo-bar", "foo_bar", "-foo", "_foo", "foo-bar-", "", "-", "_", "ä_ö", "ä-ö"]
+    {
+        assert_eq!(
+            is_identifier_normalized(ident),
+            normalize_identifier(ident) == ident,
+            "{ident:?}"
+        );
+    }
 }
 
 // Actual parser

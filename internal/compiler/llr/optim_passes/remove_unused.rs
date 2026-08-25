@@ -242,6 +242,7 @@ mod visitor {
             globals,
             popup_menu,
             has_debug_info: _,
+            type_exports: _,
             #[cfg(feature = "bundle-translations")]
                 translations: _,
         }: &mut crate::llr::CompilationUnit,
@@ -277,6 +278,27 @@ mod visitor {
         for p in public_properties.values_mut() {
             visit_public_property(p, &scope, state, visitor);
         }
+        visit_tree_node_z_properties(&mut item_tree.tree, &scope, state, visitor);
+    }
+
+    /// The z property paths are relative to the tree root, so `scope` must be the
+    /// scope of the tree root sub-component.
+    fn visit_tree_node_z_properties(
+        node: &mut crate::llr::TreeNode,
+        scope: &EvaluationScope,
+        state: &VisitorState,
+        visitor: &mut (impl Visitor + ?Sized),
+    ) {
+        if let Some(z_props) = &mut node.z_sort_order_property {
+            for z_source in z_props {
+                if let crate::llr::ZSource::Expression(e) = z_source {
+                    visit_expression(e.get_mut(), scope, state, visitor);
+                }
+            }
+        }
+        for child in &mut node.children {
+            visit_tree_node_z_properties(child, scope, state, visitor);
+        }
     }
 
     pub fn visit_sub_component(
@@ -306,6 +328,7 @@ mod visitor {
             child_of_layout: _,
             grid_layout_input_for_repeated,
             flexbox_layout_item_info_for_repeated,
+            cross_axis_self_alignment_for_repeated,
             layout_info_v_constrained_for_repeated,
             layout_info_v_at_cross_width_for_repeated,
             layout_info_h_constrained_for_repeated,
@@ -329,6 +352,7 @@ mod visitor {
             model,
             index_prop,
             data_prop,
+            dynamic_z,
             sub_tree,
             index_in_tree: _,
             listview,
@@ -343,6 +367,11 @@ mod visitor {
             if let Some(data_prop) = data_prop {
                 visitor.visit_property_idx(data_prop, &inner_scope, state);
             }
+            if let Some(dynamic_z) = dynamic_z {
+                visit_member_reference(dynamic_z, &inner_scope, state, visitor);
+            }
+
+            visit_tree_node_z_properties(&mut sub_tree.tree, &inner_scope, state, visitor);
 
             if let Some(listview) = listview {
                 visit_member_reference(&mut listview.content_y, &scope, state, visitor);
@@ -363,6 +392,7 @@ mod visitor {
         for p in popup_windows {
             let popup_scope = EvaluationScope::SubComponent(p.item_tree.root, None);
             visit_expression(p.position.get_mut(), &popup_scope, state, visitor);
+            visit_tree_node_z_properties(&mut p.item_tree.tree, &popup_scope, state, visitor);
         }
         for t in timers {
             visit_expression(t.interval.get_mut(), &scope, state, visitor);
@@ -405,6 +435,9 @@ mod visitor {
             visit_expression(e.get_mut(), &scope, state, visitor);
         }
         if let Some(e) = flexbox_layout_item_info_for_repeated {
+            visit_expression(e.get_mut(), &scope, state, visitor);
+        }
+        if let Some((_, e)) = cross_axis_self_alignment_for_repeated {
             visit_expression(e.get_mut(), &scope, state, visitor);
         }
         if let Some(e) = layout_info_v_constrained_for_repeated {
@@ -496,6 +529,7 @@ mod visitor {
         visit_member_reference(activated, &scope, state, visitor);
         visit_member_reference(close, &scope, state, visitor);
         visit_member_reference(entries, &scope, state, visitor);
+        visit_tree_node_z_properties(&mut item_tree.tree, &scope, state, visitor);
     }
 
     pub fn visit_public_property(

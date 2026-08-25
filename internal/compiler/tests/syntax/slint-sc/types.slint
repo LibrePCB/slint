@@ -9,13 +9,10 @@ export component Test inherits Window {
 //             >    <^error{The type 'string' is not supported in Slint SC}
     property <{foo: int, bar: color}> b;
 //            >                    <error{Inline struct types are not supported in Slint SC}
-//                  > <^error{The type 'int' is not supported in Slint SC}
     property <bool> c;
-//            >  <error{The type 'bool' is not supported in Slint SC}
     property <float> d;
 //            >   <error{The type 'float' is not supported in Slint SC}
     property <image> e;
-//            >   <error{The type 'image' is not supported in Slint SC}
     property <length> f;
     property <duration> g;
 //            >      <error{The type 'duration' is not supported in Slint SC}

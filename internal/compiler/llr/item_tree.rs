@@ -400,6 +400,10 @@ pub struct RepeatedElement {
     pub index_prop: Option<PropertyIdx>,
     /// Within the sub_tree's root component. None for `if`
     pub data_prop: Option<PropertyIdx>,
+    /// The z of each instance, evaluated in the context of the repeated component.
+    /// When set, the instances are expanded and sorted individually among the
+    /// siblings of the repeated element during item tree traversal.
+    pub dynamic_z: Option<MemberReference>,
     pub sub_tree: ItemTree,
     /// The index of the item node in the parent tree
     pub index_in_tree: u32,
@@ -444,6 +448,24 @@ pub struct TreeNode {
     pub item_index: itertools::Either<ItemInstanceIdx, u32>,
     pub children: Vec<TreeNode>,
     pub is_accessible: bool,
+    /// If set, this node's children have dynamic z-ordering.
+    /// Each entry corresponds to a child (by index) and gives its z value.
+    /// The code generator will evaluate these on every children visit and sort the
+    /// children accordingly.
+    pub z_sort_order_property: Option<Vec<ZSource>>,
+}
+
+/// The z value of a child in a dynamically z-ordered parent
+#[derive(Debug, Clone)]
+pub enum ZSource {
+    /// The z value of the child. The expression must be side-effect free and only
+    /// reference globals or properties of the item tree root's sub-component
+    /// (never a parent item tree).
+    Expression(MutExpression),
+    /// The child is a repeated element whose instances are expanded and sorted
+    /// individually, each by its own z value. The repeater is the matching child
+    /// node (`parent.children[child_offset]`, a `DynamicTree` node).
+    RepeaterInstances,
 }
 
 impl TreeNode {
@@ -457,10 +479,10 @@ impl TreeNode {
 
     /// Visit this, and the children.
     /// `children_offset` must be set to `1` for the root
-    pub fn visit_in_array(
-        &self,
+    pub fn visit_in_array<'a>(
+        &'a self,
         visitor: &mut dyn FnMut(
-            &TreeNode,
+            &'a TreeNode,
             /*children_offset: */ usize,
             /*parent_index: */ usize,
         ),
@@ -468,11 +490,11 @@ impl TreeNode {
         visitor(self, 1, 0);
         visit_in_array_recursive(self, 1, 0, visitor);
 
-        fn visit_in_array_recursive(
-            node: &TreeNode,
+        fn visit_in_array_recursive<'a>(
+            node: &'a TreeNode,
             children_offset: usize,
             current_index: usize,
-            visitor: &mut dyn FnMut(&TreeNode, usize, usize),
+            visitor: &mut dyn FnMut(&'a TreeNode, usize, usize),
         ) {
             let mut offset = children_offset + node.children.len();
             for c in &node.children {
@@ -526,8 +548,14 @@ pub struct SubComponent {
     pub child_of_layout: bool,
     pub grid_layout_input_for_repeated: Option<MutExpression>,
     /// Expression that builds a FlexboxLayoutItemInfo for a repeated element in a FlexboxLayout.
-    /// Contains property references to flex-grow, flex-shrink, flex-basis, align-self, order.
+    /// Contains property references to cross-axis-self-alignment and layout-order.
     pub flexbox_layout_item_info_for_repeated: Option<MutExpression>,
+    /// The root's `cross-axis-self-alignment` for a repeated element in a box
+    /// layout, returned by the generated `layout_item_info` for the given
+    /// (cross-axis) orientation only, so the main-axis cache stays independent
+    /// of it. The cross-axis layout-info pass shares that accessor and so also
+    /// evaluates it, unlike static cells (`box_layout_info_ortho` ignores it).
+    pub cross_axis_self_alignment_for_repeated: Option<(crate::layout::Orientation, MutExpression)>,
     /// Vertical `LayoutInfo` for a repeated element, computed with a width
     /// constraint (its preferred width) so a height-for-width instance in a
     /// column FlexboxLayout doesn't read `self.width` and recurse through the
@@ -659,6 +687,47 @@ pub struct PublicComponent {
     pub top_level_type: TopLevelComponentType,
 }
 
+/// One name the generated module exposes for a declared type (or a component alias):
+/// its own name, a renamed export, or a name kept only for backward compatibility.
+#[derive(Debug)]
+pub struct TypeExport {
+    /// The name users write.
+    pub exported_name: SmolStr,
+    /// The generated declaration it points at. Equal to `exported_name` for a type
+    /// re-exported under its own name.
+    pub internal_name: SmolStr,
+    /// When set, `exported_name` warns on use: the type is not part of the public API,
+    /// or was renamed on export.
+    pub deprecated: bool,
+}
+
+impl TypeExport {
+    /// True when the type is exposed under a name other than its own — a renamed export,
+    /// or the pre-rename name kept for compatibility. False for a type re-exported under
+    /// its own name.
+    pub fn is_alias(&self) -> bool {
+        self.exported_name != self.internal_name
+    }
+
+    /// The message shown when `exported_name` is used, or `None` when it is not deprecated.
+    /// Shared by the generators so the wording stays identical across languages.
+    pub fn deprecation_note(&self) -> Option<String> {
+        self.deprecated.then(|| {
+            if self.is_alias() {
+                format!(
+                    "`{0}` was renamed to `{1}` on export. Use `{1}`.",
+                    self.exported_name, self.internal_name
+                )
+            } else {
+                format!(
+                    "`{}` is not part of the public API. Re-export it from your main .slint file to make it public.",
+                    self.exported_name
+                )
+            }
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct CompilationUnit {
     pub public_components: Vec<PublicComponent>,
@@ -669,6 +738,11 @@ pub struct CompilationUnit {
     pub globals: TiVec<GlobalIdx, GlobalComponent>,
     pub popup_menu: Option<PopupMenu>,
     pub has_debug_info: bool,
+    /// Every name the generated module re-exports for a declared type, plus the
+    /// renamed `export { Original as Alias }` aliases of components. Types renamed to
+    /// resolve a same-name collision are absent: they were never public. (Global
+    /// aliases are on [`GlobalComponent::aliases`].)
+    pub type_exports: Vec<TypeExport>,
     #[cfg(feature = "bundle-translations")]
     pub translations: Option<crate::translations::Translations>,
 }
@@ -681,17 +755,17 @@ impl CompilationUnit {
 
     pub fn for_each_sub_components<'a>(
         &'a self,
-        visitor: &mut dyn FnMut(&'a SubComponent, &EvaluationContext<'_>),
+        visitor: &mut dyn FnMut(SubComponentIdx, &'a SubComponent, &EvaluationContext<'_>),
     ) {
         fn visit_component<'a>(
             root: &'a CompilationUnit,
             c: SubComponentIdx,
-            visitor: &mut dyn FnMut(&'a SubComponent, &EvaluationContext<'_>),
+            visitor: &mut dyn FnMut(SubComponentIdx, &'a SubComponent, &EvaluationContext<'_>),
             parent: Option<&ParentScope<'_>>,
         ) {
             let ctx = EvaluationContext::new_sub_component(root, c, (), parent);
             let sc = &root.sub_components[c];
-            visitor(sc, &ctx);
+            visitor(c, sc, &ctx);
             for (idx, r) in sc.repeated.iter_enumerated() {
                 visit_component(
                     root,
@@ -727,7 +801,7 @@ impl CompilationUnit {
         &'a self,
         visitor: &mut dyn FnMut(&'a super::MutExpression, &EvaluationContext<'_>),
     ) {
-        self.for_each_sub_components(&mut |sc, ctx| {
+        self.for_each_sub_components(&mut |_, sc, ctx| {
             for e in &sc.pre_init_code {
                 visitor(e, ctx);
             }
@@ -743,6 +817,9 @@ impl CompilationUnit {
                 visitor(e, ctx);
             }
             if let Some(e) = &sc.flexbox_layout_item_info_for_repeated {
+                visitor(e, ctx);
+            }
+            if let Some((_, e)) = &sc.cross_axis_self_alignment_for_repeated {
                 visitor(e, ctx);
             }
             if let Some(e) = &sc.layout_info_v_constrained_for_repeated {
@@ -798,6 +875,54 @@ impl CompilationUnit {
             }
             visit_function_bodies(&g.functions, &ctx, visitor);
         }
+        self.for_each_z_order_expression(visitor);
+    }
+
+    /// Visit the z-order expressions of all item tree nodes.
+    /// The context passed to the visitor is the one of the item tree's root sub-component,
+    /// which is the frame the expressions are resolved in.
+    pub fn for_each_z_order_expression<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(&'a MutExpression, &EvaluationContext<'_>),
+    ) {
+        fn visit_tree<'a>(
+            node: &'a TreeNode,
+            ctx: &EvaluationContext<'_>,
+            visitor: &mut dyn FnMut(&'a MutExpression, &EvaluationContext<'_>),
+        ) {
+            for e in node.z_sort_order_property.iter().flatten() {
+                if let ZSource::Expression(e) = e {
+                    visitor(e, ctx);
+                }
+            }
+            for child in &node.children {
+                visit_tree(child, ctx, visitor);
+            }
+        }
+        // Every item tree, by its root sub-component
+        let mut trees: HashMap<SubComponentIdx, &TreeNode> = HashMap::new();
+        for c in &self.public_components {
+            trees.insert(c.item_tree.root, &c.item_tree.tree);
+        }
+        if let Some(p) = &self.popup_menu {
+            trees.insert(p.item_tree.root, &p.item_tree.tree);
+        }
+        for sc in self.sub_components.iter() {
+            for r in &sc.repeated {
+                trees.insert(r.sub_tree.root, &r.sub_tree.tree);
+            }
+            for p in &sc.popup_windows {
+                trees.insert(p.item_tree.root, &p.item_tree.tree);
+            }
+        }
+        // Visit with the context from `for_each_sub_components` because it has the
+        // repeater parent scopes set up, which is needed to resolve expressions that
+        // are inlined into the z expressions
+        self.for_each_sub_components(&mut |idx, _, ctx| {
+            if let Some(tree) = trees.get(&idx) {
+                visit_tree(tree, ctx, visitor);
+            }
+        });
     }
 }
 

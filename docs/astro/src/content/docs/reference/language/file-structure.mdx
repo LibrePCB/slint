@@ -16,8 +16,16 @@ A source file that contains only whitespace and comments is well-formed and defi
 
 ## Top-Level Items
 
-A *top-level item* is a *component definition*. \{#sls.file.top-level-item}
+<OnlyInSC>
+A *top-level item* is a *component definition*, a [struct or enum declaration](../structs-and-enums/),
+an [import statement](../imports/), or an [export statement](../exports/). \{#sls.file.top-level-item}
+</OnlyInSC>
+</SC>
 
+A *top-level item* is a component definition, an [import statement](../imports/), an [export statement](../exports/),
+a [struct or enum declaration](../structs-and-enums/), or a [global declaration](../globals/).
+
+<SC>
 ## Component Definitions
 
 A component definition has one of the following two forms: \{#sls.file.component.definition-forms}
@@ -41,14 +49,8 @@ and the elements instantiated in the component body become children of the eleme
 The component has the properties of `Base` in addition to those [declared](../properties/) in its body,
 and a binding in the component body may bind them. \{#sls.file.component.inherits.properties}
 
-<OnlyInSC>
-The identifier `Base` shall resolve to a built-in element or to a component defined earlier in the file. \{#sls.file.component.inherits.base}
-</OnlyInSC>
-</SC>
+The identifier `Base` shall resolve to a built-in element, to a component defined earlier in the file, or to an [imported](../imports/) component. \{#sls.file.component.inherits.base}
 
-The identifier `Base` resolves to a built-in element, to a component defined earlier in the file, or to an [imported](../imports/) component.
-
-<SC>
 The braces `{` and `}` delimit the *component body*. \{#sls.file.component.body-braces}
 
 ## Component Bodies
@@ -66,6 +68,14 @@ TypeName { /* element body */ }
 ```
 
 The identifier `TypeName` shall resolve to a built-in or user-defined component. \{#sls.file.element.instantiation-typename}
+
+An instantiation may be preceded by an *id* and `:=`, as in `foo := Rectangle { }`,
+naming the element within the component,
+so that a [reference](../expressions/#references) can reach its properties. \{#sls.file.element.id}
+
+An id shall be unique within the component. \{#sls.file.element.id.unique}
+
+The names `self`, `parent`, and `root` are reserved and shall not be used as an id. \{#sls.file.element.id.reserved}
 
 <OnlyInSC>
 Neither `Window` nor a component that directly or indirectly inherits `Window` shall be instantiated as an element. \{#sls.file.element.no-window-instantiation}

@@ -13,8 +13,11 @@ fn is_generated_dir(dir: &std::path::Path, astro_dir: &std::path::Path) -> bool 
     dir.starts_with(astro_dir) && dir.file_name().is_some_and(|name| name == "generated")
 }
 
-/// Generate all markdown/mdx documentation files.
-pub fn generate(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
+/// Generate all markdown/mdx documentation files, and return the gaps the
+/// safety manual shows: the runtime files that aren't completely covered and
+/// the requirement paragraphs that no test declares. Every page is written
+/// first, so a build can publish the manual and act on the gaps afterwards.
+pub fn generate(cfg: &Config) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // Start from an empty directory: a page left behind by an earlier run
     // (of a version that named or grouped it differently) still renders, and
     // its paragraph ids still count as duplicates of the current ones.
@@ -41,13 +44,14 @@ pub fn generate(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
         write_builtin_structs_and_enums(cfg, &structs, &enums)?;
     }
 
+    let mut gaps = Vec::new();
     if cfg.sc_only {
-        crate::traceability::generate(cfg)?;
-        crate::coverage::generate(cfg)?;
+        gaps = crate::traceability::generate(cfg)?;
+        gaps.extend(crate::coverage::generate(cfg)?);
         crate::test_results::generate(cfg)?;
     }
 
-    Ok(())
+    Ok(gaps)
 }
 
 /// An enum documented on its own type page rather than in the Builtin Enums list.
@@ -185,7 +189,7 @@ pub struct EnumDoc {
 }
 
 pub fn extract_enum_docs(
-    include_experimental: bool,
+    _include_experimental: bool,
     sc_only: bool,
 ) -> std::collections::BTreeMap<String, EnumDoc> {
     let mut enums: std::collections::BTreeMap<String, EnumDoc> = std::collections::BTreeMap::new();
@@ -215,10 +219,6 @@ pub fn extract_enum_docs(
     #[allow(unused)] // for 'has_val'
     {
         i_slint_common::for_each_enums!(gen_enums);
-    }
-
-    if !include_experimental {
-        enums.retain(|name, _| !name.starts_with("FlexboxLayout"));
     }
 
     if sc_only {
@@ -337,7 +337,7 @@ pub fn extract_builtin_structs(
 
                 let mut fields = Vec::new();
                 $(
-                    let key = stringify!($field).to_string();
+                    let key = stringify!($field).replace('_', "-");
                     let type_name = map_type!($field_type).to_string();
                     let mut f_description = String::new();
                     $(

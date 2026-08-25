@@ -4,11 +4,13 @@
 # cSpell:ignore socketpair
 
 import asyncio
+import contextlib
 import gc
 import platform
 import socket
 import sys
 import threading
+import time
 import typing
 import weakref
 from datetime import timedelta
@@ -245,6 +247,23 @@ def test_exception_thrown() -> None:
 # defined in the stdlib stubs.
 if sys.platform != "win32":
 
+    def _start_quit_watchdog(done: list[bool]) -> None:
+        """Ends the loop if the signal a test is waiting for never arrives.
+
+        The queue outlives the loop, so the watchdog mustn't quit once the test
+        no longer needs it: that quit would sit in the queue and cut a later
+        test's loop short.
+        """
+        import threading
+        import time
+
+        def watchdog() -> None:
+            time.sleep(5)
+            if not done[0]:
+                native.invoke_from_event_loop(slint.quit_event_loop)
+
+        threading.Thread(target=watchdog, daemon=True).start()
+
     def test_add_signal_handler() -> None:
         import os
         import signal
@@ -282,11 +301,6 @@ if sys.platform != "win32":
             time.sleep(0.2)
             os.kill(os.getpid(), signal.SIGUSR1)
 
-        def watchdog() -> None:
-            time.sleep(5)
-            if not handler_called[0]:
-                native.invoke_from_event_loop(slint.quit_event_loop)
-
         async def run() -> None:
             loop = asyncio.get_running_loop()
 
@@ -297,7 +311,7 @@ if sys.platform != "win32":
             loop.add_signal_handler(signal.SIGUSR1, handler)
 
             threading.Thread(target=deliver_signal_later, daemon=True).start()
-            threading.Thread(target=watchdog, daemon=True).start()
+            _start_quit_watchdog(handler_called)
 
             await asyncio.Event().wait()
 
@@ -315,21 +329,26 @@ if sys.platform != "win32":
         import threading
         import time
 
+        interrupted = [False]
+
         def deliver_sigint_later() -> None:
             time.sleep(0.2)
             os.kill(os.getpid(), signal.SIGINT)
 
-        def watchdog() -> None:
-            time.sleep(5)
-            native.invoke_from_event_loop(slint.quit_event_loop)
-
         async def run() -> None:
             threading.Thread(target=deliver_sigint_later, daemon=True).start()
-            threading.Thread(target=watchdog, daemon=True).start()
+            _start_quit_watchdog(interrupted)
             await asyncio.Event().wait()
 
-        with pytest.raises(KeyboardInterrupt):
-            slint.run_event_loop(run())
+        # A shell that starts the test run as a background job leaves SIGINT ignored, and
+        # run_event_loop() then rightly declines to claim a signal the caller opted out of.
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                slint.run_event_loop(run())
+        finally:
+            interrupted[0] = True
+            signal.signal(signal.SIGINT, previous)
 
 
 def test_sleep_does_not_leak_timers() -> None:
@@ -430,6 +449,56 @@ def test_cancelling_handle_disarms_native_timer() -> None:
 
         await asyncio.sleep(0.05)
         assert not called
+
+        slint.quit_event_loop()
+
+    slint.run_event_loop(run())
+
+
+def test_socket_traffic_does_not_busy_loop() -> None:
+    """A trickle of socket data must not keep the event loop awake.
+
+    See https://github.com/slint-ui/slint/issues/12962.
+    """
+    duration = 2.0
+    interval = 0.1
+
+    async def send_periodically(
+        _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        with contextlib.suppress(ConnectionResetError, BrokenPipeError):
+            while True:
+                writer.write(b"x")
+                await asyncio.sleep(interval)
+
+    async def run() -> None:
+        received = 0
+
+        server = await asyncio.start_server(send_periodically, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+        async def drain() -> None:
+            nonlocal received
+            while chunk := await reader.read(4096):
+                received += len(chunk)
+
+        drainer = asyncio.create_task(drain())
+        cpu_before = time.process_time()
+        await asyncio.sleep(duration)
+        cpu_seconds = time.process_time() - cpu_before
+
+        drainer.cancel()
+        writer.close()
+        server.close()
+
+        # Liveness only, so that the CPU assert can't pass vacuously. Not a rate check:
+        # timer granularity makes the rate unreliable on a loaded CI runner.
+        assert received > 0, "no data received"
+        # Before the fix: 60-100% of a core. Idle: under 5%.
+        assert cpu_seconds < duration * 0.25, (
+            f"burned {cpu_seconds:.2f}s of CPU over {duration}s ({received} bytes)"
+        )
 
         slint.quit_event_loop()
 

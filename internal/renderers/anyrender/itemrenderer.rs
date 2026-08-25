@@ -5,22 +5,22 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyrender::PaintScene;
-use i_slint_core::graphics::adjust_rect_and_border_for_inner_drawing;
+use i_slint_core::graphics::ResolvedBrush;
 use i_slint_core::graphics::euclid;
-use i_slint_core::graphics::{Image, ImageCacheKey, IntRect, SharedImageBuffer, SharedPixelBuffer};
+use i_slint_core::graphics::{Image, ImageCacheKey, SharedImageBuffer, SharedPixelBuffer};
 use i_slint_core::item_rendering::{
-    CachedRenderingData, ItemCache, ItemRenderer, RenderBorderRectangle, RenderImage,
-    RenderRectangle, RenderText,
+    BorderRectLayout, CachedRenderingData, ItemCache, ItemRenderer, RenderBorderRectangle,
+    RenderImage, RenderRectangle, RenderText,
 };
 use i_slint_core::items::{self, FillRule, ImageFit, ImageRendering, ItemRc};
 use i_slint_core::lengths::{
-    LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, LogicalVector,
+    LogicalBorderRadius, LogicalPoint, LogicalRect, LogicalSize, LogicalVector,
     PhysicalBorderRadius, ScaleFactor, logical_size_from_api,
 };
 use i_slint_core::textlayout::sharedparley::{self, GlyphRenderer, fontique, parley};
 use i_slint_core::{Brush, Color, ImageInner, SharedString};
 
-use super::{PhysicalLength, PhysicalRect, PhysicalSize};
+use super::{PhysicalLength, PhysicalPoint, PhysicalRect, PhysicalSize};
 
 /// anyrender's `push_layer` always clips; there is no "no clip", so layers
 /// that should not clip use a rectangle larger than any real scene.
@@ -121,7 +121,7 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
         let shape = self.rect(LogicalRect::from_size(size));
         self.fill_with_brush(
             rect.background(),
-            self.size(size),
+            size * self.scale_factor,
             self.current_state.transform,
             peniko::Fill::default(),
             &shape,
@@ -135,67 +135,31 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
         size: LogicalSize,
         _: &CachedRenderingData,
     ) {
-        let mut geometry = PhysicalRect::from(size * self.scale_factor);
-        if geometry.is_empty() {
+        let Some(layout) = BorderRectLayout::new(rect, size, self.scale_factor) else {
             return;
-        }
-
-        // Save the original element bounds for gradient positioning. The CSS
-        // model positions gradients relative to the border box (full element),
-        // but adjust_rect_and_border_for_inner_drawing shrinks the geometry,
-        // which would shift the gradient center inward.
-        let brush_size = to_kurbo_size(geometry.size);
-
-        let border_color = rect.border_color();
-        let opaque_border = border_color.is_opaque();
-        let mut border_width = if border_color.is_transparent() {
-            PhysicalLength::new(0.)
-        } else {
-            rect.border_width() * self.scale_factor
-        };
-
-        let mut fill_radius = rect.border_radius() * self.scale_factor;
-        // The stroke is centered on the path (50% inside, 50% outside). We want
-        // the CSS model where the border is entirely inside. Adjust the outer
-        // radius so that corners with a positive radius are at least
-        // border_width/2. This is incorrect if the radius is smaller than
-        // border_width/2, but that can't be helped - better a radius a bit
-        // too big than no radius at all.
-        let radius_epsilon = PhysicalLength::new(0.01);
-        fill_radius = fill_radius.outer(border_width / 2. + radius_epsilon);
-        let stroke_border_radius = fill_radius.inner(border_width / 2.);
-
-        let (background_shape, border_shape) = if opaque_border {
-            // When the border is opaque, the fill doesn't need to extend under it,
-            // so both fill and stroke use the same adjusted (inset) geometry.
-            adjust_rect_and_border_for_inner_drawing(&mut geometry, &mut border_width);
-            let shape = phys_rect_shape(geometry, stroke_border_radius);
-            (shape, shape)
-        } else {
-            // When the border is transparent/semi-transparent, the fill must cover
-            // the full outer rectangle so the background shows through.
-            let background_shape = phys_rect_shape(geometry, fill_radius);
-            adjust_rect_and_border_for_inner_drawing(&mut geometry, &mut border_width);
-            let border_shape = phys_rect_shape(geometry, stroke_border_radius);
-            (background_shape, border_shape)
         };
 
         let transform = self.current_state.transform;
         self.fill_with_brush(
             rect.background(),
-            brush_size,
+            layout.brush_size,
             transform,
             peniko::Fill::default(),
-            &background_shape,
+            &phys_rect_shape(layout.background_rect, layout.background_radius),
         );
 
-        if border_width.get() > 0.0 {
+        if layout.border_width.get() > 0.0 {
+            // Miter joins, not kurbo's default round ones: a round join doesn't
+            // reach into sharp corners, leaving the corner tips of the border
+            // uncovered.
+            let stroke =
+                kurbo::Stroke::new(layout.border_width.get() as f64).with_join(kurbo::Join::Miter);
             self.stroke_with_brush(
-                border_color,
-                brush_size,
+                layout.border_color,
+                layout.brush_size,
                 transform,
-                &kurbo::Stroke::new(border_width.get() as f64),
-                &border_shape,
+                &stroke,
+                &phys_rect_shape(layout.border_rect, layout.border_radius),
             );
         }
     }
@@ -216,7 +180,7 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
         let shape = self.rect(LogicalRect::from_size(size));
         self.fill_with_brush(
             background,
-            self.size(size),
+            size * self.scale_factor,
             self.current_state.transform,
             peniko::Fill::default(),
             &shape,
@@ -412,7 +376,7 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
             // Apply colorize: push a SrcIn layer and fill with the colorize brush.
             // SrcIn keeps the image's alpha but replaces the color.
             let src_in_blend = peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcIn);
-            if let Some((brush, brush_transform)) = self.brush(colorize_brush, dest_rect.size()) {
+            if let Some((brush, brush_transform)) = self.brush(colorize_brush, dest_size) {
                 self.scene.push_layer(
                     src_in_blend,
                     1.0,
@@ -500,7 +464,7 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
             .transform
             .then_translate(kurbo::Vec2::new(phys_offset.x as f64, phys_offset.y as f64));
 
-        let brush_size = to_kurbo_size(size * sf);
+        let brush_size = size * sf;
 
         let fill_rule = match path.fill_rule() {
             FillRule::Evenodd => peniko::Fill::EvenOdd,
@@ -598,22 +562,9 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
         }
     }
 
-    fn combine_clip(
-        &mut self,
-        clip_rect: LogicalRect,
-        radius: LogicalBorderRadius,
-        border_width: LogicalLength,
-    ) -> bool {
-        let mut phys_rect = clip_rect * self.scale_factor;
-        let mut phys_border_width = border_width * self.scale_factor;
-        // In CSS the border is entirely towards the inside of the boundary
-        // geometry, so the clip applies to the region inside the border -
-        // same adjustment as the skia and femtovg renderers.
-        adjust_rect_and_border_for_inner_drawing(&mut phys_rect, &mut phys_border_width);
-
-        let adjusted_clip_rect = phys_rect / self.scale_factor;
+    fn combine_clip(&mut self, clip_rect: LogicalRect, radius: LogicalBorderRadius) -> bool {
         let clip = &mut self.current_state.clip_rect;
-        let clip_region_valid = match clip.intersection(&adjusted_clip_rect) {
+        let clip_region_valid = match clip.intersection(&clip_rect) {
             Some(r) => {
                 *clip = r;
                 true
@@ -624,7 +575,7 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
             }
         };
 
-        let clip_shape = phys_rect_shape(phys_rect, radius * self.scale_factor);
+        let clip_shape = phys_rect_shape(clip_rect * self.scale_factor, radius * self.scale_factor);
 
         self.scene.push_clip_layer(self.current_state.transform, &clip_shape);
         self.current_state.layer_count += 1;
@@ -765,7 +716,7 @@ impl<'a, S: PaintScene> GlyphRenderer for AnyrenderItemRenderer<'a, S> {
         brush: Brush,
         size: LogicalSize,
     ) -> Option<Self::PlatformBrush> {
-        let (peniko_brush, brush_transform) = self.brush(brush, self.size(size))?;
+        let (peniko_brush, brush_transform) = self.brush(brush, size * self.scale_factor)?;
         Some(GlyphBrush {
             peniko_brush,
             brush_transform,
@@ -786,7 +737,7 @@ impl<'a, S: PaintScene> GlyphRenderer for AnyrenderItemRenderer<'a, S> {
         physical_stroke_width: f32,
         size: LogicalSize,
     ) -> Option<Self::PlatformBrush> {
-        let (peniko_brush, brush_transform) = self.brush(stroke_brush, self.size(size))?;
+        let (peniko_brush, brush_transform) = self.brush(stroke_brush, size * self.scale_factor)?;
 
         Some(GlyphBrush {
             peniko_brush,
@@ -925,7 +876,7 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
     fn fill_with_brush(
         &mut self,
         brush: Brush,
-        brush_size: kurbo::Size,
+        brush_size: PhysicalSize,
         transform: kurbo::Affine,
         style: peniko::Fill,
         shape: &impl kurbo::Shape,
@@ -946,7 +897,7 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
     fn stroke_with_brush(
         &mut self,
         brush: Brush,
-        brush_size: kurbo::Size,
+        brush_size: PhysicalSize,
         transform: kurbo::Affine,
         stroke: &kurbo::Stroke,
         shape: &impl kurbo::Shape,
@@ -995,86 +946,45 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
         to_kurbo_rect(rect * self.scale_factor)
     }
 
-    fn size(&self, size: LogicalSize) -> kurbo::Size {
-        to_kurbo_size(size * self.scale_factor)
-    }
-
     fn brush(
         &self,
         brush: Brush,
-        shape_size: kurbo::Size,
+        shape_size: PhysicalSize,
     ) -> Option<(peniko::Brush, Option<kurbo::Affine>)> {
-        if brush.is_transparent() {
-            return None;
-        }
+        let resolved =
+            i_slint_core::graphics::resolve_brush(&brush, shape_size, self.scale_factor)?;
 
-        Some(match brush {
-            Brush::SolidColor(color) => (to_peniko_color(color).into(), None),
-            Brush::LinearGradient(gradient) => {
-                let (stops, extent) = sanitize_color_stops(gradient.stops(), true);
-                let (start, end) = i_slint_core::graphics::line_for_angle(
-                    gradient.angle(),
-                    [shape_size.width as f32, shape_size.height as f32].into(),
+        Some(match resolved {
+            ResolvedBrush::SolidColor(color) => (to_peniko_color(color).into(), None),
+            ResolvedBrush::LinearGradient(gradient) => {
+                let mut peniko_gradient = peniko::Gradient::new_linear(
+                    to_kurbo_point(gradient.start),
+                    to_kurbo_point(gradient.end),
                 );
-                let start = to_kurbo_point(start);
-                let mut end = to_kurbo_point(end);
-                if extent != 1.0 {
-                    // sanitize_color_stops scaled the offsets down into [0, 1],
-                    // so scale the gradient line to match,
-                    // or the ramp comes out compressed.
-                    end = start + (end - start) * extent as f64;
-                }
-
-                let mut peniko_gradient = peniko::Gradient::new_linear(start, end);
-                peniko_gradient.stops = stops;
+                peniko_gradient.stops = to_peniko_stops(&gradient.stops);
 
                 (peniko_gradient.into(), None)
             }
-            Brush::RadialGradient(gradient) => {
-                let (stops, extent) = sanitize_color_stops(gradient.stops(), true);
-                let (center_x, center_y) = gradient.center_or_default_scaled(
-                    shape_size.width as f32,
-                    shape_size.height as f32,
-                    self.scale_factor.get(),
-                );
-                let radius = gradient.radius_or_default_scaled(
-                    shape_size.width as f32,
-                    shape_size.height as f32,
-                    self.scale_factor.get(),
-                );
-                // Same compensation as for the linear gradient line.
-                // It's visible where the shape reaches past the circle,
-                // like the corners of a rectangle.
-                let radius = radius * extent;
-
+            ResolvedBrush::RadialGradient(gradient) => {
                 let mut peniko_gradient =
                     peniko::Gradient::new_radial(kurbo::Point::new(0., 0.), 1.0);
-                peniko_gradient.stops = stops;
+                peniko_gradient.stops = to_peniko_stops(&gradient.stops);
 
                 // A unit circle at the origin, scaled to the radius and moved
                 // to the center, so the color stops span [0, radius].
                 (
                     peniko_gradient.into(),
-                    Some(
-                        kurbo::Affine::scale(radius as f64)
-                            .then_translate(kurbo::Vec2::new(center_x as f64, center_y as f64)),
-                    ),
+                    Some(kurbo::Affine::scale(gradient.radius.get() as f64).then_translate(
+                        kurbo::Vec2::new(gradient.center.x as f64, gradient.center.y as f64),
+                    )),
                 )
             }
-            Brush::ConicGradient(gradient) => {
-                // A sweep gradient's angular range cannot be extended beyond a
-                // full turn, so out-of-range stops are clamped instead.
-                let (stops, _) = sanitize_color_stops(gradient.stops(), false);
-                let (center_x, center_y) = gradient.center_or_default_scaled(
-                    shape_size.width as f32,
-                    shape_size.height as f32,
-                    self.scale_factor.get(),
-                );
-                let center = kurbo::Point::new(center_x as f64, center_y as f64);
+            ResolvedBrush::ConicGradient(gradient) => {
+                let center = kurbo::Point::new(gradient.center.x as f64, gradient.center.y as f64);
 
                 let mut peniko_gradient =
                     peniko::Gradient::new_sweep(center, 0., 360f32.to_radians());
-                peniko_gradient.stops = stops;
+                peniko_gradient.stops = to_peniko_stops(&gradient.stops);
 
                 // Sweep gradients start at 3 o'clock (east); Slint's 0° is at
                 // 12 o'clock, so rotate the brush by -90° around the center.
@@ -1083,119 +993,12 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
                     Some(kurbo::Affine::rotate_about(-std::f64::consts::FRAC_PI_2, center)),
                 )
             }
-            _ => return None,
         })
     }
 }
 
-/// Massage gradient color stops into the form vello accepts: sorted,
-/// strictly increasing, and with offsets in [0, 1]. vello renders gradients
-/// with out-of-range or non-increasing stop offsets as a solid fill of the
-/// first color instead.
-///
-/// Stops below 0 are replaced by the interpolated color at 0 (the CSS
-/// behavior). For stops beyond 1: with `can_extend`, all offsets are divided
-/// by the maximum and that maximum is returned as the second tuple element,
-/// so the caller can grow the gradient geometry (radius, line) by the same
-/// factor; without it, they are clamped to the interpolated color at 1.
-/// Duplicate offsets (hard color steps) are separated by the smallest
-/// representable amount.
-fn sanitize_color_stops<'a>(
-    stops: impl Iterator<Item = &'a i_slint_core::graphics::GradientStop>,
-    can_extend: bool,
-) -> (peniko::ColorStops, f32) {
-    /// Plain per-channel interpolation between the colors of `a` and `b` at
-    /// `position`, matching how the gradient ramp itself blends.
-    fn color_at(
-        position: f32,
-        a: &i_slint_core::graphics::GradientStop,
-        b: &i_slint_core::graphics::GradientStop,
-    ) -> Color {
-        let t = if b.position > a.position {
-            ((position - a.position) / (b.position - a.position)).clamp(0., 1.)
-        } else {
-            0.
-        };
-        let (ca, cb) = (a.color.to_argb_u8(), b.color.to_argb_u8());
-        let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
-        Color::from_argb_u8(
-            lerp(ca.alpha, cb.alpha),
-            lerp(ca.red, cb.red),
-            lerp(ca.green, cb.green),
-            lerp(ca.blue, cb.blue),
-        )
-    }
-
-    let mut stops: Vec<i_slint_core::graphics::GradientStop> = stops.cloned().collect();
-    stops.sort_by(|a, b| a.position.total_cmp(&b.position));
-
-    // Replace everything below 0 with the interpolated color at 0.
-    while stops.len() >= 2 && stops[1].position <= 0. {
-        stops.remove(0);
-    }
-    if let [first, second, ..] = stops.as_slice()
-        && first.position < 0.
-    {
-        stops[0] = i_slint_core::graphics::GradientStop {
-            color: color_at(0., first, second),
-            position: 0.,
-        };
-    } else if let [only] = stops.as_slice()
-        && only.position < 0.
-    {
-        stops[0].position = 0.;
-    }
-
-    // Handle stops beyond 1: normalize (the caller extends the geometry) or
-    // clamp to the interpolated color at 1.
-    let mut extent = 1.0f32;
-    if stops.last().is_some_and(|last| last.position > 1.) {
-        if can_extend {
-            extent = stops.last().unwrap().position;
-            for stop in &mut stops {
-                stop.position /= extent;
-            }
-        } else {
-            while stops.len() >= 2 && stops[stops.len() - 2].position >= 1. {
-                stops.pop();
-            }
-            let clamped_last = match stops.as_slice() {
-                [.., second_to_last, last] if last.position > 1. => {
-                    Some(i_slint_core::graphics::GradientStop {
-                        color: color_at(1., second_to_last, last),
-                        position: 1.,
-                    })
-                }
-                [only] if only.position > 1. => {
-                    Some(i_slint_core::graphics::GradientStop { color: only.color, position: 1. })
-                }
-                _ => None,
-            };
-            if let Some(stop) = clamped_last {
-                *stops.last_mut().unwrap() = stop;
-            }
-        }
-    }
-
-    // Make offsets strictly increasing: separate duplicates (hard color
-    // steps) by the smallest representable amount, then push back anything
-    // that got nudged past 1.
-    let mut previous = f32::NEG_INFINITY;
-    for stop in &mut stops {
-        if stop.position <= previous {
-            stop.position = previous.next_up();
-        }
-        previous = stop.position;
-    }
-    let mut next = 1.0f32.next_up();
-    for stop in stops.iter_mut().rev() {
-        if stop.position >= next {
-            stop.position = next.next_down();
-        }
-        next = stop.position;
-    }
-
-    let stops = peniko::ColorStops(
+fn to_peniko_stops(stops: &[i_slint_core::graphics::GradientStop]) -> peniko::ColorStops {
+    peniko::ColorStops(
         stops
             .iter()
             .map(|stop| peniko::ColorStop {
@@ -1203,13 +1006,10 @@ fn sanitize_color_stops<'a>(
                 color: peniko::color::DynamicColor::from_alpha_color(to_peniko_color(stop.color)),
             })
             .collect(),
-    );
-    (stops, extent)
+    )
 }
 
-/// Untyped because that is what [`i_slint_core::graphics::line_for_angle`]
-/// returns; its points are in the brush's device pixel coordinate space.
-fn to_kurbo_point(p: euclid::default::Point2D<f32>) -> kurbo::Point {
+fn to_kurbo_point(p: PhysicalPoint) -> kurbo::Point {
     (p.x, p.y).into()
 }
 
@@ -1380,21 +1180,13 @@ fn load_image(
         ),
         ImageInner::Svg(svg) => {
             // Query target_width/height here again to ensure that changes will invalidate the item rendering cache.
-            let svg_size = svg.size();
-            let fit = i_slint_core::graphics::fit(
+            let render_size = i_slint_core::graphics::scalable_render_size(
+                svg.size(),
                 image_fit,
                 target_size_fn() * scale_factor,
-                IntRect::from_size(svg_size.cast()),
                 scale_factor,
-                Default::default(), // We only care about the size, so alignments don't matter
                 Default::default(),
-            );
-            let target_size = PhysicalSize::new(
-                svg_size.cast::<f32>().width * fit.source_to_target_x,
-                svg_size.cast::<f32>().height * fit.source_to_target_y,
-            );
-            let render_size: euclid::Size2D<u32, i_slint_core::lengths::PhysicalPx> =
-                target_size.cast();
+            )?;
             image_cache.borrow_mut().get_or_insert(
                 ImageCacheKey::new(image_inner),
                 ImageVariant::Sized { width: render_size.width, height: render_size.height },
@@ -1492,7 +1284,9 @@ fn image_buffer_to_peniko_image(buffer: &SharedImageBuffer) -> Option<peniko::Im
         SharedImageBuffer::RGB8(shared_pixel_buffer) => {
             let rgba: Vec<u8> = shared_pixel_buffer
                 .as_bytes()
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
                 .collect();
             let width = shared_pixel_buffer.width();

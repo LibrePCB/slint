@@ -16,7 +16,9 @@ use crate::{
     },
     renderer::RendererSealed,
     textlayout::{TextHorizontalAlignment, TextOverflow, TextVerticalAlignment, TextWrap},
+    window::WindowAdapter,
 };
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::ops::Range;
 use core::pin::Pin;
@@ -76,7 +78,8 @@ use cache::cached_paragraphs;
 use layout::{Layout, LayoutOptions, layout};
 use selection::{SelectionRendering, SelectionSpans};
 use shaping::{
-    LayoutWithoutLineBreaksBuilder, create_text_paragraphs, shape_paragraphs, shaping_builder,
+    Brush, LayoutWithoutLineBreaksBuilder, create_text_paragraphs, shape_paragraphs,
+    shaping_builder,
 };
 
 /// Lays out the shaped text of an item and runs `f` over the result.
@@ -204,7 +207,6 @@ pub fn draw_text(
                 item_renderer.combine_clip(
                     LogicalRect::new(LogicalPoint::default(), size),
                     LogicalBorderRadius::zero(),
-                    LogicalLength::zero(),
                 )
             } else {
                 true
@@ -353,7 +355,6 @@ pub fn draw_text_input(
             let render = item_renderer.combine_clip(
                 LogicalRect::new(LogicalPoint::default(), size),
                 LogicalBorderRadius::zero(),
-                LogicalLength::zero(),
             );
 
             if render {
@@ -401,6 +402,7 @@ pub fn draw_text_input(
                 if let Some(cursor_pos) = visual_representation.cursor_position {
                     let cursor_rect = layout.cursor_rect_for_byte_offset(
                         cursor_pos,
+                        visual_representation.cursor_affinity,
                         text_input.text_cursor_width() * scale_factor,
                     );
                     item_renderer
@@ -413,15 +415,39 @@ pub fn draw_text_input(
     );
 }
 
+// The public entry points taking a renderer are generic so that RendererSealed's default
+// implementations can pass self. Each is a thin shim that extracts what it needs from the
+// renderer and forwards to a monomorphic inner function, so that the layout code is not
+// instantiated (and duplicated in the binary) once per renderer type.
 pub fn text_size(
-    renderer: &dyn RendererSealed,
+    renderer: &(impl RendererSealed + ?Sized),
     text_item: Pin<&dyn crate::item_rendering::RenderString>,
     item_rc: &crate::item_tree::ItemRc,
     max_width: Option<LogicalLength>,
     text_wrap: TextWrap,
     cache: Option<&TextLayoutCache>,
 ) -> Option<LogicalSize> {
-    let scale_factor = renderer.scale_factor()?;
+    text_size_impl(
+        renderer.scale_factor(),
+        renderer.window_adapter(),
+        text_item,
+        item_rc,
+        max_width,
+        text_wrap,
+        cache,
+    )
+}
+
+fn text_size_impl(
+    scale_factor: Option<ScaleFactor>,
+    window_adapter: Option<Rc<dyn WindowAdapter>>,
+    text_item: Pin<&dyn crate::item_rendering::RenderString>,
+    item_rc: &crate::item_tree::ItemRc,
+    max_width: Option<LogicalLength>,
+    text_wrap: TextWrap,
+    cache: Option<&TextLayoutCache>,
+) -> Option<LogicalSize> {
+    let scale_factor = scale_factor?;
 
     // Evaluate the properties that `shape_paragraphs` reads before borrowing font_context: they
     // can trigger property bindings that re-enter text_size for other elements, which would panic
@@ -432,7 +458,7 @@ pub fn text_size(
     let _ = text_item.link_color();
     let _ = text_item.text();
 
-    let window_adapter = renderer.window_adapter()?;
+    let window_adapter = window_adapter?;
 
     // Only `layout()`'s elision glyph reads this, and `TextOverflow::Clip` never asks for one.
     let layout_builder = shaping_builder(text_item, Some(item_rc), text_wrap, scale_factor);
@@ -457,17 +483,26 @@ pub fn text_size(
 
 /// The content widths of the text. See [`crate::renderer::ContentWidths`].
 pub fn text_content_widths(
-    renderer: &dyn RendererSealed,
+    renderer: &(impl RendererSealed + ?Sized),
     text_item: Pin<&dyn crate::item_rendering::RenderString>,
     item_rc: &crate::item_tree::ItemRc,
 ) -> Option<crate::renderer::ContentWidths> {
-    let scale_factor = renderer.scale_factor()?;
+    text_content_widths_impl(renderer.scale_factor(), renderer.slint_context(), text_item, item_rc)
+}
+
+fn text_content_widths_impl(
+    scale_factor: Option<ScaleFactor>,
+    ctx: Option<crate::SlintContext>,
+    text_item: Pin<&dyn crate::item_rendering::RenderString>,
+    item_rc: &crate::item_tree::ItemRc,
+) -> Option<crate::renderer::ContentWidths> {
+    let scale_factor = scale_factor?;
 
     // See text_size(): evaluate properties before borrowing font_context.
     let font_request = text_item.font_request(item_rc);
     let text = text_item.text();
 
-    let ctx = renderer.slint_context()?;
+    let ctx = ctx?;
     let mut font_ctx = ctx.font_context().borrow_mut();
 
     let layout_builder = shaping::content_widths_builder(font_request, scale_factor);
@@ -524,11 +559,12 @@ pub fn char_size(
         skrifa::instance::Size::new(pixel_size.get()),
         &location,
     );
+    let natural_line_height = font_metrics.ascent - font_metrics.descent;
+    let line_height = font_request
+        .line_height_for_natural_height(natural_line_height)
+        .unwrap_or(natural_line_height);
 
-    Some(LogicalSize::from_lengths(
-        advance_width,
-        LogicalLength::new(font_metrics.ascent - font_metrics.descent),
-    ))
+    Some(LogicalSize::from_lengths(advance_width, LogicalLength::new(line_height)))
 }
 
 pub fn font_metrics(
@@ -558,32 +594,51 @@ pub fn font_metrics(
 }
 
 pub fn text_input_byte_offset_for_position(
-    renderer: &dyn RendererSealed,
+    renderer: &(impl RendererSealed + ?Sized),
     text_input: Pin<&crate::items::TextInput>,
     item_rc: &crate::item_tree::ItemRc,
     pos: LogicalPoint,
     cache: Option<&TextLayoutCache>,
-) -> usize {
-    let Some(scale_factor) = renderer.scale_factor() else {
-        return 0;
+) -> (usize, crate::items::TextCursorAffinity) {
+    text_input_byte_offset_for_position_impl(
+        renderer.scale_factor(),
+        renderer.window_adapter(),
+        text_input,
+        item_rc,
+        pos,
+        cache,
+    )
+}
+
+fn text_input_byte_offset_for_position_impl(
+    scale_factor: Option<ScaleFactor>,
+    window_adapter: Option<Rc<dyn WindowAdapter>>,
+    text_input: Pin<&crate::items::TextInput>,
+    item_rc: &crate::item_tree::ItemRc,
+    pos: LogicalPoint,
+    cache: Option<&TextLayoutCache>,
+) -> (usize, crate::items::TextCursorAffinity) {
+    let no_hit = (0, crate::items::TextCursorAffinity::NextCharacter);
+    let Some(scale_factor) = scale_factor else {
+        return no_hit;
     };
     let pos: PhysicalPoint = pos * scale_factor;
 
     let width = text_input.width();
     let height = text_input.height();
     if width.get() <= 0. || height.get() <= 0. || pos.y < 0. {
-        return 0;
+        return no_hit;
     }
 
     let layout_builder =
         shaping_builder(text_input, Some(item_rc), text_input.wrap(), scale_factor);
     let visual_representation = text_input.visual_representation();
 
-    let Some(window_adapter) = renderer.window_adapter() else {
-        return 0;
+    let Some(window_adapter) = window_adapter else {
+        return no_hit;
     };
 
-    let byte_offset = with_text_layout(
+    let (byte_offset, affinity) = with_text_layout(
         cache,
         Some(item_rc),
         text_input,
@@ -592,18 +647,39 @@ pub fn text_input_byte_offset_for_position(
         window_adapter.window(),
         |layout| layout.byte_offset_from_point(pos),
     )
-    .unwrap_or(0);
-    visual_representation.map_byte_offset_from_visual_text_to_actual_text(byte_offset)
+    .unwrap_or(no_hit);
+    (visual_representation.map_byte_offset_from_visual_text_to_actual_text(byte_offset), affinity)
 }
 
 pub fn text_input_cursor_rect_for_byte_offset(
-    renderer: &dyn RendererSealed,
+    renderer: &(impl RendererSealed + ?Sized),
     text_input: Pin<&crate::items::TextInput>,
     item_rc: &crate::item_tree::ItemRc,
     byte_offset: usize,
+    affinity: crate::items::TextCursorAffinity,
     cache: Option<&TextLayoutCache>,
 ) -> LogicalRect {
-    let Some(scale_factor) = renderer.scale_factor() else {
+    text_input_cursor_rect_for_byte_offset_impl(
+        renderer.scale_factor(),
+        renderer.window_adapter(),
+        text_input,
+        item_rc,
+        byte_offset,
+        affinity,
+        cache,
+    )
+}
+
+fn text_input_cursor_rect_for_byte_offset_impl(
+    scale_factor: Option<ScaleFactor>,
+    window_adapter: Option<Rc<dyn WindowAdapter>>,
+    text_input: Pin<&crate::items::TextInput>,
+    item_rc: &crate::item_tree::ItemRc,
+    byte_offset: usize,
+    affinity: crate::items::TextCursorAffinity,
+    cache: Option<&TextLayoutCache>,
+) -> LogicalRect {
+    let Some(scale_factor) = scale_factor else {
         return LogicalRect::default();
     };
 
@@ -622,7 +698,7 @@ pub fn text_input_cursor_rect_for_byte_offset(
     let visual_representation = text_input.visual_representation();
     let cursor_width = text_input.text_cursor_width() * scale_factor;
 
-    let Some(window_adapter) = renderer.window_adapter() else {
+    let Some(window_adapter) = window_adapter else {
         return LogicalRect::default();
     };
 
@@ -635,7 +711,116 @@ pub fn text_input_cursor_rect_for_byte_offset(
         &layout_builder,
         LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
         window_adapter.window(),
-        |layout| layout.cursor_rect_for_byte_offset(byte_offset, cursor_width) / scale_factor,
+        |layout| {
+            layout.cursor_rect_for_byte_offset(byte_offset, affinity, cursor_width) / scale_factor
+        },
     )
     .unwrap_or_default()
 }
+
+/// A `TextInput`'s laid-out text, lent to [`with_text_input_layout`]'s callback for one call.
+#[allow(dead_code)]
+pub struct TextInputLayout<'a> {
+    layout: &'a Layout,
+    /// The string the paragraphs were shaped from, which [`TextInputParagraph::range`] indexes.
+    text: &'a str,
+}
+
+#[allow(dead_code)]
+impl<'a> TextInputLayout<'a> {
+    /// The paragraphs, top to bottom. A hard line break separates two of them and belongs to
+    /// neither, since Slint splits the text at `\n` before shaping.
+    pub(crate) fn paragraphs(&self) -> impl Iterator<Item = TextInputParagraph<'a>> {
+        let (text, y_offset) = (self.text, self.layout.y_offset);
+        self.layout.paragraphs.iter().map(move |para| TextInputParagraph {
+            range: para.range.clone(),
+            text: &text[para.range.clone()],
+            layout: &para.layout,
+            y: y_offset + para.y,
+        })
+    }
+}
+
+/// One paragraph of a [`TextInputLayout`].
+#[allow(dead_code)]
+pub(crate) struct TextInputParagraph<'a> {
+    /// Byte range within [`TextInputLayout::text`].
+    range: Range<usize>,
+    /// The slice of that text this paragraph covers.
+    text: &'a str,
+    /// Its shaped, line-broken and aligned glyphs.
+    layout: &'a parley::Layout<Brush>,
+    /// Physical y of its top edge, relative to the item's.
+    y: PhysicalLength,
+}
+
+/// Lays `text_input` out the way `renderer` draws it and lends the result to `f`.
+///
+/// `f` must not lay text out itself: the cache entry stays checked out for the call, and
+/// re-entering it panics.
+///
+/// Returns `None` if the renderer lays no text out through parley, so the caller can tell that
+/// apart from an empty layout.
+pub fn with_text_input_layout<R>(
+    renderer: &(impl RendererSealed + ?Sized),
+    text_input: Pin<&crate::items::TextInput>,
+    item_rc: &crate::item_tree::ItemRc,
+    size: LogicalSize,
+    f: impl FnOnce(TextInputLayout<'_>) -> R,
+) -> Option<R> {
+    if !renderer.text_input_has_parley_layout(text_input, item_rc) {
+        return None;
+    }
+    with_text_input_layout_impl(
+        renderer.scale_factor(),
+        renderer.window_adapter(),
+        renderer.text_layout_cache(),
+        text_input,
+        item_rc,
+        size,
+        f,
+    )
+}
+
+fn with_text_input_layout_impl<R>(
+    scale_factor: Option<ScaleFactor>,
+    window_adapter: Option<Rc<dyn WindowAdapter>>,
+    cache: Option<&TextLayoutCache>,
+    text_input: Pin<&crate::items::TextInput>,
+    item_rc: &crate::item_tree::ItemRc,
+    size: LogicalSize,
+    f: impl FnOnce(TextInputLayout<'_>) -> R,
+) -> Option<R> {
+    let scale_factor = scale_factor?;
+    let window_adapter = window_adapter?;
+
+    let width = size.width_length();
+    let height = size.height_length();
+    if width.get() <= 0. || height.get() <= 0. {
+        return None;
+    }
+
+    let layout_builder =
+        shaping_builder(text_input, Some(item_rc), text_input.wrap(), scale_factor);
+
+    // `RenderString for TextInput` yields plain text; a styled input doesn't exist.
+    let PlainOrStyledText::Plain(text) = crate::item_rendering::RenderString::text(text_input)
+    else {
+        return None;
+    };
+
+    with_text_layout(
+        cache,
+        Some(item_rc),
+        text_input,
+        &layout_builder,
+        LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
+        window_adapter.window(),
+        |layout| f(TextInputLayout { layout, text: &text }),
+    )
+}
+
+#[cfg(feature = "accessibility-text")]
+mod accessibility;
+#[cfg(feature = "accessibility-text")]
+pub use accessibility::CachedTextInputAccessibilityState;

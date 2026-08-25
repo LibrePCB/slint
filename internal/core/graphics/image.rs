@@ -1289,6 +1289,25 @@ fn test_image_load_from_data_svg() {
     assert_eq!(hinted.size(), [320, 200].into());
 }
 
+#[cfg(feature = "svg")]
+#[test]
+// memchr's manually aligned SIMD loads are a false positive under -Zmiri-symbolic-alignment-check
+#[cfg_attr(miri, ignore)]
+fn test_image_load_from_data_svgz() {
+    // usvg gates gzip decompression behind its `svgz` feature, so a missing feature would
+    // silently turn every compressed SVG into a load error. Gzip of the `simple_svg` above.
+    const SIMPLE_SVGZ: &[u8] = &[
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0xb3, 0x29, 0x2e, 0x4b, 0x57,
+        0x28, 0xcf, 0x4c, 0x29, 0xc9, 0xb0, 0x55, 0x32, 0x36, 0x32, 0x50, 0x52, 0xc8, 0x48, 0xcd,
+        0x4c, 0xcf, 0x28, 0xb1, 0x55, 0x32, 0x32, 0x00, 0x72, 0x2a, 0x72, 0x73, 0xf2, 0x8a, 0x6d,
+        0x95, 0x32, 0x4a, 0x4a, 0x0a, 0xac, 0xf4, 0xf5, 0xcb, 0xcb, 0xcb, 0xf5, 0xca, 0x8d, 0xf5,
+        0xf2, 0x8b, 0xd2, 0xf5, 0x81, 0xb2, 0x06, 0xfa, 0x40, 0xad, 0x4a, 0x76, 0x36, 0x20, 0xca,
+        0x0e, 0x00, 0x37, 0x91, 0x7a, 0xd6, 0x47, 0x00, 0x00, 0x00,
+    ];
+    let image = Image::load_from_data(SIMPLE_SVGZ, Some("svgz")).unwrap();
+    assert_eq!(image.size(), [320, 200].into());
+}
+
 #[cfg(feature = "image-decoders")]
 #[test]
 #[cfg_attr(miri, ignore)]
@@ -1491,6 +1510,38 @@ pub fn fit(
         tiled: None,
     }
     .adjust_for_tiling(ratio, alignment, tiling)
+}
+
+/// The pixel size a scalable image (an SVG) needs to be rasterized at to fill `target`
+/// under `image_fit`, i.e. its intrinsic size scaled by what [`fit`] would scale it by.
+///
+/// Returns `None` when the source has no area to scale from, or when the fitted size
+/// collapses to nothing.
+pub fn scalable_render_size(
+    source_size: IntSize,
+    image_fit: ImageFit,
+    target: euclid::Size2D<f32, PhysicalPx>,
+    scale_factor: ScaleFactor,
+    tiling: (ImageTiling, ImageTiling),
+) -> Option<euclid::Size2D<u32, PhysicalPx>> {
+    let source = source_size.cast::<f32>();
+    if source.is_empty() {
+        return None;
+    }
+    let fit = fit(
+        image_fit,
+        target,
+        IntRect::from_size(source_size.cast()),
+        scale_factor,
+        // Only the size is of interest here, so the alignment doesn't matter.
+        Default::default(),
+        tiling,
+    );
+    let size = euclid::size2(
+        (source.width * fit.source_to_target_x) as u32,
+        (source.height * fit.source_to_target_y) as u32,
+    );
+    (!size.is_empty()).then_some(size)
 }
 
 /// Generate an iterator of  [`FitResult`] for each slice of a nine-slice border image

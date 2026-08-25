@@ -74,11 +74,17 @@ fn expression_cost(exp: &Expression, ctx: &EvaluationContext) -> isize {
         Expression::WithLayoutItemInfo { .. } => return isize::MAX,
         Expression::WithFlexboxLayoutItemInfo { .. } => return isize::MAX,
         Expression::SolveFlexboxLayoutWithMeasure { .. } => return isize::MAX,
+        Expression::FlexboxLayoutInfoCrossAxisWithMeasure { .. } => return isize::MAX,
         Expression::WithGridInputData { .. } => return isize::MAX,
         Expression::MinMax { .. } => 10,
         Expression::EmptyComponentFactory => 10,
         Expression::EmptyDataTransfer => 10,
         Expression::TranslationReference { .. } => PROPERTY_ACCESS_COST + 2 * ALLOC_COST,
+        // The body cost is added by the visit() walk below; returning the body
+        // cost here would double-count it.
+        Expression::Closure { .. } => 0,
+        // Don't inline: that could duplicate or relocate the hook.
+        Expression::DebugHook { .. } => return isize::MAX,
     };
 
     exp.visit(|e| cost = cost.saturating_add(expression_cost(e, ctx)));
@@ -131,6 +137,7 @@ fn builtin_function_cost(function: &BuiltinFunction) -> isize {
         BuiltinFunction::StringCharacterCount => 50,
         BuiltinFunction::StringStartsWith | BuiltinFunction::StringEndsWith => 50,
         BuiltinFunction::StringToLowercase | BuiltinFunction::StringToUppercase => ALLOC_COST,
+        BuiltinFunction::StringReplaceAll => ALLOC_COST,
         BuiltinFunction::KeysToString => ALLOC_COST,
         BuiltinFunction::ColorRgbaStruct => 50,
         BuiltinFunction::ColorHsvaStruct => 50,
@@ -178,6 +185,12 @@ fn builtin_function_cost(function: &BuiltinFunction) -> isize {
         BuiltinFunction::ColorToStyledText => ALLOC_COST,
         BuiltinFunction::OpenUrl => isize::MAX,
         BuiltinFunction::MacosBringAllWindowsToFront => isize::MAX,
+        BuiltinFunction::PathPointAt => isize::MAX,
+        BuiltinFunction::PathAngleAt => isize::MAX,
+        // Iterating the model and running the closure is unbounded; never inline.
+        BuiltinFunction::ArrayAny | BuiltinFunction::ArrayAll | BuiltinFunction::ArrayFindIndex => {
+            isize::MAX
+        }
     }
 }
 

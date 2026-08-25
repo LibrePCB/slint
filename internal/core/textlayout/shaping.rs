@@ -23,6 +23,37 @@ pub struct Glyph<Length> {
     pub text_byte_offset: usize,
 }
 
+/// Adds two widths, returning `None` when the result would not fit the coordinate type. A line
+/// wider than that cannot be positioned or displayed anyway, so the layout stops there instead of
+/// overflowing (which would panic in a debug build). Floats never overflow, so they always add.
+pub trait CheckedAdd: Copy {
+    /// Adds, returning `None` if the result would not fit the coordinate type.
+    fn checked_add(self, other: Self) -> Option<Self>;
+
+    /// Adds, clamping to the coordinate type's maximum instead of overflowing.
+    fn saturating_add(self, other: Self) -> Self;
+}
+
+impl CheckedAdd for f32 {
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(self + other)
+    }
+
+    fn saturating_add(self, other: Self) -> Self {
+        self + other
+    }
+}
+
+impl<U> CheckedAdd for euclid::Length<i16, U> {
+    fn checked_add(self, other: Self) -> Option<Self> {
+        self.get().checked_add(other.get()).map(euclid::Length::new)
+    }
+
+    fn saturating_add(self, other: Self) -> Self {
+        euclid::Length::new(self.get().saturating_add(other.get()))
+    }
+}
+
 /// This trait defines the interface between the text layout and the platform specific
 /// mapping of text to glyphs. An implementation of the TextShaper trait must provide
 /// metric types (Length, LengthPrimitive), which is used for the line breaking calculation
@@ -48,6 +79,7 @@ pub trait TextShaper {
         + Copy
         + core::fmt::Debug;
     type Length: euclid::num::Zero
+        + CheckedAdd
         + core::ops::AddAssign
         + core::ops::Add<Output = Self::Length>
         + core::ops::Sub<Output = Self::Length>
@@ -65,7 +97,6 @@ pub trait TextShaper {
         glyphs: &mut GlyphStorage,
     );
     fn glyph_for_char(&self, ch: char) -> Option<Glyph<Self::Length>>;
-    fn max_lines(&self, max_height: Self::Length) -> usize;
 }
 
 pub trait FontMetrics<Length: Copy + core::ops::Sub<Output = Length>> {
@@ -285,10 +316,6 @@ impl TextShaper for &rustybuzz::Face<'_> {
     fn glyph_for_char(&self, _ch: char) -> Option<Glyph<f32>> {
         todo!()
     }
-
-    fn max_lines(&self, max_height: f32) -> usize {
-        (max_height / self.height()).floor() as _
-    }
 }
 
 #[cfg(test)]
@@ -390,7 +417,7 @@ fn test_letter_spacing() {
             shaped_glyphs.iter().map(|g| g.advance).collect::<Vec<_>>()
         };
 
-        let layout = TextLayout { font: &face, letter_spacing: Some(20.) };
+        let layout = TextLayout { font: &face, letter_spacing: Some(20.), line_height: None };
         let buffer = ShapeBuffer::new(&layout, text);
 
         assert_eq!(buffer.glyphs.len(), advances.len());

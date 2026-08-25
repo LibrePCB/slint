@@ -43,16 +43,20 @@ pub fn ensure_window(
         bindings: Default::default(),
         change_callbacks: Default::default(),
         is_component_placeholder: false,
+        is_injected_wrapper_element: false,
         property_analysis: Default::default(),
         children: std::mem::take(&mut win_elem_mut.children),
         enclosing_component: win_elem_mut.enclosing_component.clone(),
         property_declarations: Default::default(),
+        shadowing_members: Default::default(),
         named_references: Default::default(),
         repeated: Default::default(),
         states: Default::default(),
         transitions: Default::default(),
+        match_elements: Default::default(),
         child_of_layout: false,
         child_of_flexbox: false,
+        parent_box_layout_orientation: None,
         has_popup_child: false,
         layout_info_prop: Default::default(),
         layout_info_v_with_constraint: Default::default(),
@@ -62,6 +66,7 @@ pub fn ensure_window(
         geometry_props: Default::default(),
         is_flickable_content: false,
         is_tooltip: false,
+        z_order: None,
         item_index: Default::default(),
         item_index_of_first_children: Default::default(),
         grid_layout_cell: None,
@@ -154,6 +159,42 @@ pub fn inherits_window(component: &Rc<Component>) -> bool {
             "Window" | "Dialog" | "WindowItem" | "PopupWindow" | "SystemTrayIcon"
         )
     })
+}
+
+/// The alpha channel of a color literal, if `expr` is one. A binding whose
+/// value is only known at run time, such as a reference to a property the
+/// application sets, has none.
+#[cfg(feature = "slint-sc")]
+fn literal_alpha(expr: &Expression) -> Option<u8> {
+    match expr.ignore_debug_hooks() {
+        Expression::Cast { from, to: Type::Color | Type::Brush } => literal_alpha(from),
+        // A color literal is a number carrying its channels, alpha highest
+        Expression::NumberLiteral(value, _) => Some((*value as u32 >> 24) as u8),
+        _ => None,
+    }
+}
+
+/// The window background must be a color literal whose alpha channel is 0xff,
+/// so that rendering writes every pixel of the frame buffer. See the
+/// `sls.paint.window-opaque` requirement.
+///
+/// Run this after inlining: a background inherited from a base component only
+/// reaches the root element there, and it's the root the generator compiles.
+#[cfg(feature = "slint-sc")]
+pub fn check_sc_window_background(component: &Rc<Component>, diag: &mut BuildDiagnostics) {
+    // A root that isn't a window was already rejected by check_public_api
+    if !inherits_window(component) {
+        return;
+    }
+    let root = component.root_element.borrow();
+    // Without a binding the background is the opaque black default
+    let Some(binding) = root.binding_cell_including_synthetic("background") else { return };
+    let binding = binding.borrow();
+    match literal_alpha(&binding.expression) {
+        Some(0xff) => {}
+        Some(_) => diag.slint_sc_error("A Window background that isn't fully opaque is", &*binding),
+        None => diag.slint_sc_error("A Window background that isn't a color literal is", &*binding),
+    }
 }
 
 // Note: This pass must run before lower_popups, as that introduces additional Window elements.

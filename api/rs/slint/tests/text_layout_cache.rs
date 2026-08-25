@@ -4,7 +4,6 @@
 mod common;
 
 use i_slint_core::input::{InternalKeyEvent, KeyEventType};
-use i_slint_core::window::WindowInner;
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, SoftwareRenderer, TargetPixel,
 };
@@ -488,7 +487,7 @@ fn composition_is_shaped_through_the_cache() {
     event.preedit_text = "WWWWWWWWWW".into();
     // Where the IME puts the cursor: at the end of the composition.
     event.cursor_position = Some(2 + "WWWWWWWWWW".len() as i32);
-    WindowInner::from_pub(ui.window()).process_key_input(event);
+    ui.window().dispatch_event(slint::platform::WindowEvent::internal(event));
 
     // Read the counter before rendering, so it only covers the cursor rect query above, and again
     // afterwards to see what drawing the composition adds.
@@ -637,7 +636,7 @@ fn ime_composition_is_not_served_a_stale_size() {
     let mut event = InternalKeyEvent::default();
     event.event_type = KeyEventType::UpdateComposition;
     event.preedit_text = "WWWWWWWWWW".into();
-    WindowInner::from_pub(ui.window()).process_key_input(event);
+    ui.window().dispatch_event(slint::platform::WindowEvent::internal(event));
 
     window.request_redraw();
     window.draw_if_needed(|renderer| {
@@ -729,4 +728,102 @@ fn unchanged_layout_inputs_reuse_the_line_breaking() {
         count = render_and_get_layout_miss_count(renderer);
     }));
     assert!(count > 0, "a text change must break lines again");
+}
+
+fn reset_counts(renderer: &SoftwareRenderer) {
+    renderer.text_layout_cache().reset_cache_miss_count();
+    renderer.text_layout_cache().reset_layout_miss_count();
+}
+
+fn counts(renderer: &SoftwareRenderer) -> (u64, u64) {
+    (
+        renderer.text_layout_cache().cache_miss_count(),
+        renderer.text_layout_cache().layout_miss_count(),
+    )
+}
+
+#[test]
+fn cursor_movement_reuses_the_cached_layout() {
+    let window = setup();
+
+    // Moving the cursor by line or by page asks the renderer two questions about the same text:
+    // where the cursor is now, and which byte offset sits at the point it should move to. Neither
+    // is a shaping input nor a line breaking input, so both have to come out of the entry the
+    // previous draw left behind, without reshaping and without breaking lines again.
+    //
+    // This used to cost two or three line breaking passes per keystroke, because the entry only
+    // retained the shaped glyphs. It stopped costing anything once the entry started retaining
+    // the line breaking too, and this test is what keeps it that way.
+    slint::slint! {
+        export component TestComponent inherits Window {
+            in-out property <string> content: "Hello World this text wraps across several lines and keeps going for a while";
+            out property <int> offset: input.cursor-position-byte-offset;
+            input := TextInput {
+                x: 0; y: 0; width: 180px; height: 90px;
+                // Without this, PageUp and PageDown return before they ever reach the layout.
+                page-height: 40px;
+                text <=> root.content;
+                wrap: word-wrap;
+                single-line: false;
+            }
+            init => { input.focus(); }
+        }
+    }
+
+    let ui = TestComponent::new().unwrap();
+    ui.show().unwrap();
+    ui.window().dispatch_event(slint::platform::WindowEvent::WindowActiveChanged(true));
+
+    // Draw until nothing is dirty, so the measurements below start from a fully cached state.
+    let mut buf = vec![TestPixel(false); WIDTH * HEIGHT];
+    while window.draw_if_needed(|renderer| {
+        renderer.render(buf.as_mut_slice(), WIDTH);
+    }) {}
+
+    // As in `text_input_selection_change_does_not_reshape`, provoke a miss rather than assuming
+    // one. The zeroes below only mean something if the counters can move at all, and a text
+    // change is the one thing that has to move both of them.
+    ui.set_content("A different string that also wraps over more than one line".into());
+    let (mut shaping, mut breaking) = (0u64, 0u64);
+    window.request_redraw();
+    assert!(window.draw_if_needed(|renderer| {
+        reset_counts(renderer);
+        renderer.render(buf.as_mut_slice(), WIDTH);
+        (shaping, breaking) = counts(renderer);
+        // Leaves the counters at zero for the first pass through the loop below.
+        reset_counts(renderer);
+    }));
+    assert!(
+        shaping > 0 && breaking > 0,
+        "a text change must reshape and break lines, or the counters aren't wired up \
+         and every assertion below passes for the wrong reason"
+    );
+
+    // Home and End are left out: they only map to StartOfLine and EndOfLine off Apple platforms.
+    // Both run the same two queries as the four below, differing only in the point they probe.
+    for (key, what) in [
+        (slint::platform::Key::DownArrow, "moving to the next line"),
+        (slint::platform::Key::UpArrow, "moving to the previous line"),
+        (slint::platform::Key::PageDown, "moving a page down"),
+        (slint::platform::Key::PageUp, "moving a page up"),
+    ] {
+        let before = ui.get_offset();
+        ui.window().dispatch_event(slint::platform::WindowEvent::KeyPressed { text: key.into() });
+
+        // Read before rendering, so the draw can't add misses to what the key press cost. The
+        // render and reset that follow settle the counters for the next pass.
+        let (mut shaping, mut breaking) = (0u64, 0u64);
+        window.request_redraw();
+        assert!(window.draw_if_needed(|renderer| {
+            (shaping, breaking) = counts(renderer);
+            renderer.render(buf.as_mut_slice(), WIDTH);
+            reset_counts(renderer);
+        }));
+        assert_eq!(shaping, 0, "{what} should not reshape");
+        assert_eq!(breaking, 0, "{what} should not break lines again");
+
+        // Without this the test would still pass if the key stopped moving the cursor at all,
+        // since doing nothing also reshapes nothing.
+        assert_ne!(before, ui.get_offset(), "{what} should have moved the cursor");
+    }
 }

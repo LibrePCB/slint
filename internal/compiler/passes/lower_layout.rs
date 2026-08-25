@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use crate::diagnostics::{BuildDiagnostics, DiagnosticLevel, Spanned};
 use crate::expression_tree::*;
-use crate::langtype::ElementType;
 use crate::langtype::Type;
+use crate::langtype::{ElementType, PropertyLookupMode};
 use crate::layout::*;
 use crate::object_tree::*;
 use crate::typeloader::TypeLoader;
@@ -521,7 +521,7 @@ fn lower_element_layout(
     // Create fake properties for the layout properties
     // like alignment, spacing, spacing-horizontal, spacing-vertical
     for (p, ty) in prev_base.property_list() {
-        if !elem.base_type.lookup_property(&p).is_valid()
+        if !elem.base_type.lookup_property(&p, PropertyLookupMode::ComponentLocal).is_valid()
             && !elem.property_declarations.contains_key(&p)
         {
             elem.property_declarations.insert(p, ty.into());
@@ -1674,13 +1674,6 @@ fn lower_box_layout(
         cross_alignment: binding_reference(layout_element, "cross-axis-alignment"),
     };
 
-    let layout_cache_ortho_prop = layout.cross_alignment.is_some().then(|| {
-        create_new_prop(
-            layout_element,
-            SmolStr::new_static("layout-cache-ortho"),
-            Type::LayoutCache,
-        )
-    });
     let layout_info_prop_v = create_new_prop(
         layout_element,
         SmolStr::new_static("layoutinfo-v"),
@@ -1693,6 +1686,33 @@ fn lower_box_layout(
     );
 
     let layout_children = std::mem::take(&mut layout_element.borrow_mut().children);
+
+    // Collect the items before wiring anything: the ortho-cache decision below
+    // needs to know whether any cell sets `cross-axis-self-alignment`.
+    let items: Vec<_> =
+        layout_children.iter().map(|child| create_layout_item(child, diag)).collect();
+    // A repeated cell with `cross-axis-self-alignment` returns that value through
+    // the generated `layout_item_info`, which needs the layout's orientation to
+    // restrict it to the cross axis.
+    for item in &items {
+        if item.repeater_index.is_some() && item.item.cross_axis_self_alignment.is_some() {
+            item.elem.borrow_mut().parent_box_layout_orientation = Some(orientation);
+        }
+    }
+
+    // A per-item `cross-axis-self-alignment` needs the ortho solver too, even
+    // when the container itself has no `cross-axis-alignment`.
+    let any_cell_align_self =
+        items.iter().any(|item| item.item.cross_axis_self_alignment.is_some());
+
+    let layout_cache_ortho_prop =
+        (layout.cross_alignment.is_some() || any_cell_align_self).then(|| {
+            create_new_prop(
+                layout_element,
+                SmolStr::new_static("layout-cache-ortho"),
+                Type::LayoutCache,
+            )
+        });
 
     let (pos, size, pad, ortho) = match orientation {
         Orientation::Horizontal => ("x", "width", "y", "height"),
@@ -1708,8 +1728,7 @@ fn lower_box_layout(
         (pad_expr, size_minus_padding(layout_element, ortho, pads))
     });
 
-    for layout_child in &layout_children {
-        let item = create_layout_item(layout_child, diag);
+    for item in items {
         let index = layout.elems.len() * BOX_LAYOUT_CACHE_ENTRIES_PER_CELL;
         let rep_idx = &item.repeater_index;
         let (fixed_size, fixed_ortho) = match orientation {
@@ -1810,18 +1829,9 @@ fn lower_box_layout(
 }
 
 fn lower_flexbox_layout(layout_element: &ElementRc, diag: &mut BuildDiagnostics) {
-    // Warn if alignment is set to stretch, which behaves like start in flexbox
-    // (CSS spec: justify-content:stretch acts as flex-start for flex items)
-    if let Some(binding) = layout_element.borrow().binding("alignment")
-        && matches!(binding.value_expression(),
-            Expression::EnumerationValue(v) if v.enumeration.name == "LayoutAlignment"
-                && v.enumeration.values[v.value] == "stretch")
-    {
-        diag.push_warning("alignment: stretch has no effect on FlexboxLayout".into(), &*binding);
-    }
-
     let direction = crate::layout::binding_reference(layout_element, "flex-direction");
-    let align_content = crate::layout::binding_reference(layout_element, "align-content");
+    let cross_axis_line_alignment =
+        crate::layout::binding_reference(layout_element, "cross-axis-line-alignment");
     let cross_axis_alignment =
         crate::layout::binding_reference(layout_element, "cross-axis-alignment");
     let flex_wrap = crate::layout::binding_reference(layout_element, "flex-wrap");
@@ -1830,7 +1840,7 @@ fn lower_flexbox_layout(layout_element: &ElementRc, diag: &mut BuildDiagnostics)
         elems: Default::default(),
         geometry: LayoutGeometry::new(layout_element),
         direction,
-        align_content,
+        cross_axis_line_alignment,
         cross_axis_alignment,
         flex_wrap,
     };
@@ -1886,19 +1896,8 @@ fn lower_flexbox_layout(layout_element: &ElementRc, diag: &mut BuildDiagnostics)
                 diag,
             );
         }
-        let flex_grow = crate::layout::binding_reference(actual_elem, "flex-grow");
-        let flex_shrink = crate::layout::binding_reference(actual_elem, "flex-shrink");
-        let flex_basis = crate::layout::binding_reference(actual_elem, "flex-basis");
-        let align_self = crate::layout::binding_reference(actual_elem, "flex-align-self");
-        let order = crate::layout::binding_reference(actual_elem, "flex-order");
-        layout.elems.push(crate::layout::FlexboxLayoutItem {
-            item: item.item,
-            flex_grow,
-            flex_shrink,
-            flex_basis,
-            align_self,
-            order,
-        });
+        let order = crate::layout::binding_reference(actual_elem, "layout-order");
+        layout.elems.push(crate::layout::FlexboxLayoutItem { item: item.item, order });
     }
     layout_element.borrow_mut().children = layout_children;
     let span = layout_element.borrow().to_source_location();
@@ -2004,8 +2003,7 @@ fn lower_dialog_layout(
         let dialog_button_role_binding =
             layout_child.borrow_mut().take_binding("dialog-button-role");
         let is_button = if let Some(role_binding) = dialog_button_role_binding {
-            if let Expression::EnumerationValue(val) =
-                super::ignore_debug_hooks(&role_binding.expression)
+            if let Expression::EnumerationValue(val) = role_binding.expression.ignore_debug_hooks()
             {
                 let en = &val.enumeration;
                 debug_assert_eq!(en.name, "DialogButtonRole");
@@ -2023,7 +2021,7 @@ fn lower_dialog_layout(
                 );
             }
             true
-        } else if matches!(&layout_child.borrow().lookup_property("kind").property_type, Type::Enumeration(e) if e.name == "StandardButtonKind")
+        } else if matches!(&layout_child.borrow().lookup_property("kind", PropertyLookupMode::ComponentLocal).property_type, Type::Enumeration(e) if e.name == "StandardButtonKind")
         {
             // layout_child is a StandardButton
             match layout_child.borrow().binding("kind") {
@@ -2033,7 +2031,7 @@ fn lower_dialog_layout(
                 ),
                 Some(binding) => {
                     if let Expression::EnumerationValue(val) =
-                        super::ignore_debug_hooks(&binding.expression)
+                        binding.expression.ignore_debug_hooks()
                     {
                         let en = &val.enumeration;
                         debug_assert_eq!(en.name, "StandardButtonKind");
@@ -2064,8 +2062,10 @@ fn lower_dialog_layout(
                                 .unwrap()
                                 .root_element,
                         ) {
-                            let clicked_ty =
-                                layout_child.borrow().lookup_property("clicked").property_type;
+                            let clicked_ty = layout_child
+                                .borrow()
+                                .lookup_property("clicked", PropertyLookupMode::ComponentLocal)
+                                .property_type;
                             if matches!(&clicked_ty, Type::Callback { .. })
                                 && layout_child.borrow().binding("clicked").is_none_or(|c| {
                                     matches!(c.value_expression(), Expression::Invalid)
@@ -2085,7 +2085,9 @@ fn lower_dialog_layout(
                                         )),
                                         visibility: PropertyVisibility::InOut,
                                         pure: None,
-                                        shadows_builtin: false,
+                                        shadowed_name: None,
+                                        shadowable: false,
+                                        moved_to_root: false,
                                         deprecated: None,
                                     });
                             }
@@ -2267,8 +2269,10 @@ fn create_layout_item(
     };
 
     let constraints = LayoutConstraints::new(&actual_elem, Some((diag, DiagnosticLevel::Error)));
+    let cross_axis_self_alignment =
+        crate::layout::binding_reference(&actual_elem, "cross-axis-self-alignment");
     CreateLayoutItemResult {
-        item: LayoutItem { element: item_element.clone(), constraints },
+        item: LayoutItem { element: item_element.clone(), constraints, cross_axis_self_alignment },
         elem: actual_elem,
         repeater_index,
     }
@@ -2501,7 +2505,7 @@ fn check_number_literal_is_positive_integer(
     span: &dyn crate::diagnostics::Spanned,
     diag: &mut BuildDiagnostics,
 ) -> bool {
-    match super::ignore_debug_hooks(expression) {
+    match expression.ignore_debug_hooks() {
         Expression::NumberLiteral(v, Unit::None) => {
             if *v > u16::MAX as f64 || !v.trunc().approx_eq(v) {
                 diag.push_error(format!("'{name}' must be a positive integer"), span);
@@ -2509,7 +2513,7 @@ fn check_number_literal_is_positive_integer(
             true
         }
         Expression::UnaryOp { op: '-', sub } => {
-            if let Expression::NumberLiteral(_, Unit::None) = super::ignore_debug_hooks(sub) {
+            if let Expression::NumberLiteral(_, Unit::None) = sub.ignore_debug_hooks() {
                 diag.push_error(format!("'{name}' must be a positive integer"), span);
             }
             true
@@ -2525,7 +2529,7 @@ fn recognized_layout_types() -> &'static [&'static str] {
     &["Row", "GridLayout", "HorizontalLayout", "VerticalLayout", "FlexboxLayout", "Dialog"]
 }
 
-/// Checks that there are no grid-layout specific properties used wrongly
+/// Checks that there are no layout specific properties used wrongly
 fn check_no_layout_properties(
     item: &ElementRc,
     layout_type: &Option<SmolStr>,
@@ -2539,13 +2543,21 @@ fn check_no_layout_properties(
         {
             diag.push_error(format!("{prop} used outside of a GridLayout's cell"), &*expr.borrow());
         }
-        if parent_layout_type.as_deref() != Some("FlexboxLayout")
-            && matches!(
-                prop.as_ref(),
-                "flex-grow" | "flex-shrink" | "flex-basis" | "flex-align-self" | "flex-order"
+        if prop == "layout-order" && parent_layout_type.as_deref() != Some("FlexboxLayout") {
+            diag.push_error(format!("{prop} used outside of a FlexboxLayout"), &*expr.borrow());
+        }
+        if prop == "cross-axis-self-alignment"
+            && !matches!(
+                parent_layout_type.as_deref(),
+                Some("FlexboxLayout" | "HorizontalLayout" | "VerticalLayout")
             )
         {
-            diag.push_error(format!("{prop} used outside of a FlexboxLayout"), &*expr.borrow());
+            diag.push_error(
+                format!(
+                    "{prop} used outside of a FlexboxLayout, HorizontalLayout, or VerticalLayout"
+                ),
+                &*expr.borrow(),
+            );
         }
         if parent_layout_type.as_deref() != Some("Dialog")
             && matches!(prop.as_ref(), "dialog-button-role")

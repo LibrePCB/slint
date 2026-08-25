@@ -10,7 +10,6 @@
 #[cfg(any(target_vendor = "apple", skia_backend_vulkan))]
 use std::cell::OnceCell;
 use std::cell::{Cell, RefCell};
-use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
@@ -25,9 +24,7 @@ use i_slint_core::graphics::rendering_metrics_collector::RenderingMetricsCollect
 use i_slint_core::graphics::{BorderRadius, SharedPixelBuffer};
 use i_slint_core::item_rendering::{ItemCache, ItemRenderer};
 use i_slint_core::item_tree::ItemTreeWeak;
-use i_slint_core::lengths::{
-    LogicalLength, LogicalPoint, LogicalRect, LogicalSize, PhysicalPx, ScaleFactor,
-};
+use i_slint_core::lengths::{LogicalPoint, LogicalRect, PhysicalPx, ScaleFactor};
 use i_slint_core::partial_renderer::{DirtyRegion, PartialRenderingState};
 use i_slint_core::platform::PlatformError;
 use i_slint_core::renderer::DrawOutcome;
@@ -65,10 +62,13 @@ pub mod wgpu_29_surface;
 pub mod wgpu_30_surface;
 #[cfg(any(feature = "wgpu-29", feature = "wgpu-30"))]
 mod wgpu_renderer;
+#[cfg(feature = "wgpu-29")]
+pub use wgpu_renderer::SkiaWGPU29Renderer;
+#[cfg(feature = "wgpu-30")]
+pub use wgpu_renderer::SkiaWGPU30Renderer;
 #[cfg(any(feature = "wgpu-29", feature = "wgpu-30"))]
-pub use wgpu_renderer::SkiaWGPURenderer;
+pub use wgpu_renderer::{SkiaWGPURenderer, SkiaWGPURendererGeneric};
 
-use i_slint_core::items::{ItemRc, TextWrap};
 use itemrenderer::to_skia_rect;
 pub use skia_safe;
 
@@ -488,6 +488,7 @@ impl SkiaRenderer {
         display_handle: Arc<dyn raw_window_handle::HasDisplayHandle + Send + Sync>,
         size: PhysicalWindowSize,
         requested_graphics_api: Option<RequestedGraphicsAPI>,
+        transparent: bool,
     ) -> Result<(), PlatformError> {
         // just in case
         self.suspend()?;
@@ -498,6 +499,7 @@ impl SkiaRenderer {
             size,
             requested_graphics_api,
         )?;
+        surface.set_transparent(transparent)?;
         self.set_surface(surface);
         Ok(())
     }
@@ -803,106 +805,8 @@ impl SkiaRenderer {
 }
 
 impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
-    fn text_size(
-        &self,
-        text_item: Pin<&dyn i_slint_core::item_rendering::RenderString>,
-        item_rc: &ItemRc,
-        max_width: Option<LogicalLength>,
-        text_wrap: TextWrap,
-    ) -> LogicalSize {
-        sharedparley::text_size(
-            self,
-            text_item,
-            item_rc,
-            max_width,
-            text_wrap,
-            Some(&self.text_layout_cache),
-        )
-        .unwrap_or_default()
-    }
-
-    fn text_content_widths(
-        &self,
-        text_item: Pin<&dyn i_slint_core::item_rendering::RenderString>,
-        item_rc: &ItemRc,
-    ) -> Option<i_slint_core::renderer::ContentWidths> {
-        sharedparley::text_content_widths(self, text_item, item_rc)
-    }
-
-    fn char_size(
-        &self,
-        text_item: Pin<&dyn i_slint_core::item_rendering::HasFont>,
-        item_rc: &i_slint_core::item_tree::ItemRc,
-        ch: char,
-    ) -> LogicalSize {
-        self.slint_context()
-            .and_then(|ctx| {
-                let mut font_ctx = ctx.font_context().borrow_mut();
-                sharedparley::char_size(&mut font_ctx, text_item, item_rc, ch)
-            })
-            .unwrap_or_default()
-    }
-
-    fn font_metrics(
-        &self,
-        font_request: i_slint_core::graphics::FontRequest,
-    ) -> i_slint_core::items::FontMetrics {
-        self.slint_context()
-            .map(|ctx| {
-                let mut font_ctx = ctx.font_context().borrow_mut();
-                sharedparley::font_metrics(&mut font_ctx, font_request)
-            })
-            .unwrap_or_default()
-    }
-
-    fn text_input_byte_offset_for_position(
-        &self,
-        text_input: std::pin::Pin<&i_slint_core::items::TextInput>,
-        item_rc: &i_slint_core::item_tree::ItemRc,
-        pos: LogicalPoint,
-    ) -> usize {
-        sharedparley::text_input_byte_offset_for_position(
-            self,
-            text_input,
-            item_rc,
-            pos,
-            Some(&self.text_layout_cache),
-        )
-    }
-
-    fn text_input_cursor_rect_for_byte_offset(
-        &self,
-        text_input: std::pin::Pin<&i_slint_core::items::TextInput>,
-        item_rc: &i_slint_core::item_tree::ItemRc,
-        byte_offset: usize,
-    ) -> LogicalRect {
-        sharedparley::text_input_cursor_rect_for_byte_offset(
-            self,
-            text_input,
-            item_rc,
-            byte_offset,
-            Some(&self.text_layout_cache),
-        )
-    }
-
-    fn register_font_from_memory(
-        &self,
-        data: &'static [u8],
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let ctx = self.slint_context().ok_or("slint platform not initialized")?;
-        ctx.font_context().borrow_mut().register_static_font(data);
-        Ok(())
-    }
-
-    fn register_font_from_path(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let requested_path = path.canonicalize().unwrap_or_else(|_| path.into());
-        let contents = std::fs::read(requested_path)?;
-        let ctx = self.slint_context().ok_or("slint platform not initialized")?;
-        ctx.font_context().borrow_mut().collection.register_fonts(contents.into(), None);
-        Ok(())
+    fn text_layout_cache(&self) -> Option<&sharedparley::TextLayoutCache> {
+        Some(&self.text_layout_cache)
     }
 
     fn set_rendering_notifier(
@@ -964,7 +868,7 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
         }
     }
 
-    /// Returns an image buffer of what was rendered last by reading the previous front buffer (using glReadPixels).
+    /// Returns an image buffer with the contents of the window, obtained by re-rendering the scene into a CPU-side surface.
     fn take_snapshot(
         &self,
     ) -> Result<SharedPixelBuffer<i_slint_core::graphics::Rgba8Pixel>, PlatformError> {
@@ -1081,6 +985,10 @@ pub trait Surface {
     /// Implementations should return self to allow upcasting.
     fn as_any(&self) -> &dyn core::any::Any {
         &()
+    }
+
+    fn set_transparent(&self, _: bool) -> Result<(), PlatformError> {
+        Ok(())
     }
 }
 

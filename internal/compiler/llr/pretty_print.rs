@@ -185,6 +185,14 @@ impl PrettyPrinter<'_> {
                 DisplayExpression(&e.borrow(), &ctx)
             )?
         }
+        if let Some((cross_o, e)) = &sc.cross_axis_self_alignment_for_repeated {
+            self.indent()?;
+            writeln!(
+                self.writer,
+                "cross-axis-self-alignment-for-repeated ({cross_o:?}): {};",
+                DisplayExpression(&e.borrow(), &ctx)
+            )?
+        }
         for (i, c) in sc.grid_layout_children.iter_enumerated() {
             self.indent()?;
             writeln!(
@@ -667,6 +675,9 @@ impl<'a, T> Display for DisplayExpression<'a, T> {
             Expression::WithFlexboxLayoutItemInfo { .. } => {
                 write!(f, "WithFlexboxLayoutItemInfo(TODO)",)
             }
+            Expression::FlexboxLayoutInfoCrossAxisWithMeasure { .. } => {
+                write!(f, "FlexboxLayoutInfoCrossAxisWithMeasure(TODO)",)
+            }
             Expression::SolveFlexboxLayoutWithMeasure { .. } => {
                 write!(f, "SolveFlexboxLayoutWithMeasure(TODO)",)
             }
@@ -693,6 +704,13 @@ impl<'a, T> Display for DisplayExpression<'a, T> {
                         DisplayExpression(format_args, ctx)
                     ),
                 }
+            }
+            Expression::Closure { arg_name, expression } => {
+                let display_name = arg_name.strip_prefix("local_").unwrap_or(arg_name);
+                write!(f, "({}) => {}", display_name, e(expression))
+            }
+            Expression::DebugHook { expression, id } => {
+                write!(f, "debug-hook({id:?}, {})", DisplayExpression(expression, ctx))
             }
         }
     }
