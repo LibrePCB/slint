@@ -289,6 +289,24 @@ pub(crate) fn completion_at(
         })?;
     } else if node.kind() == SyntaxKind::AtKeys {
         return with_lookup_ctx(document_cache, node, Some(offset), at_keys_completions);
+    } else if let Some(member) = syntax_nodes::ObjectMember::new(node.clone()) {
+        // Completing an object-literal field value (the value expression is still empty).
+        if let Some(colon) = member.child_token(SyntaxKind::Colon)
+            && offset >= colon.text_range().end()
+        {
+            return with_lookup_ctx(document_cache, node, Some(offset), |ctx| {
+                resolve_expression_scope(ctx, document_cache, snippet_support)
+            })?;
+        }
+    } else if let Some(member_access) = syntax_nodes::MemberAccess::new(node.clone()) {
+        // Member access on something that isn't a plain name, such as `foo[0].` or `foo().`
+        let dot = member_access.child_token(SyntaxKind::Dot)?;
+        if offset >= dot.text_range().end() {
+            return with_lookup_ctx(document_cache, node, Some(offset), |ctx| {
+                let base = Expression::from_expression_node(member_access.Expression(), ctx);
+                completion_items_from_lookup(&base, ctx, snippet_support)
+            });
+        }
     } else if let Some(q) = syntax_nodes::QualifiedName::new(node.clone()) {
         match q.parent()?.kind() {
             SyntaxKind::Element => {
@@ -363,14 +381,7 @@ pub(crate) fn completion_at(
                         let str = i_slint_compiler::parser::normalize_identifier(t.text());
                         expr_it = expr_it.lookup(ctx, &str)?;
                     }
-                    has_dot.then(|| {
-                        let mut r = Vec::new();
-                        expr_it.for_each_entry(ctx, &mut |str, expr| -> Option<()> {
-                            r.push(completion_item_from_expression(str, expr, snippet_support));
-                            None
-                        });
-                        r
-                    })
+                    has_dot.then(|| completion_items_from_lookup(&expr_it, ctx, snippet_support))
                 })?;
             }
             _ => (),
@@ -557,14 +568,13 @@ fn is_reserved_prop_valid(
     if name_in(i_slint_compiler::typeregister::RESERVED_GRIDLAYOUT_PROPERTIES) {
         return matches!(parent_name, Some("GridLayout" | "Row"));
     }
-    if prop == "cross-axis-self-alignment" {
+    if prop == "cross-axis-self-alignment"
+        || name_in(i_slint_compiler::typeregister::RESERVED_LAYOUT_CELL_PROPERTIES)
+    {
         return matches!(
             parent_name,
             Some("FlexboxLayout" | "HorizontalLayout" | "VerticalLayout")
         );
-    }
-    if name_in(i_slint_compiler::typeregister::RESERVED_FLEXBOXLAYOUT_PROPERTIES) {
-        return parent_name == Some("FlexboxLayout");
     }
     if name_in(i_slint_compiler::typeregister::RESERVED_DROP_SHADOW_PROPERTIES)
         || name_in(i_slint_compiler::typeregister::RESERVED_INNER_SHADOW_PROPERTIES)
@@ -829,12 +839,8 @@ fn resolve_expression_scope(
     document_cache: &editor_preview::DocumentCache,
     snippet_support: bool,
 ) -> Option<Vec<CompletionItem>> {
-    let mut r = Vec::new();
     let global = i_slint_compiler::lookup::global_lookup();
-    global.for_each_entry(lookup_context, &mut |str, expr| -> Option<()> {
-        r.push(completion_item_from_expression(str, expr, snippet_support));
-        None
-    });
+    let mut r = completion_items_from_lookup(&global, lookup_context, snippet_support);
     if snippet_support
         && let Some(token) = lookup_context.current_token.as_ref().and_then(|t| match t {
             i_slint_compiler::parser::NodeOrToken::Node(n) => n.first_token(),
@@ -868,6 +874,20 @@ fn resolve_expression_scope(
         );
     }
     Some(r)
+}
+
+/// The completion items for everything `obj` exposes
+fn completion_items_from_lookup(
+    obj: &impl LookupObject,
+    ctx: &LookupCtx,
+    snippet_support: bool,
+) -> Vec<CompletionItem> {
+    let mut r = Vec::new();
+    obj.for_each_entry(ctx, &mut |str, expr| -> Option<()> {
+        r.push(completion_item_from_expression(str, expr, snippet_support));
+        None
+    });
+    r
 }
 
 fn completion_item_from_expression(
@@ -1443,6 +1463,29 @@ mod tests {
         completion_at(&mut dc, token, offset, Some(&caps))
     }
 
+    #[test]
+    fn completion_in_document_with_unknown_element() {
+        // The unknown element leaves the document in error, so the compiler skipped the passes
+        // and 'x' has no type. Completion resolves the surrounding expressions to know what is
+        // expected at the cursor, which must not panic on the untyped element.
+        for source in [
+            r#"export component Foo {
+                x := Blah { }
+                for a in x.some-model: Text { text: 🔺 }
+            }"#,
+            r#"export component Foo {
+                x := Blah { }
+                if x.some-condition: Text { text: 🔺 }
+            }"#,
+            r#"export component Foo {
+                x := Blah { }
+                Text { text: x.some-property == 🔺 }
+            }"#,
+        ] {
+            assert!(get_completions(source).is_some_and(|c| !c.is_empty()), "{source}");
+        }
+    }
+
     fn assert_completions_found(
         expected: impl IntoIterator<Item = CompletionItem>,
         results: &[CompletionItem],
@@ -1858,6 +1901,36 @@ mod tests {
     }
 
     #[test]
+    fn struct_field_after_index() {
+        // The index makes the parser produce a MemberAccess instead of a QualifiedName (#13305)
+        let source = r#"
+            struct InnerData { inner: string }
+            struct Data { first: string, second: [InnerData] }
+            export component AppWindow {
+                property <Data> data;
+                Text { text: data.second[0].🔺; }
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        assert_eq!(res.iter().map(|ci| ci.label.as_str()).collect::<Vec<_>>(), ["inner"]);
+    }
+
+    #[test]
+    fn struct_field_of_model_data() {
+        // The type of the loop variable comes from the model of the `for` (#13305)
+        let source = r#"
+            struct InnerData { inner: string }
+            struct Data { first: string, second: [InnerData] }
+            export component AppWindow {
+                property <Data> data;
+                for item in data.second: Text { text: item.🔺; }
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        assert_eq!(res.iter().map(|ci| ci.label.as_str()).collect::<Vec<_>>(), ["inner"]);
+    }
+
+    #[test]
     fn local_variables_function() {
         let source = r#"
             component Foo {
@@ -2014,6 +2087,88 @@ mod tests {
     }
 
     #[test]
+    fn expected_type_comparison_rhs() {
+        // A bare enum value / color resolves against the type of the comparison's left-hand
+        // side, so completion offers the matching values after `==`.
+        let source = r#"
+            enum Direction { up, down, forward }
+            component Foo {
+                in property <Direction> dir;
+                in property <color> col;
+                out property <bool> b1: dir == 🔺;
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "up").unwrap();
+        res.iter().find(|ci| ci.label == "down").unwrap();
+        res.iter().find(|ci| ci.label == "forward").unwrap();
+        // The left-hand side is an enum, so colors must not be offered here.
+        assert!(!res.iter().any(|ci| ci.label == "red"));
+
+        let source = r#"
+            component Foo {
+                in property <color> fg;
+                out property <bool> b1: fg != 🔺;
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "red").unwrap();
+        res.iter().find(|ci| ci.label == "blue").unwrap();
+    }
+
+    #[test]
+    fn expected_type_call_argument() {
+        // A bare enum value resolves against the parameter type at its argument position.
+        let source = r#"
+            enum Direction { up, down, forward }
+            component Foo {
+                callback cb(int, Direction);
+                callback trigger;
+                trigger => { cb(1, 🔺) }
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "up").unwrap();
+        res.iter().find(|ci| ci.label == "forward").unwrap();
+
+        // First argument is an int, so the enum values must not leak into that position.
+        let source = r#"
+            enum Direction { up, down, forward }
+            component Foo {
+                callback cb(int, Direction);
+                callback trigger;
+                trigger => { cb(🔺, up) }
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        assert!(!res.iter().any(|ci| ci.label == "up"));
+    }
+
+    #[test]
+    fn expected_type_struct_field_and_array() {
+        // Struct-literal field values and array elements resolve against the field/element type.
+        let source = r#"
+            enum Direction { up, down, forward }
+            struct S { dir: Direction, count: int }
+            component Foo {
+                in property <S> s: { dir: 🔺 };
+            }
+        "#;
+        let res = get_completions(source).unwrap_or_default();
+        res.iter().find(|ci| ci.label == "up").unwrap();
+        res.iter().find(|ci| ci.label == "forward").unwrap();
+
+        let source = r#"
+            component Foo {
+                in property <[color]> cols: [red, 🔺];
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "blue").unwrap();
+        res.iter().find(|ci| ci.label == "green").unwrap();
+    }
+
+    #[test]
     fn function_calls() {
         let source = r#"
             component Foo {
@@ -2033,7 +2188,7 @@ mod tests {
             ("add(..)", "add(${1:a}, ${2:b})"),
             ("caller()", "caller()"),
             ("clear-focus()", "clear-focus()"),
-            ("set-selection-offsets(..)", "set-selection-offsets(${1:start}, ${2:end})"),
+            ("set-selection-offsets(..)", "set-selection-offsets(${1:anchor}, ${2:focus})"),
             ("my-callback(..)", "my-callback(${1:hello}, ${2:world})"),
         ]
         .map(|(label, insert_text)| CompletionItem {
@@ -2910,30 +3065,8 @@ component Foo {
     }
 
     #[test]
-    fn flex_item_properties_in_flexbox() {
-        let source = r#"
-export component Foo {
-    FlexboxLayout {
-        Rectangle {
-            🔺
-        }
-    }
-}
-"#;
-        let results = get_completions(source).unwrap();
-        assert!(
-            results.iter().any(|completion| completion.label == "layout-order"),
-            "no 'layout-order' completion"
-        );
-        assert!(
-            results.iter().any(|completion| completion.label == "cross-axis-self-alignment"),
-            "no 'cross-axis-self-alignment' completion"
-        );
-    }
-
-    #[test]
-    fn cross_axis_self_alignment_in_box_layouts() {
-        for layout in ["HorizontalLayout", "VerticalLayout"] {
+    fn layout_cell_properties_in_layouts() {
+        for layout in ["FlexboxLayout", "HorizontalLayout", "VerticalLayout"] {
             let source = format!(
                 r#"
 component Foo {{
@@ -2946,10 +3079,45 @@ component Foo {{
 "#
             );
             let results = get_completions(&source).unwrap();
-            assert!(
-                results.iter().any(|completion| completion.label == "cross-axis-self-alignment"),
-                "no 'cross-axis-self-alignment' completion in a {layout}"
-            );
+            for prop in ["layout-order", "cross-axis-self-alignment"] {
+                assert!(
+                    results.iter().any(|completion| completion.label == prop),
+                    "no '{prop}' completion in a {layout}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_auto_completion_for_cross_axis_alignment() {
+        // `auto` cannot be set on `cross-axis-alignment`, so don't offer it there,
+        // neither as a bare value nor after `CrossAxisAlignment.`
+        for (binding, has_auto) in [
+            ("cross-axis-alignment: @value Rectangle {}", false),
+            ("Rectangle { cross-axis-self-alignment: @value }", true),
+        ] {
+            for value in ["🔺", "CrossAxisAlignment.🔺"] {
+                let binding = binding.replace("@value", value);
+                let source = format!(
+                    r#"
+component Foo {{
+    VerticalLayout {{
+        {binding}
+    }}
+}}
+"#
+                );
+                let results = get_completions(&source).unwrap();
+                assert_eq!(
+                    results.iter().any(|completion| completion.label == "auto"),
+                    has_auto,
+                    "wrong 'auto' completion in `{binding}`"
+                );
+                assert!(
+                    results.iter().any(|completion| completion.label == "center"),
+                    "no 'center' completion in `{binding}`"
+                );
+            }
         }
     }
 

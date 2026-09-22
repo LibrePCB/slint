@@ -58,6 +58,17 @@ pub trait RepeatedItemTree:
         crate::layout::LayoutItemInfo::default()
     }
 
+    /// Vertical layout info measured at the given cross-axis (container) width.
+    /// A box layout calls this so a height-for-width instance wraps to the
+    /// real width. The default ignores the width (non-height-for-width cells);
+    /// the generated code overrides it for height-for-width instances.
+    fn layout_item_info_at_cross_width(
+        self: Pin<&Self>,
+        _cross_width: f32,
+    ) -> crate::layout::LayoutItemInfo {
+        self.layout_item_info(Orientation::Vertical, None)
+    }
+
     /// Returns what's needed to perform a flexbox layout if this ItemTree is in a FlexboxLayout.
     /// Includes flex-specific properties (layout-order).
     fn flexbox_layout_item_info(
@@ -74,21 +85,9 @@ pub trait RepeatedItemTree:
     /// cells); the generated code overrides it for height-for-width instances.
     fn flexbox_layout_item_info_at_cross_width(
         self: Pin<&Self>,
-        _flex_cross_width: f32,
+        _cross_width: f32,
     ) -> crate::layout::FlexboxLayoutItemInfo {
         self.flexbox_layout_item_info(Orientation::Vertical, None)
-    }
-
-    /// Horizontal flexbox info measured at the given cross-axis (assigned)
-    /// height. A FlexboxLayout calls this so a width-for-height instance
-    /// resolves to the width it really needs at that height. The default
-    /// ignores the height (non-width-for-height cells); the generated code
-    /// overrides it for width-for-height instances.
-    fn flexbox_layout_item_info_at_cross_height(
-        self: Pin<&Self>,
-        _flex_cross_height: f32,
-    ) -> crate::layout::FlexboxLayoutItemInfo {
-        self.flexbox_layout_item_info(Orientation::Horizontal, None)
     }
 
     /// Fills in the grid layout input data for this ItemTree if it is in a grid layout.
@@ -832,49 +831,22 @@ impl<C: RepeatedItemTree + 'static> Repeater<C> {
         crate::item_tree::VisitChildrenResult::CONTINUE
     }
 
-    /// Call the visitor for the root of a single instance.
-    pub fn visit_instance(
-        self: Pin<&Self>,
-        instance: u32,
-        order: TraversalOrder,
-        mut visitor: crate::item_tree::ItemVisitorRefMut,
-    ) -> crate::item_tree::VisitChildrenResult {
-        let c = self.0.inner.borrow().instances.get(instance as usize).and_then(|c| c.1.clone());
-        if let Some(c) = c
-            && c.as_pin_ref().visit_children_item(-1, order, visitor.borrow_mut()).has_aborted()
-        {
-            return crate::item_tree::VisitChildrenResult::abort(instance, 0);
-        }
-        crate::item_tree::VisitChildrenResult::CONTINUE
-    }
-
-    /// Visit a single instance when `instance` is `Some` (coming from a z-ordered
-    /// traversal), or all the instances when it is `None`.
-    pub fn visit_maybe_instance(
-        self: Pin<&Self>,
-        instance: Option<u32>,
-        order: TraversalOrder,
-        visitor: crate::item_tree::ItemVisitorRefMut,
-    ) -> crate::item_tree::VisitChildrenResult {
-        match instance {
-            None => self.visit(order, visitor),
-            Some(instance) => self.visit_instance(instance, order, visitor),
-        }
-    }
-
-    /// Call `cb` with the index and the z value of every instance, when the repeated
-    /// element has a dynamic z binding.
+    /// Call `cb` with the model row index and the z value of every instance, when the
+    /// repeated element has a dynamic z binding. The row index is the one accepted by
+    /// [`Self::instance_at`] (and thus by the `get_subtree` vtable entry).
     /// Also registers model dependencies so the current tracking scope is notified
     /// when the model changes.
     pub fn for_each_instance_z(self: Pin<&Self>, cb: &mut dyn FnMut(u32, f32)) {
         self.track_model_changes();
         // Read the z values without holding the borrow: evaluating the z property's
         // binding can run user code
-        let instances: Vec<_> =
-            self.0.inner.borrow().instances.iter().map(|c| c.1.clone()).collect();
+        let (offset, instances): (usize, Vec<_>) = {
+            let inner = self.0.inner.borrow();
+            (inner.layout_state.offset, inner.instances.iter().map(|c| c.1.clone()).collect())
+        };
         for (i, c) in instances.iter().enumerate() {
             let z = c.as_ref().and_then(|c| c.as_pin_ref().z_order()).unwrap_or_default();
-            cb(i as u32, z);
+            cb((offset + i) as u32, z);
         }
     }
 
@@ -1000,16 +972,6 @@ impl<C: RepeatedItemTree + 'static> Conditional<C> {
         }
 
         crate::item_tree::VisitChildrenResult::CONTINUE
-    }
-
-    /// A conditional has at most one instance, so `instance` is ignored.
-    pub fn visit_maybe_instance(
-        self: Pin<&Self>,
-        _instance: Option<u32>,
-        order: TraversalOrder,
-        visitor: crate::item_tree::ItemVisitorRefMut,
-    ) -> crate::item_tree::VisitChildrenResult {
-        self.visit(order, visitor)
     }
 
     /// Call `cb` with the index and the z value of the instance if the condition is

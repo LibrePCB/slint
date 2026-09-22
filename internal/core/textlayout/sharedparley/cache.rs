@@ -33,17 +33,34 @@ struct CachedParagraphs {
     /// them back when it drops. Finding `None` here therefore means the previous caller returned
     /// without handing them back, and the entry has to be reshaped rather than served empty.
     paragraphs: Option<Vec<TextParagraph>>,
+    /// The [`TextLayoutCache::generation`] at which this entry was last served.
+    last_used: u32,
 }
 
 type InnerTextLayoutCache = crate::item_rendering::ItemCache<CachedParagraphs>;
 
+/// Entry count above which [`TextLayoutCache::sweep`] runs (~4.7KB per entry).
+const ENTRY_LIMIT: usize = 1024;
+
 /// Cache for shaped text paragraphs (before line breaking), keyed by ItemRc.
 pub struct TextLayoutCache {
     inner: InnerTextLayoutCache,
+    /// Caches the result of [`super::text_content_widths`]. The widths are two scalars derived from
+    /// paragraphs that no other path can reuse, because they are shaped without
+    /// `OverflowWrap::Anywhere`, so the result is kept instead of the paragraphs.
+    content_widths: crate::item_rendering::ItemCache<crate::renderer::ContentWidths>,
+    /// Bumped once per rendered frame; entries are stamped with it when served.
+    generation: std::cell::Cell<u32>,
+    /// Approximate entry count; a stale-high value just triggers one extra sweep.
+    entry_count_estimate: std::cell::Cell<usize>,
+    /// Estimate above which the next sweep runs; raised when the active set exceeds the limit.
+    sweep_threshold: std::cell::Cell<usize>,
     #[cfg(feature = "testing")]
     cache_miss_count: std::cell::Cell<u64>,
     #[cfg(feature = "testing")]
     layout_miss_count: std::cell::Cell<u64>,
+    #[cfg(feature = "testing")]
+    content_widths_miss_count: std::cell::Cell<u64>,
 }
 
 #[allow(clippy::derivable_impls)] // clippy doesn't see the feature = "testing" code
@@ -51,10 +68,16 @@ impl Default for TextLayoutCache {
     fn default() -> Self {
         Self {
             inner: Default::default(),
+            content_widths: Default::default(),
+            generation: Default::default(),
+            entry_count_estimate: Default::default(),
+            sweep_threshold: std::cell::Cell::new(ENTRY_LIMIT),
             #[cfg(feature = "testing")]
             cache_miss_count: std::cell::Cell::new(0),
             #[cfg(feature = "testing")]
             layout_miss_count: std::cell::Cell::new(0),
+            #[cfg(feature = "testing")]
+            content_widths_miss_count: std::cell::Cell::new(0),
         }
     }
 }
@@ -64,14 +87,52 @@ impl TextLayoutCache {
     /// pixels, so a new scale factor invalidates every entry at once. Called on the way into the
     /// cache rather than when rendering starts, because the layout pass that follows a scale
     /// factor change measures before anything renders.
-    fn clear_if_scale_factor_changed(&self, window: &crate::api::Window) {
+    pub(super) fn clear_if_scale_factor_changed(&self, window: &crate::api::Window) {
         self.inner.clear_cache_if_scale_factor_changed(window);
+        self.content_widths.clear_cache_if_scale_factor_changed(window);
     }
     pub fn component_destroyed(&self, component: crate::item_tree::ItemTreeRef) {
         self.inner.component_destroyed(component);
+        self.content_widths.component_destroyed(component);
     }
     pub fn clear_all(&self) {
         self.inner.clear_all();
+        self.content_widths.clear_all();
+    }
+
+    /// Returns the cached content widths of `item_rc`, computing them on a miss.
+    ///
+    /// The entry is invalidated by the properties `compute` reads, so it must read the
+    /// text, the font request and the line limit itself. The scale factor is handled by
+    /// [`Self::clear_if_scale_factor_changed`], which the caller runs first.
+    pub(super) fn content_widths(
+        &self,
+        item_rc: &crate::item_tree::ItemRc,
+        compute: impl FnOnce() -> crate::renderer::ContentWidths,
+    ) -> crate::renderer::ContentWidths {
+        self.content_widths.get_or_update_cache_entry(item_rc, || {
+            #[cfg(feature = "testing")]
+            self.content_widths_miss_count.set(self.content_widths_miss_count.get() + 1);
+            compute()
+        })
+    }
+
+    /// Marks the beginning of a frame; called once per rendered frame.
+    pub fn begin_frame(&self) {
+        self.generation.set(self.generation.get().wrapping_add(1));
+    }
+
+    /// Drops the entries that were not served in the current or the previous frame.
+    fn sweep(&self) {
+        let generation = self.generation.get();
+        let mut kept = 0;
+        self.inner.retain(|entry| {
+            let keep = generation.wrapping_sub(entry.last_used) <= 1;
+            kept += keep as usize;
+            keep
+        });
+        self.entry_count_estimate.set(kept);
+        self.sweep_threshold.set(ENTRY_LIMIT.max(kept + ENTRY_LIMIT / 2));
     }
 }
 
@@ -90,6 +151,14 @@ impl TextLayoutCache {
     }
     pub fn reset_layout_miss_count(&self) {
         self.layout_miss_count.set(0);
+    }
+    /// How many times the content widths of an item had to be shaped rather than served
+    /// from the cache.
+    pub fn content_widths_miss_count(&self) -> u64 {
+        self.content_widths_miss_count.get()
+    }
+    pub fn reset_content_widths_miss_count(&self) {
+        self.content_widths_miss_count.set(0);
     }
     pub(super) fn count_layout_miss(&self) {
         self.layout_miss_count.set(self.layout_miss_count.get() + 1);
@@ -179,11 +248,23 @@ pub(super) fn cached_paragraphs<'a>(
         cache.inner.release(item_rc);
     }
 
+    // Sweep before this item's entry is checked out and blocks `retain`'s access.
+    if cache.entry_count_estimate.get() > cache.sweep_threshold.get() {
+        cache.sweep();
+    }
+
     let mut entry = cache.inner.get_or_update_cache_entry_ref(item_rc, || {
         #[cfg(feature = "testing")]
         cache.cache_miss_count.set(cache.cache_miss_count.get() + 1);
-        CachedParagraphs { wrap, paragraphs: Some(shape(font_context)), line_breaking: None }
+        cache.entry_count_estimate.set(cache.entry_count_estimate.get() + 1);
+        CachedParagraphs {
+            wrap,
+            paragraphs: Some(shape(font_context)),
+            line_breaking: None,
+            last_used: 0, // stamped right below, for both a hit and this miss
+        }
     });
+    entry.last_used = cache.generation.get();
     let paragraphs = entry.paragraphs.take().unwrap_or_default();
     CachedParagraphsGuard {
         paragraphs: Some(paragraphs),

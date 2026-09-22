@@ -97,6 +97,7 @@ To specify an easing curve, use the values from the `Easing` namespace. For exam
     -   `ease-out-bounce`
     -   `ease-in-out-bounce`
     -   `cubic-bezier(a, b, c, d)` as in CSS
+    -   `spring(bounce)` as defined in <Link type="Spring Animation" label="Spring Animations" />
 
 Additionally, in expressions of type `easing`, those names are available directly.
 
@@ -157,8 +158,6 @@ In Python, properties or struct fields of the data-transfer type are mapped to <
 <SlintProperty propName="mouse-cursor" typeName="MouseCursor" defaultValue='default'>
 The `MouseCursor` type is used in the <Link type="TouchArea" label="TouchArea element"/>.
 
-#### Built-in shape
-
 Set to one of the built-in shapes by specifying the name:
 
 ```slint
@@ -172,15 +171,5 @@ TouchArea {
 ```
 
 <BuiltInMouseCursor />
-
-#### Custom shape
-
-To set a custom mouse cursor, provide an `image` and a hotspot. The hotspot is the point in the image, given in image pixels from the top-left corner, that is aligned with the actual pointer position. It is clamped to the image bounds.
-
-```slint
-TouchArea {
-    mouse-cursor: MouseCursor.custom(@image-url("cursor.png"), 0, 0);
-}
-```
 
 </SlintProperty>

@@ -193,6 +193,14 @@ impl PrettyPrinter<'_> {
                 DisplayExpression(&e.borrow(), &ctx)
             )?
         }
+        if let Some((main_o, e)) = &sc.layout_order_for_repeated {
+            self.indent()?;
+            writeln!(
+                self.writer,
+                "layout-order-for-repeated ({main_o:?}): {};",
+                DisplayExpression(&e.borrow(), &ctx)
+            )?
+        }
         for (i, c) in sc.grid_layout_children.iter_enumerated() {
             self.indent()?;
             writeln!(
@@ -491,7 +499,7 @@ impl<'a, T> Display for DisplayExpression<'a, T> {
             Expression::CodeBlock(v) => {
                 write!(f, "{{ {} }}", v.iter().map(e).join("; "))
             }
-            Expression::BuiltinFunctionCall { function, arguments } => {
+            Expression::BuiltinFunctionCall { function, arguments, .. } => {
                 write!(f, "{:?}({})", function, arguments.iter().map(e).join(", "))
             }
             Expression::CallBackCall { callback, arguments } => {
@@ -645,6 +653,7 @@ impl<'a, T> Display for DisplayExpression<'a, T> {
                 repeater_steps_var_name,
                 elements,
                 orientation,
+                repeated_cross_size,
                 sub_expression,
             } => {
                 write!(
@@ -655,8 +664,14 @@ impl<'a, T> Display for DisplayExpression<'a, T> {
                         .iter()
                         .map(|x| match x {
                             Either::Left(x) => e(x).to_string(),
-                            Either::Right(r) =>
-                                format!("@repeater({})", usize::from(r.repeater_index)),
+                            Either::Right(r) => match &r.cross_width {
+                                Some(w) => format!(
+                                    "@repeater({} at cross-width {})",
+                                    usize::from(r.repeater_index),
+                                    e(w)
+                                ),
+                                None => format!("@repeater({})", usize::from(r.repeater_index)),
+                            },
                         })
                         .join(", "),
                     match orientation {
@@ -670,10 +685,16 @@ impl<'a, T> Display for DisplayExpression<'a, T> {
                 if let Some(v) = repeater_steps_var_name {
                     write!(f, "{v} = @repeater-steps; ")?;
                 }
+                if let Some(s) = repeated_cross_size {
+                    write!(f, "@repeated-cross-size = {}; ", e(s))?;
+                }
                 write!(f, "{} }}", e(sub_expression))
             }
             Expression::WithFlexboxLayoutItemInfo { .. } => {
                 write!(f, "WithFlexboxLayoutItemInfo(TODO)",)
+            }
+            Expression::BoxLayoutInfoOrthoWithMeasure { .. } => {
+                write!(f, "BoxLayoutInfoOrthoWithMeasure(TODO)",)
             }
             Expression::FlexboxLayoutInfoCrossAxisWithMeasure { .. } => {
                 write!(f, "FlexboxLayoutInfoCrossAxisWithMeasure(TODO)",)

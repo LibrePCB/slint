@@ -19,8 +19,7 @@ wait_for = ["fix:toml:format"]
 run = "cargo build --locked -p xtask || (echo \"### Updating Main Lockfile! ###\" && cargo update)"
 
 # The examples, demos and tests workspaces each keep their own committed
-# Cargo.lock (bevy and servo folded into examples/Cargo.lock). Use cargo metadata
-# to test whether each lockfile needs updating.
+# Cargo.lock. Use cargo metadata to test whether each lockfile needs updating.
 # --format-version suppresses "warning: please specify `--format-version` flag explicitly to avoid compatibility problems"
 ["fix:rust:lockfile:examples"]
 description = "Update the examples workspace lockfile (if absolutely necessary)"
@@ -55,12 +54,15 @@ wait_for = [
 ]
 
 ["fix:python:format"]
-description = "Run ruff format"
+description = "Run Ruff fixes and formatting"
 # Run via uv as the ruff installation via mise is unreliable in the CI.
 # It keeps failing to find ruff, despite saying that it was installed.
 # --project picks up the ruff pinned in api/python/slint's dev group so this
 # matches the version CI lints with, while still formatting from the repo root.
-run = "uv run --project api/python/slint --only-group dev ruff format"
+run = """
+uv run --project api/python/slint --only-group dev ruff check --fix tools/editor/ui-tests
+uv run --project api/python/slint --only-group dev ruff format
+"""
 
 ["fix:rust:format"]
 description = "Run cargo fmt --all"
@@ -99,7 +101,13 @@ run = "pnpm i --lockfile-only"
 
 ["fix:pnpm:dedupe"]
 description = "Run pnpm dedupe"
-run = "pnpm dedupe"
+run = '''
+if [ "${SLINT_SKIP_PNPM_DEDUPE:-false}" = "true" ]; then
+  echo "Skipping pnpm dedupe because no dependency manifest changed"
+else
+  pnpm dedupe
+fi
+'''
 depends = ["prepare:pnpm-install"]
 
 ["fix:ts:format"]
@@ -114,6 +122,22 @@ run = "pnpm run lint:fix"
 depends = ["prepare:pnpm-install"]
 
 ### Lints
+
+["lint:python"]
+description = "Run Ruff and ty on the standalone scripts"
+# scripts/ has no uv project of its own, so borrow the ruff and ty pinned in
+# api/python/slint's dev group, the versions the Python packages are linted with.
+# The packages themselves are checked from their own directories in the python
+# workflow, which ruff needs to resolve their first-party imports.
+run = """
+uv run --project api/python/slint --only-group dev ruff check scripts
+uv run --project api/python/slint --only-group dev ty check scripts
+"""
+
+["lint:spell"]
+description = "Run cspell"
+run = "pnpm spellcheck"
+depends = ["prepare:pnpm-install"]
 
 ["lint:ts:typecheck"]
 description = "Run pnpm format:fix"
@@ -183,4 +207,4 @@ depends = [
 
 ["ci:autofix:lint"]
 description = "CI autofix job -- lint steps"
-depends = ["lint:legal:reuse", "lint:ts:typecheck", "lint:ts:knip"]
+depends = ["lint:legal:reuse", "lint:python", "lint:ts:typecheck", "lint:ts:knip"]

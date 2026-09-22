@@ -64,18 +64,30 @@ impl i_slint_core::item_tree::ItemTree for Instance {
     ) -> VisitChildrenResult {
         let this = self.get_ref();
         let weak = this.self_weak.get().unwrap().clone();
-        let sorted = self.compute_z_sorted_children(index);
-        i_slint_core::item_tree::visit_item_tree(
-            &vtable::VRc::into_dyn(weak.upgrade().unwrap()),
-            &this.tree_nodes[..],
-            index,
-            order,
-            visitor,
-            &mut |order, visitor, dyn_index, instance| {
-                self.visit_dynamic_children(dyn_index, order, visitor, instance)
-            },
-            sorted.as_deref(),
-        )
+        if index >= 0 && this.z_sort_table.get(index as usize).is_some_and(|e| e.is_some()) {
+            i_slint_core::item_tree::visit_item_tree_z_sorted(
+                &vtable::VRc::into_dyn(weak.upgrade().unwrap()),
+                &this.tree_nodes[..],
+                index,
+                order,
+                visitor,
+                &mut |order, visitor, dyn_index| {
+                    self.visit_dynamic_children(dyn_index, order, visitor)
+                },
+                &mut |push| self.collect_z_sorted_children(index, push),
+            )
+        } else {
+            i_slint_core::item_tree::visit_item_tree(
+                &vtable::VRc::into_dyn(weak.upgrade().unwrap()),
+                &this.tree_nodes[..],
+                index,
+                order,
+                visitor,
+                &mut |order, visitor, dyn_index| {
+                    self.visit_dynamic_children(dyn_index, order, visitor)
+                },
+            )
+        }
     }
 
     fn get_item_ref(self: Pin<&Self>, index: u32) -> Pin<VRef<'_, ItemVTable>> {
@@ -499,7 +511,7 @@ fn accessibility_action_name(action: &AccessibilityAction) -> &'static str {
         AccessibilityAction::Expand => "Expand",
         AccessibilityAction::ReplaceSelectedText(_) => "ReplaceSelectedText",
         AccessibilityAction::SetValue(_) => "SetValue",
-        AccessibilityAction::SetSelection(..) => "SetSelection",
+        AccessibilityAction::SetSelectionOffsets(..) => "SetSelectionOffsets",
     }
 }
 
@@ -508,7 +520,7 @@ fn accessibility_action_args(action: &AccessibilityAction) -> Vec<crate::Value> 
         AccessibilityAction::ReplaceSelectedText(s) | AccessibilityAction::SetValue(s) => {
             vec![crate::Value::String(s.clone())]
         }
-        AccessibilityAction::SetSelection(anchor, focus) => {
+        AccessibilityAction::SetSelectionOffsets(anchor, focus) => {
             vec![crate::Value::Number(*anchor as f64), crate::Value::Number(*focus as f64)]
         }
         _ => Vec::new(),

@@ -25,7 +25,7 @@ pub use crate::passes::resolving;
 
 #[derive(Debug, Clone, PartialEq, Eq, strum::EnumString)]
 /// A function built into the run-time.
-/// Member functions in `builtins.slint` bind to a variant by naming it as their body.
+/// Member functions of builtin elements bind to a variant with `#[slint(builtin_function(..))]`.
 pub enum BuiltinFunction {
     GetWindowScaleFactor,
     GetWindowDefaultFontSize,
@@ -146,6 +146,9 @@ pub enum BuiltinFunction {
     /// because `parse_interpolated` takes `StyledText` arguments.
     ColorToStyledText,
     DecimalSeparator,
+    /// The window title when the application doesn't set one, see
+    /// `i_slint_core::window::default_window_title`
+    DefaultWindowTitle,
     PathPointAt,
     PathAngleAt,
 }
@@ -183,6 +186,7 @@ pub enum BuiltinMacroFunction {
     /// Transforms `array.index-of(value)` into `array.find-index((x) => x == value)`
     ArrayIndexOf,
     CustomMouseCursor,
+    Spring,
 }
 
 macro_rules! declare_builtin_function_types {
@@ -230,6 +234,7 @@ declare_builtin_function_types!(
     ATan: (Type::Float32) -> Type::Angle,
     ATan2: (Type::Float32, Type::Float32) -> Type::Angle,
     DecimalSeparator: () -> Type::String,
+    DefaultWindowTitle: () -> Type::String,
     Log: (Type::Float32, Type::Float32) -> Type::Float32,
     Ln: (Type::Float32) -> Type::Float32,
     Pow: (Type::Float32, Type::Float32) -> Type::Float32,
@@ -373,6 +378,7 @@ impl BuiltinFunction {
             BuiltinFunction::ValidDate => false,
             BuiltinFunction::ParseDate => false,
             BuiltinFunction::DecimalSeparator => false,
+            BuiltinFunction::DefaultWindowTitle => false,
             // Even if it is not pure, we optimize it away anyway
             BuiltinFunction::Debug => true,
             BuiltinFunction::Mod
@@ -479,6 +485,7 @@ impl BuiltinFunction {
             BuiltinFunction::ValidDate => true,
             BuiltinFunction::ParseDate => true,
             BuiltinFunction::DecimalSeparator => true,
+            BuiltinFunction::DefaultWindowTitle => true,
             // Even if it has technically side effect, we still consider it as pure for our purpose
             BuiltinFunction::Debug => true,
             BuiltinFunction::Mod
@@ -696,7 +703,7 @@ declare_units! {
 /// its type, so the stored value is already scaled and needs no further
 /// conversion. The units a user can type (`cm`, `pt`, `grad`, ...) are
 /// [`WrittenUnit`] and are normalized to one of these on the way in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum Unit {
     /// Dimension-less (`float`, `int`)
     #[default]
@@ -748,6 +755,17 @@ impl std::fmt::Display for Unit {
 pub enum MinMaxOp {
     Min,
     Max,
+}
+
+/// The three places a `.slint` file writes a conditional.
+#[derive(Debug, Clone)]
+pub enum ConditionLocation {
+    /// The `?` of a `?:`.
+    Question(SourceLocation),
+    /// A state's name, and the `when` of its condition.
+    StateSelection { name: SourceLocation, when: SourceLocation },
+    /// The property a state changes.
+    StateChange(SourceLocation),
 }
 
 /// The Expression is held by properties, so it should not hold any strong references to node from the object_tree
@@ -852,6 +870,8 @@ pub enum Expression {
         rhs: Box<Expression>,
         /// '+', '-', '/', '*', '=', '!', '<', '>', '≤', '≥', '&', '|'
         op: char,
+        /// The operator token, when written in the source.
+        source_location: Option<SourceLocation>,
     },
 
     UnaryOp {
@@ -870,6 +890,8 @@ pub enum Expression {
         condition: Box<Expression>,
         true_expr: Box<Expression>,
         false_expr: Box<Expression>,
+        /// Where the source writes the conditional, when it writes one.
+        source_location: Option<ConditionLocation>,
     },
 
     Array {
@@ -989,7 +1011,8 @@ pub enum Expression {
     ComputeFlexboxLayoutInfo {
         layout: crate::layout::FlexboxLayout,
         orientation: crate::layout::Orientation,
-        /// only set in `layoutinfo-v-with-constraint`
+        /// The width parameter in `layoutinfo-v-with-constraint`, the flex's
+        /// own height in `layoutinfo-h-at-own-height`
         cross_axis_size: Option<Box<Expression>>,
     },
 
@@ -1052,7 +1075,7 @@ impl Expression {
             },
             Expression::SelfAssignment { .. } => Type::Void,
             Expression::ImageReference { .. } => Type::Image,
-            Expression::Condition { condition: _, true_expr, false_expr } => {
+            Expression::Condition { condition: _, true_expr, false_expr, .. } => {
                 let true_type = true_expr.ty();
                 let false_type = false_expr.ty();
                 if true_type == false_type {
@@ -1065,7 +1088,7 @@ impl Expression {
                     Type::Void
                 }
             }
-            Expression::BinaryExpression { op, lhs, rhs } => {
+            Expression::BinaryExpression { op, lhs, rhs, .. } => {
                 if operator_class(*op) != OperatorClass::ArithmeticOp {
                     Type::Bool
                 } else if *op == '+' || *op == '-' {
@@ -1147,6 +1170,10 @@ impl Expression {
 
     /// Call the visitor for each sub-expression.  (note: this function does not recurse)
     pub fn visit(&self, mut visitor: impl FnMut(&Self)) {
+        self.visit_dyn(&mut visitor)
+    }
+
+    fn visit_dyn(&self, visitor: &mut dyn FnMut(&Self)) {
         match self {
             Expression::Invalid => {}
             Expression::Uncompiled(_) => {}
@@ -1175,7 +1202,7 @@ impl Expression {
                 visitor(rhs);
             }
             Expression::ImageReference { .. } => {}
-            Expression::Condition { condition, true_expr, false_expr } => {
+            Expression::Condition { condition, true_expr, false_expr, .. } => {
                 visitor(condition);
                 visitor(true_expr);
                 visitor(false_expr);
@@ -1289,6 +1316,10 @@ impl Expression {
     }
 
     pub fn visit_mut(&mut self, mut visitor: impl FnMut(&mut Self)) {
+        self.visit_mut_dyn(&mut visitor)
+    }
+
+    fn visit_mut_dyn(&mut self, visitor: &mut dyn FnMut(&mut Self)) {
         match self {
             Expression::Invalid => {}
             Expression::Uncompiled(_) => {}
@@ -1317,7 +1348,7 @@ impl Expression {
                 visitor(rhs);
             }
             Expression::ImageReference { .. } => {}
-            Expression::Condition { condition, true_expr, false_expr } => {
+            Expression::Condition { condition, true_expr, false_expr, .. } => {
                 visitor(condition);
                 visitor(true_expr);
                 visitor(false_expr);
@@ -1489,7 +1520,7 @@ impl Expression {
             }
             Expression::SelfAssignment { .. } => false,
             Expression::ImageReference { .. } => true,
-            Expression::Condition { condition, false_expr, true_expr } => {
+            Expression::Condition { condition, false_expr, true_expr, .. } => {
                 condition.is_constant(ga) && false_expr.is_constant(ga) && true_expr.is_constant(ga)
             }
             Expression::BinaryExpression { lhs, rhs, .. } => {
@@ -1600,6 +1631,7 @@ impl Expression {
                     lhs: Box::new(self),
                     rhs: Box::new(Expression::NumberLiteral(0.01, Unit::None)),
                     op: '*',
+                    source_location: None,
                 },
                 (ref from_ty @ Type::Struct(ref left), Type::Struct(right))
                     if left.fields != right.fields =>
@@ -1624,6 +1656,26 @@ impl Expression {
                                     node,
                                 );
                             }
+                        }
+                    }
+                    if !diag.is_slint_sc() {
+                        let extra = left
+                            .fields
+                            .keys()
+                            .filter(|f| !right.fields.contains_key(*f))
+                            .map(|f| format!("'{f}'"))
+                            .collect::<Vec<_>>();
+                        if let Some((last, rest)) = extra.split_last() {
+                            let (noun, list) = match rest {
+                                [] => ("field", last.clone()),
+                                _ => ("fields", format!("{} and {last}", rest.join(", "))),
+                            };
+                            diag.push_warning(
+                                format!(
+                                    "Conversion to {target_type} ignores the extra {noun} {list}"
+                                ),
+                                node,
+                            );
                         }
                     }
                     if let Expression::Struct { mut values, .. } = self {
@@ -1676,6 +1728,7 @@ impl Expression {
                                     let op = if power < 0 { '*' } else { '/' };
                                     for _ in 0..power.abs() {
                                         result = Expression::BinaryExpression {
+                                            source_location: None,
                                             lhs: Box::new(result),
                                             rhs: Box::new(Expression::FunctionCall {
                                                 function: Callable::Builtin(builtin_fn.clone()),
@@ -1769,7 +1822,9 @@ impl Expression {
                 new_values.insert(f, default_value);
             }
             Expression::Struct { ty: target_struct_type.clone(), values: new_values }
-        } else if let Expression::Condition { condition, true_expr, false_expr } = self {
+        } else if let Expression::Condition { condition, true_expr, false_expr, source_location } =
+            self
+        {
             // Recursive try to convert the conditional expressions to the target_type
             // true_expr and false_expr are equal this is handled with the condition at the beginning
             // of this function so if one fails to convert, we should not try to convert the false case
@@ -1782,10 +1837,11 @@ impl Expression {
             );
             if true_expr_converted.ty() != target_type.clone() {
                 // Failed to convert so we don't have to try to convert the false expr as well
-                Expression::Condition { condition, true_expr, false_expr }
+                Expression::Condition { condition, true_expr, false_expr, source_location }
             } else {
                 Expression::Condition {
                     condition,
+                    source_location,
                     true_expr: Box::new(true_expr_converted),
                     false_expr: Box::new(false_expr.maybe_convert_to(
                         target_type,
@@ -2081,6 +2137,10 @@ pub struct BindingExpression {
     /// 0 means the expression was added by some passes and it is not explicit in the source code
     pub priority: i32,
 
+    /// Whether a state is what created this binding. The value it takes while no state
+    /// applies is then the property's type default.
+    pub from_state: bool,
+
     pub animation: Option<PropertyAnimation>,
 
     /// The analysis information. None before it is computed
@@ -2096,6 +2156,7 @@ impl std::convert::From<Expression> for BindingExpression {
             expression,
             span: None,
             priority: 0,
+            from_state: false,
             animation: Default::default(),
             analysis: Default::default(),
             two_way_bindings: Default::default(),
@@ -2109,6 +2170,7 @@ impl BindingExpression {
             expression: Expression::Uncompiled(node.clone()),
             span: Some(node.to_source_location()),
             priority: 1,
+            from_state: false,
             animation: Default::default(),
             analysis: Default::default(),
             two_way_bindings: Default::default(),
@@ -2119,9 +2181,44 @@ impl BindingExpression {
             expression,
             span: Some(span),
             priority: 0,
+            from_state: false,
             animation: Default::default(),
             analysis: Default::default(),
             two_way_bindings: Default::default(),
+        }
+    }
+
+    /// The value this binding takes while none of the states apply, if a state created it.
+    pub fn state_fallback_mut(&mut self) -> Option<&mut Expression> {
+        if !self.from_state {
+            return None;
+        }
+        let mut current = self.expression.ignore_debug_hooks_mut();
+        let mut in_state_chain = false;
+        while let Expression::Condition {
+            false_expr,
+            source_location: Some(ConditionLocation::StateChange(_)),
+            ..
+        } = current
+        {
+            current = false_expr.ignore_debug_hooks_mut();
+            in_state_chain = true;
+        }
+        in_state_chain.then_some(current)
+    }
+
+    /// Where a state changes the property, if a state's change is what this binding is.
+    ///
+    /// Such a binding also carries the value the property has while no state applies, at the end
+    /// of its chain of conditions. Unlike [`Self::state_fallback_mut`], this doesn't say that
+    /// value is still a placeholder: something else may bind the property too.
+    pub fn state_change(&self) -> Option<&SourceLocation> {
+        match self.value_expression() {
+            Expression::Condition {
+                source_location: Some(ConditionLocation::StateChange(location)),
+                ..
+            } => Some(location),
+            _ => None,
         }
     }
 
@@ -2131,6 +2228,7 @@ impl BindingExpression {
             expression: Expression::Invalid,
             span: None,
             priority: 0,
+            from_state: false,
             animation: Default::default(),
             analysis: Default::default(),
             two_way_bindings: vec![other],
@@ -2165,6 +2263,7 @@ impl BindingExpression {
                 **expression = other.expression.clone();
                 *synthetic = false;
                 self.priority = other.priority;
+                self.from_state = other.from_state;
                 return true;
             }
             if self.two_way_bindings.is_empty() {
@@ -2179,6 +2278,7 @@ impl BindingExpression {
             return true;
         }
         self.priority = other.priority;
+        self.from_state = other.from_state;
         self.expression = other.expression.clone();
         true
     }
@@ -2261,6 +2361,7 @@ pub enum EasingCurve {
     EaseInBounce,
     EaseOutBounce,
     EaseInOutBounce,
+    Spring(f32),
     // CubicBezierNonConst([Box<Expression>; 4]),
     // Custom(Box<dyn Fn(f32)->f32>),
 }
@@ -2397,7 +2498,7 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             write!(f, " {}= ", if *op == '=' { ' ' } else { *op })?;
             pretty_print(f, rhs)
         }
-        Expression::BinaryExpression { lhs, rhs, op } => {
+        Expression::BinaryExpression { lhs, rhs, op, .. } => {
             write!(f, "(")?;
             pretty_print(f, lhs)?;
             match *op {
@@ -2412,7 +2513,7 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             pretty_print(f, sub)
         }
         Expression::ImageReference { resource_ref, .. } => write!(f, "{resource_ref:?}"),
-        Expression::Condition { condition, true_expr, false_expr } => {
+        Expression::Condition { condition, true_expr, false_expr, .. } => {
             write!(f, "if (")?;
             pretty_print(f, condition)?;
             write!(f, ") {{ ")?;

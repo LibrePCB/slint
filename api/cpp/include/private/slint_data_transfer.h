@@ -8,8 +8,9 @@
 
 #ifndef SLINT_FEATURE_FREESTANDING
 #    include <any>
+#    include <concepts>
 #    include <filesystem>
-#    include <span>
+#    include <ranges>
 #    include <vector>
 #endif
 

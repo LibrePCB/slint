@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore Wunused
+
 use super::accessor_names::{self, AccessorKind};
 use super::cpp::{Config, concatenate_ident, cpp_ast::*, ident};
 use crate::CompilerConfiguration;
@@ -38,7 +40,9 @@ pub fn generate(
     }
 
     for glob in &llr.globals {
-        if glob.must_generate() {
+        // Only exported globals are reachable through the `global<T>()`
+        // accessor; the rust_live_preview generator applies the same filter.
+        if glob.exported && glob.must_generate() {
             generate_global(&mut file, glob);
             file.definitions.extend(glob.aliases.iter().map(|name| {
                 Declaration::TypeAlias(TypeAlias {
@@ -156,11 +160,12 @@ fn generate_public_component(
                 .join(", ")
         }),
         format!(
-            "auto live_preview = slint::private_api::live_preview::LiveReloadingComponent({main_file:?}, {:?}, include_paths, library_paths, {:?}, {:?}, {});",
+            "auto live_preview = slint::private_api::live_preview::LiveReloadingComponent({main_file:?}, {:?}, include_paths, library_paths, {:?}, {:?}, {}, {:?});",
             component.name,
             compiler_config.style.as_ref().unwrap_or(&String::new()),
             compiler_config.translation_domain.as_ref().unwrap_or(&String::new()),
             compiler_config.default_translation_context == crate::DefaultTranslationContext::None,
+            compiler_config.absolute_bundled_translations_path().unwrap_or_default(),
         ),
         format!(
             "auto self_rc = vtable::VRc<slint::private_api::ItemTreeVTable, {component_id}>::make(std::move(live_preview));"
@@ -246,7 +251,11 @@ fn generate_global(file: &mut File, global: &llr::GlobalComponent) {
     global_struct.members.push((
         Access::Private,
         Declaration::Var(Var {
-            ty: "const slint::private_api::live_preview::LiveReloadingComponent&".into(),
+            // A global without public properties generates no accessor that
+            // reads the member; clang's -Wunused-private-field rejects it
+            // under -Werror.
+            ty: "[[maybe_unused]] const slint::private_api::live_preview::LiveReloadingComponent&"
+                .into(),
             name: "live_preview".into(),
             ..Default::default()
         }),

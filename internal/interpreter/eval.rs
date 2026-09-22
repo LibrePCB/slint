@@ -10,6 +10,7 @@
 use crate::Value;
 use crate::globals::{GlobalInstance, GlobalStorage};
 use crate::instance::SubComponentInstance;
+use i_slint_compiler::diagnostics::SourceLocation;
 use i_slint_compiler::expression_tree::{BuiltinFunction, MinMaxOp};
 use i_slint_compiler::langtype::{ConstantExpression, Type};
 use i_slint_compiler::llr::{self, Expression, LocalMemberIndex, MemberReference};
@@ -113,6 +114,8 @@ pub(crate) fn try_walk_parent(
 }
 
 /// Walk `parent_level` steps up the parent chain.
+///
+/// Only for instantiation, where the chain is still alive; evaluation uses [`try_walk_parent`].
 pub(crate) fn walk_parent(
     start: &Pin<Rc<SubComponentInstance>>,
     level: usize,
@@ -141,7 +144,9 @@ impl i_slint_compiler::llr::TypeResolutionContext for EvalContext {
                 // The `Type` values live in the shared `CompilationUnit`, so
                 // resolve the target sub-component index through the runtime
                 // parent chain and borrow from `cu`.
-                let sub = walk_parent(current, *parent_level);
+                let Some(sub) = try_walk_parent(current, *parent_level) else {
+                    return &Type::Invalid;
+                };
                 let mut sc_idx = sub.sub_component_idx;
                 for i in &local_reference.sub_component_path {
                     sc_idx = cu.sub_components[sc_idx].sub_components[*i].ty;
@@ -191,21 +196,10 @@ pub(crate) fn walk_sub_path(
 pub(crate) fn try_walk_to(
     ctx: &EvalContext,
     parent_level: usize,
-    path: &[llr::SubComponentInstanceIdx],
+    local_reference: &llr::LocalMemberReference,
 ) -> Option<Pin<Rc<SubComponentInstance>>> {
-    Some(walk_sub_path(try_walk_parent(ctx.current.as_ref()?, parent_level)?, path))
-}
-
-/// Walk to the sub-component that owns `local`.
-///
-/// Panics if `ctx.current` is unset; the caller must check beforehand.
-pub(crate) fn walk_to(
-    ctx: &EvalContext,
-    parent_level: usize,
-    path: &[llr::SubComponentInstanceIdx],
-) -> Pin<Rc<SubComponentInstance>> {
-    let start = ctx.current.as_ref().expect("relative member reference without a sub-component");
-    walk_sub_path(walk_parent(start, parent_level), path)
+    let base = try_walk_parent(ctx.current.as_ref()?, parent_level)?;
+    Some(walk_sub_path(base, &local_reference.sub_component_path))
 }
 
 /// Flat tree index of the `item_table` entry matching `(path, item_index)`.
@@ -351,7 +345,9 @@ pub fn load_property(ctx: &EvalContext, mr: &MemberReference) -> Value {
             load_global(global, member)
         }
         MemberReference::Relative { parent_level, local_reference } => {
-            let instance = walk_to(ctx, *parent_level, &local_reference.sub_component_path);
+            let Some(instance) = try_walk_to(ctx, *parent_level, local_reference) else {
+                return Value::Void;
+            };
             load_local(&instance, &local_reference.reference)
         }
     }
@@ -365,10 +361,12 @@ pub fn store_property(ctx: &EvalContext, mr: &MemberReference, value: Value) {
             store_global(global, member, value);
         }
         MemberReference::Relative { parent_level, local_reference } => {
-            let start =
-                ctx.current.as_ref().expect("relative member reference without a sub-component");
-            let (instance, animation) =
-                walk_to_target_with_animation(walk_parent(start, *parent_level), local_reference);
+            let Some(base) =
+                ctx.current.as_ref().and_then(|start| try_walk_parent(start, *parent_level))
+            else {
+                return;
+            };
+            let (instance, animation) = walk_to_target_with_animation(base, local_reference);
             store_local(&instance, &local_reference.reference, value, animation);
         }
     }
@@ -396,7 +394,9 @@ pub fn invoke_callback(ctx: &EvalContext, mr: &MemberReference, args: &[Value]) 
             ensure_typed_default(res, &cb.ret_ty)
         }
         MemberReference::Relative { parent_level, local_reference } => {
-            let instance = walk_to(ctx, *parent_level, &local_reference.sub_component_path);
+            let Some(instance) = try_walk_to(ctx, *parent_level, local_reference) else {
+                return Value::Void;
+            };
             match &local_reference.reference {
                 LocalMemberIndex::Callback(idx) => {
                     // Register a dependency on the handler so bindings
@@ -447,7 +447,9 @@ pub fn invoke_function(ctx: &EvalContext, mr: &MemberReference, args: Vec<Value>
             eval_expression(&mut inner_ctx, &code)
         }
         MemberReference::Relative { parent_level, local_reference } => {
-            let instance = walk_to(ctx, *parent_level, &local_reference.sub_component_path);
+            let Some(instance) = try_walk_to(ctx, *parent_level, local_reference) else {
+                return Value::Void;
+            };
             let LocalMemberIndex::Function(idx) = &local_reference.reference else {
                 panic!("invoke_function on non-function reference")
             };
@@ -514,10 +516,11 @@ fn cast_to_path_data(ctx: &mut EvalContext, from: &Expression) -> Value {
             Value::PathData(PathData::Elements(elements))
         }
         Expression::Struct { values, .. }
-            if values.contains_key("events") && values.contains_key("points") =>
+            if let Some(events) = values.get("events")
+                && let Some(points) = values.get("points") =>
         {
-            let events_value = eval_expression(ctx, &values["events"]);
-            let points_value = eval_expression(ctx, &values["points"]);
+            let events_value = eval_expression(ctx, events);
+            let points_value = eval_expression(ctx, points);
             // `for_each_enums!` already produces a `TryFrom<Value>` impl for
             // every Slint enum (via `declare_value_enum_conversion!` in
             // `api.rs`), so model rows of `Value::EnumerationValue` convert
@@ -802,8 +805,8 @@ pub fn eval_expression(ctx: &mut EvalContext, expression: &Expression) -> Value 
             }
             v
         }
-        Expression::BuiltinFunctionCall { function, arguments } => {
-            call_builtin_function(ctx, function.clone(), arguments)
+        Expression::BuiltinFunctionCall { function, arguments, source_location } => {
+            call_builtin_function(ctx, function.clone(), arguments, source_location)
         }
         Expression::CallBackCall { callback, arguments } => {
             let args: Vec<Value> = arguments.iter().map(|e| eval_expression(ctx, e)).collect();
@@ -825,11 +828,7 @@ pub fn eval_expression(ctx: &mut EvalContext, expression: &Expression) -> Value 
         Expression::ModelDataAssignment { level, value } => {
             let new_value = eval_expression(ctx, value);
             if let Some(current) = ctx.current.as_ref() {
-                let mut walker = current.clone();
-                for _ in 0..*level {
-                    let parent = walker.parent.upgrade().expect("parent vanished");
-                    walker = std::pin::Pin::new(parent);
-                }
+                let Some(walker) = try_walk_parent(current, *level) else { return Value::Void };
                 if let Some((parent_weak, repeater_idx)) = walker.repeated_in.get()
                     && let Some(parent) = parent_weak.upgrade()
                 {
@@ -882,7 +881,7 @@ pub fn eval_expression(ctx: &mut EvalContext, expression: &Expression) -> Value 
             }
             Value::Void
         }
-        Expression::BinaryExpression { lhs, rhs, op } => {
+        Expression::BinaryExpression { lhs, rhs, op, .. } => {
             let lhs = eval_expression(ctx, lhs);
             // `&&` and `||` must short-circuit, or else rhs side effects
             // would wrongly run.
@@ -914,7 +913,7 @@ pub fn eval_expression(ctx: &mut EvalContext, expression: &Expression) -> Value 
             }
             Value::Image(image)
         }
-        Expression::Condition { condition, true_expr, false_expr } => {
+        Expression::Condition { condition, true_expr, false_expr, .. } => {
             match eval_expression(ctx, condition) {
                 Value::Bool(true) => eval_expression(ctx, true_expr),
                 Value::Bool(false) => eval_expression(ctx, false_expr),
@@ -939,6 +938,7 @@ pub fn eval_expression(ctx: &mut EvalContext, expression: &Expression) -> Value 
                 EC::EaseOutBounce => Core::EaseOutBounce,
                 EC::EaseInOutBounce => Core::EaseInOutBounce,
                 EC::CubicBezier(a, b, c, d) => Core::CubicBezier([*a, *b, *c, *d]),
+                EC::Spring(bounce) => Core::Spring(*bounce),
             })
         }
         Expression::MouseCursor(cursor) => {
@@ -1031,9 +1031,17 @@ pub fn eval_expression(ctx: &mut EvalContext, expression: &Expression) -> Value 
             cells_variable,
             elements,
             orientation,
+            repeated_cross_size,
             sub_expression,
             ..
-        } => with_layout_item_info(ctx, cells_variable, elements, *orientation, sub_expression),
+        } => with_layout_item_info(
+            ctx,
+            cells_variable,
+            elements,
+            *orientation,
+            repeated_cross_size.as_deref(),
+            sub_expression,
+        ),
         Expression::WithFlexboxLayoutItemInfo {
             cells_h_variable,
             cells_v_variable,
@@ -1070,12 +1078,17 @@ pub fn eval_expression(ctx: &mut EvalContext, expression: &Expression) -> Value 
         Expression::FlexboxLayoutInfoCrossAxisWithMeasure { .. } => {
             crate::eval_layout::flexbox_layout_info_cross_axis_with_measure(ctx, expression)
         }
-        Expression::TranslationReference { .. } => {
-            // TranslationReference is only emitted when `bundle-translations`
-            // is active, which the interpreter does not use. Runtime @tr()
-            // goes through BuiltinFunction::Translate instead.
-            Value::String(Default::default())
+        Expression::BoxLayoutInfoOrthoWithMeasure { .. } => {
+            crate::eval_layout::box_layout_info_ortho_with_measure(ctx, expression)
         }
+        #[cfg(feature = "bundle-translations")]
+        Expression::TranslationReference { format_args, string_index, plural } => {
+            eval_translation_reference(ctx, format_args, *string_index, plural.as_deref())
+        }
+        // TranslationReference is only emitted when `bundle-translations` is active.
+        // Runtime @tr() goes through BuiltinFunction::Translate instead.
+        #[cfg(not(feature = "bundle-translations"))]
+        Expression::TranslationReference { .. } => Value::String(Default::default()),
         Expression::Closure { .. } => unreachable!(
             "closures are dispatched by their consuming builtin and should not go through eval_expression"
         ),
@@ -1093,8 +1106,15 @@ fn with_layout_item_info(
     cells_variable: &str,
     elements: &[itertools::Either<Expression, i_slint_compiler::llr::LayoutRepeatedElement>],
     orientation: i_slint_compiler::layout::Orientation,
+    repeated_cross_size: Option<&Expression>,
     sub_expression: &Expression,
 ) -> Value {
+    // On a vertical box layout's main-axis pass, re-measure each repeated
+    // cell at the layout's content width so a height-for-width instance
+    // measures like an equivalent static cell. On a non-numeric value, fall
+    // back to the plain layout info rather than measuring at 0.
+    let cross_size: Option<f32> =
+        repeated_cross_size.and_then(|e| eval_expression(ctx, e).try_into().ok());
     let mut cells: Vec<Value> = Vec::with_capacity(elements.len());
     let mut repeated_indices: Vec<u32> = Vec::new();
     let mut repeater_steps: Vec<u32> = Vec::new();
@@ -1108,6 +1128,8 @@ fn with_layout_item_info(
                     repeater.repeater_index,
                     repeater.row_child_templates.as_deref(),
                     orientation,
+                    cross_size,
+                    repeater.cross_width.as_ref(),
                     &mut cells,
                 );
                 repeated_indices.push(offset);
@@ -1142,6 +1164,8 @@ fn push_repeater_layout_items(
     repeater_idx: i_slint_compiler::llr::RepeatedElementIdx,
     row_child_templates: Option<&[i_slint_compiler::llr::RowChildTemplateInfo]>,
     orientation: i_slint_compiler::layout::Orientation,
+    cross_size: Option<f32>,
+    grid_cross_width: Option<&Expression>,
     cells: &mut Vec<Value>,
 ) -> (u32, u32) {
     use i_slint_core::model::RepeatedItemTree;
@@ -1155,32 +1179,59 @@ fn push_repeater_layout_items(
         struct_value.set_field("constraint".to_string(), info.constraint.into());
         // The cell's `cross-axis-self-alignment` in a box layout; `to_cells`
         // reads it back on the cross-axis solve, an absent field means `auto`.
-        if info.cross_axis_self_alignment != i_slint_core::items::CrossAxisSelfAlignment::Auto {
+        if info.cross_axis_self_alignment != i_slint_core::items::CrossAxisAlignment::Auto {
             struct_value.set_field(
                 "cross-axis-self-alignment".to_string(),
                 Value::EnumerationValue(
-                    "CrossAxisSelfAlignment".to_string(),
+                    "CrossAxisAlignment".to_string(),
                     info.cross_axis_self_alignment.to_string(),
                 ),
             );
+        }
+        // Likewise `layout-order`, read back on the main-axis solve.
+        if info.layout_order != 0 {
+            struct_value
+                .set_field("layout-order".to_string(), Value::Number(info.layout_order as f64));
         }
         cells.push(Value::Struct(struct_value));
     };
     let step = match row_child_templates {
         None => {
             // Column repeater: one cell per instance, asking the sub-component
-            // for its own layout info.
-            for instance in &instances {
-                let info = RepeatedItemTree::layout_item_info(
-                    instance.as_pin_ref(),
-                    core_orientation,
-                    None,
-                );
+            // for its own layout info — at the layout's cross size when the
+            // main-axis pass forwards one.
+            for (i, instance) in instances.iter().enumerate() {
+                let info = match (cross_size, core_orientation) {
+                    (Some(cs), i_slint_core::items::Orientation::Vertical) => {
+                        RepeatedItemTree::layout_item_info_at_cross_width(instance.as_pin_ref(), cs)
+                    }
+                    (Some(_), i_slint_core::items::Orientation::Horizontal) => {
+                        unreachable!("a horizontal main pass forwards no cross size")
+                    }
+                    // A grid re-measures each instance at its own solved
+                    // column width instead of one size shared by all cells.
+                    (None, _) => {
+                        match grid_cross_width.and_then(|e| eval_grid_measure_width(ctx, e, i)) {
+                            Some(w) => RepeatedItemTree::layout_item_info_at_cross_width(
+                                instance.as_pin_ref(),
+                                w,
+                            ),
+                            None => RepeatedItemTree::layout_item_info(
+                                instance.as_pin_ref(),
+                                core_orientation,
+                                None,
+                            ),
+                        }
+                    }
+                };
                 push_cell(cells, info);
             }
             1
         }
         Some(templates) => {
+            // Only box layouts set a cross size, and their repeaters never
+            // have row templates.
+            debug_assert!(cross_size.is_none());
             // Row repeater: the step is the maximum total child count across
             // instances (static children plus each instance's inner repeaters
             // realized via RowChildTemplateInfo::Repeated).
@@ -1205,6 +1256,20 @@ fn push_repeater_layout_items(
     (instances.len() as u32, step)
 }
 
+/// Evaluate a [`i_slint_compiler::llr::LayoutRepeatedElement::cross_width`]
+/// cache read for one instance. `None` on a non-numeric value, so the caller
+/// falls back to the plain layout info rather than measuring at 0.
+fn eval_grid_measure_width(ctx: &mut EvalContext, expr: &Expression, index: usize) -> Option<f32> {
+    use i_slint_compiler::llr::lower_layout_expression::GRID_MEASURE_REPEATER_INDEX_LOCAL;
+    let prev = ctx.locals.insert(
+        SmolStr::new_static(GRID_MEASURE_REPEATER_INDEX_LOCAL),
+        Value::Number(index as f64),
+    );
+    let value = eval_expression(ctx, expr);
+    restore_local(ctx, GRID_MEASURE_REPEATER_INDEX_LOCAL, prev);
+    value.try_into().ok()
+}
+
 fn total_row_child_count(
     sub: &Pin<std::rc::Rc<crate::instance::SubComponentInstance>>,
     templates: &[i_slint_compiler::llr::RowChildTemplateInfo],
@@ -1212,7 +1277,7 @@ fn total_row_child_count(
     use i_slint_compiler::llr::{RowChildTemplateInfo, static_child_count};
     let mut total = static_child_count(templates);
     for entry in templates {
-        if let RowChildTemplateInfo::Repeated { repeater_index } = entry {
+        if let RowChildTemplateInfo::Repeated { repeater_index, .. } = entry {
             let repeater = &sub.repeaters[*repeater_index];
             repeater.track_instance_changes();
             total += repeater.range().len();
@@ -1360,7 +1425,7 @@ fn flex_props_to_value(props: i_slint_core::layout::FlexItemProps) -> Value {
     s.set_field(
         "cross-axis-self-alignment".to_string(),
         Value::EnumerationValue(
-            "CrossAxisSelfAlignment".to_string(),
+            "CrossAxisAlignment".to_string(),
             format!("{:?}", props.cross_axis_self_alignment).to_lowercase(),
         ),
     );
@@ -1524,7 +1589,7 @@ fn push_repeater_grid_input_data(
                         cells.push(v);
                         written += 1;
                     }
-                    RowChildTemplateInfo::Repeated { repeater_index } => {
+                    RowChildTemplateInfo::Repeated { repeater_index, .. } => {
                         let inner_rep = &inner_sub.repeaters[*repeater_index];
                         inner_rep.track_instance_changes();
                         // Let each inner cell report its own
@@ -1634,6 +1699,11 @@ fn binary_op(op: char, lhs: Value, rhs: Value) -> Value {
         (Value::Bool(a), Value::Void) => (Value::Bool(a), Value::Bool(false)),
         (Value::Void, Value::String(b)) => (Value::String(Default::default()), Value::String(b)),
         (Value::String(a), Value::Void) => (Value::String(a), Value::String(Default::default())),
+        // With no operand to take the type from, the operator decides.
+        (Value::Void, Value::Void) if matches!(op, '&' | '|') => {
+            (Value::Bool(false), Value::Bool(false))
+        }
+        (Value::Void, Value::Void) => (Value::Number(0.), Value::Number(0.)),
         (a, b) => (a, b),
     };
     match (op, lhs, rhs) {
@@ -1802,10 +1872,79 @@ fn grid_repeater_cache_access(
 }
 
 /// Dispatch a `BuiltinFunction` call to the corresponding runtime helper.
+/// The location of a builtin function call in the .slint source, in the form
+/// attached to the log messages it emits.
+fn log_message_location(
+    source_location: &Option<SourceLocation>,
+) -> Option<i_slint_core::debug_log::LogMessageLocation<'_>> {
+    let location = source_location.as_ref()?;
+    let source_file = location.source_file.as_ref()?;
+    let (line, column) = source_file
+        .line_column(location.span.offset, i_slint_compiler::diagnostics::ByteFormat::Utf8);
+    Some(i_slint_core::debug_log::LogMessageLocation {
+        path: source_file.path().to_str()?,
+        line,
+        column,
+    })
+}
+
+/// Arguments of a `@tr(...)` formatting, as a model of strings.
+struct StringModelWrapper(ModelRc<Value>);
+impl i_slint_core::translations::FormatArgs for StringModelWrapper {
+    type Output<'a> = SharedString;
+    fn from_index(&self, index: usize) -> Option<SharedString> {
+        self.0.row_data(index).and_then(|v| v.try_into().ok())
+    }
+}
+
+/// Look up a string that the compiler bundled from the `.po` files, in the language currently
+/// selected with `slint::select_bundled_translation`.
+#[cfg(feature = "bundle-translations")]
+fn eval_translation_reference(
+    ctx: &mut EvalContext,
+    format_args: &Expression,
+    string_index: usize,
+    plural: Option<&Expression>,
+) -> Value {
+    let unit = ctx.compilation_unit.clone();
+    let Some(translations) = unit.translations.as_ref() else {
+        return Value::String(Default::default());
+    };
+    let Value::Model(args) = eval_expression(ctx, format_args) else {
+        return Value::String(Default::default());
+    };
+    let args = StringModelWrapper(args);
+    let Some(plural) = plural else {
+        return Value::String(i_slint_core::translations::translate_from_bundle(
+            &translations.strings[string_index],
+            &args,
+        ));
+    };
+
+    let n: i32 = eval_expression(ctx, plural).try_into().unwrap_or(0);
+    let forms = translations.plurals[string_index].iter().map(|f| f.as_deref()).collect::<Vec<_>>();
+    let globals = ctx.globals.clone();
+    Value::String(i_slint_core::translations::translate_from_bundle_with_plural_form(
+        &forms,
+        |language_index| {
+            let rule = translations.plural_rules.get(language_index)?.as_ref()?;
+            // The rules can't access any property, they only take `n` as argument
+            let mut rule_ctx = EvalContext::for_global(globals, unit.clone());
+            rule_ctx.function_arguments = vec![Value::Number(n as f64)];
+            rule_ctx.function_arg_types = vec![Type::Int32];
+            let form: i32 = eval_expression(&mut rule_ctx, rule).try_into().ok()?;
+            usize::try_from(form).ok()
+        },
+        &args,
+        n,
+    ))
+}
+
 fn call_builtin_function(
     ctx: &mut EvalContext,
     f: BuiltinFunction,
     arguments: &[Expression],
+    source_location: &Option<SourceLocation>,
 ) -> Value {
     let to_num = |ctx: &mut EvalContext, e: &Expression| -> f64 {
         eval_expression(ctx, e).try_into().unwrap_or_default()
@@ -1870,6 +2009,9 @@ fn call_builtin_function(
             let n = to_num(ctx, &arguments[0]);
             Value::String(i_slint_core::string::shared_string_from_number_unlocalized(n))
         }
+        BuiltinFunction::DefaultWindowTitle => {
+            Value::String(i_slint_core::window::default_window_title())
+        }
         BuiltinFunction::DecimalSeparator => Value::String(
             find_window_adapter(ctx)
                 .map(|adapter| {
@@ -1893,10 +2035,11 @@ fn call_builtin_function(
             crate::popup::setup_system_tray_icon(ctx, arguments)
         }
         BuiltinFunction::StringIsFloat => Value::Bool(
-            <f64 as core::str::FromStr>::from_str(to_string(ctx, &arguments[0]).as_str()).is_ok(),
+            i_slint_core::string::string_to_float(to_string(ctx, &arguments[0]).as_str()).is_some(),
         ),
         BuiltinFunction::StringToFloat => Value::Number(
-            core::str::FromStr::from_str(to_string(ctx, &arguments[0]).as_str()).unwrap_or(0.),
+            i_slint_core::string::string_to_float(to_string(ctx, &arguments[0]).as_str())
+                .unwrap_or_default() as f64,
         ),
         BuiltinFunction::StringIsEmpty => Value::Bool(to_string(ctx, &arguments[0]).is_empty()),
         BuiltinFunction::StringCharacterCount => Value::Number(
@@ -2032,7 +2175,11 @@ fn call_builtin_function(
             };
             let value = eval_expression(ctx, &arguments[1]);
 
-            model.push_row(value);
+            i_slint_core::model::report_model_error(
+                "push",
+                log_message_location(source_location),
+                model.push_row(value),
+            );
 
             Value::Void
         }
@@ -2050,7 +2197,15 @@ fn call_builtin_function(
                 _ => panic!("Second argument not an integer: {:?}", arguments[1]),
             };
 
-            model.remove_row(index as isize);
+            let result = match usize::try_from(index as i64) {
+                Ok(index) => model.remove_row(index),
+                Err(_) => Err(i_slint_core::model::ModelError::out_of_bounds(model.row_count())),
+            };
+            i_slint_core::model::report_model_error(
+                "remove",
+                log_message_location(source_location),
+                result,
+            );
 
             Value::Void
         }
@@ -2070,7 +2225,15 @@ fn call_builtin_function(
             };
 
             let value = eval_expression(ctx, &arguments[2]);
-            model.insert_row(index as isize, value);
+            let result = match usize::try_from(index as i64) {
+                Ok(index) => model.insert_row(index, value),
+                Err(_) => Err(i_slint_core::model::ModelError::out_of_bounds(model.row_count())),
+            };
+            i_slint_core::model::report_model_error(
+                "insert",
+                log_message_location(source_location),
+                result,
+            );
 
             Value::Void
         }
@@ -2215,12 +2378,10 @@ fn call_builtin_function(
                 }),
             ] = arguments
                 && let LocalMemberIndex::Timer(timer_idx) = &local_reference.reference
-                && ctx.current.is_some()
+                && let Some(instance) = try_walk_to(ctx, *parent_level, local_reference)
+                && let Some(timer) = instance.timers.get(usize::from(*timer_idx))
             {
-                let instance = walk_to(ctx, *parent_level, &local_reference.sub_component_path);
-                if let Some(timer) = instance.timers.get(usize::from(*timer_idx)) {
-                    timer.restart();
-                }
+                timer.restart();
             }
             Value::Void
         }
@@ -2233,13 +2394,13 @@ fn call_builtin_function(
             }
         }
         BuiltinFunction::SetSelectionOffsets => {
-            // (item_ref, start, end) — applied to a TextInput.
+            // (item_ref, anchor, focus) -> applied to a TextInput.
             use i_slint_core::items::TextInput;
-            let [Expression::PropertyReference(mr), start_expr, end_expr] = arguments else {
+            let [Expression::PropertyReference(mr), anchor_expr, focus_expr] = arguments else {
                 return Value::Void;
             };
-            let start: i32 = eval_expression(ctx, start_expr).try_into().unwrap_or(0);
-            let end: i32 = eval_expression(ctx, end_expr).try_into().unwrap_or(0);
+            let anchor: i32 = eval_expression(ctx, anchor_expr).try_into().unwrap_or(0);
+            let focus: i32 = eval_expression(ctx, focus_expr).try_into().unwrap_or(0);
             let Some((parent_inst, flat_idx)) = resolve_item_rc_from_ref(ctx, mr) else {
                 return Value::Void;
             };
@@ -2249,7 +2410,7 @@ fn call_builtin_function(
             let parent_dyn = vtable::VRc::into_dyn(parent_inst);
             let item_rc = i_slint_core::items::ItemRc::new(parent_dyn, flat_idx as u32);
             if let Some(text_input) = vtable::VRef::downcast_pin::<TextInput>(item_rc.borrow()) {
-                text_input.set_selection_offsets(&adapter, &item_rc, start, end);
+                text_input.set_selection_offsets(&adapter, &item_rc, anchor, focus);
             }
             Value::Void
         }
@@ -2399,13 +2560,13 @@ fn call_builtin_function(
             if let Some(context) = root.as_ref().and_then(i_slint_core::window::context_for_root) {
                 context.dispatch_log_message(LogMessage::new(
                     LogMessageSource::SlintCode,
-                    None,
+                    log_message_location(source_location),
                     format_args!("{msg}"),
                 ));
             } else {
                 log_message(LogMessage::new(
                     LogMessageSource::SlintCode,
-                    None,
+                    log_message_location(source_location),
                     format_args!("{msg}"),
                 ));
             }
@@ -2460,13 +2621,6 @@ fn call_builtin_function(
             let Value::Model(args) = args else {
                 return Value::String(original);
             };
-            struct StringModelWrapper(ModelRc<Value>);
-            impl i_slint_core::translations::FormatArgs for StringModelWrapper {
-                type Output<'a> = SharedString;
-                fn from_index(&self, index: usize) -> Option<SharedString> {
-                    self.0.row_data(index).and_then(|v| v.try_into().ok())
-                }
-            }
             let n: i32 = eval_expression(ctx, &arguments[4]).try_into().unwrap_or(0);
             let plural: SharedString = to_string(ctx, &arguments[5]);
             Value::String(i_slint_core::translations::translate(
@@ -2582,7 +2736,7 @@ pub(crate) fn resolve_item_rc_from_ref(
     let LocalMemberIndex::Native { item_index, .. } = &local_reference.reference else {
         return None;
     };
-    let owner = try_walk_to(ctx, *parent_level, &local_reference.sub_component_path)?;
+    let owner = try_walk_to(ctx, *parent_level, local_reference)?;
     let parent_inst = owner.root.get().and_then(|w| w.upgrade())?;
     let full_path = crate::item_tree_vtable::sub_component_path_of(&owner, &parent_inst);
     let flat_idx = find_flat_item_index(&parent_inst.item_table, &full_path, *item_index)?;

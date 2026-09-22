@@ -837,7 +837,13 @@ impl ComponentCompiler {
             }
         };
 
-        let r = build_compilation_result(source, path.into(), self.config.clone()).await;
+        let r = build_compilation_result(
+            source,
+            path.into(),
+            self.config.clone(),
+            AnimationMode::Running,
+        )
+        .await;
         self.diagnostics = r.diagnostics.into_iter().collect();
         r.components.into_values().next()
     }
@@ -863,7 +869,13 @@ impl ComponentCompiler {
         source_code: String,
         path: PathBuf,
     ) -> Option<ComponentDefinition> {
-        let r = build_compilation_result(source_code, path, self.config.clone()).await;
+        let r = build_compilation_result(
+            source_code,
+            path,
+            self.config.clone(),
+            AnimationMode::Running,
+        )
+        .await;
         self.diagnostics = r.diagnostics.into_iter().collect();
         r.components.into_values().next()
     }
@@ -964,6 +976,17 @@ impl Compiler {
         self.config.default_translation_context = default_translation_context;
     }
 
+    /// Bundle the translations found in the given directory into the compiled components, so that
+    /// `slint::select_bundled_translation` can switch between the languages at runtime.
+    ///
+    /// The translation files must be in the gettext `.po` format and follow this pattern:
+    /// `<path>/<lang>/LC_MESSAGES/<domain>.po`, where the domain is set with
+    /// [`Self::set_translation_domain`].
+    #[cfg(feature = "bundle-translations")]
+    pub fn set_bundled_translations_path(&mut self, path: PathBuf) {
+        self.config.bundled_translations_path = Some(path);
+    }
+
     /// Sets the callback that will be invoked when loading imported .slint files. The specified
     /// `file_loader_callback` parameter will be called with a canonical file path as argument
     /// and is expected to return a future that, when resolved, provides the source code of the
@@ -1019,7 +1042,8 @@ impl Compiler {
             }
         };
 
-        build_compilation_result(source, path.into(), self.config.clone()).await
+        build_compilation_result(source, path.into(), self.config.clone(), AnimationMode::Running)
+            .await
     }
 
     /// Compile some .slint code
@@ -1035,16 +1059,40 @@ impl Compiler {
     /// If that is not used, then it is fine to use a very simple executor, such as the one
     /// provided by the `spin_on` crate
     pub async fn build_from_source(&self, source_code: String, path: PathBuf) -> CompilationResult {
-        build_compilation_result(source_code, path, self.config.clone()).await
+        build_compilation_result(source_code, path, self.config.clone(), AnimationMode::Running)
+            .await
     }
+
+    /// Compile Slint code without timers or animations.
+    #[doc(hidden)]
+    #[cfg(feature = "internal")]
+    pub async fn build_static_from_source(
+        &self,
+        source_code: String,
+        path: PathBuf,
+        _: i_slint_core::InternalToken,
+    ) -> CompilationResult {
+        build_compilation_result(source_code, path, self.config.clone(), AnimationMode::Static)
+            .await
+    }
+}
+
+pub(crate) enum AnimationMode {
+    /// In static mode, all timers & animations are disabled.
+    /// The item tree should not update anything without interaction.
+    #[cfg_attr(not(feature = "internal"), allow(dead_code))]
+    Static,
+    Running,
 }
 
 async fn build_compilation_result(
     source_code: String,
     path: PathBuf,
     config: i_slint_compiler::CompilerConfiguration,
+    animation_mode: AnimationMode,
 ) -> CompilationResult {
-    let result = crate::component::build_from_source(source_code, path, config).await;
+    let result =
+        crate::component::build_from_source(source_code, path, config, animation_mode).await;
     let components = result
         .components
         .into_iter()
@@ -1057,6 +1105,97 @@ async fn build_compilation_result(
         watch_paths: result.watch_paths,
         #[cfg(feature = "internal")]
         structs_and_enums: result.structs_and_enums,
+    }
+}
+
+/// A [`CompilationResult`] that can be sent to another thread.
+///
+/// A `CompilationResult` is not `Send`: it shares its compilation unit between
+/// its components with an `Rc`. Convert one with
+/// [`CompilationResult::into_send()`], move it to the thread that will
+/// instantiate the components, and convert it back with `From`. That way a
+/// component can be compiled on a worker thread and instantiated on the thread
+/// running the event loop.
+///
+/// ```rust
+/// # i_slint_backend_testing::init_no_event_loop();
+/// let source = "export component App inherits Window { out property <int> v: 42; }".into();
+/// let sent = std::thread::spawn(move || {
+///     let compiler = slint_interpreter::Compiler::default();
+///     spin_on::spin_on(compiler.build_from_source(source, Default::default())).into_send()
+/// })
+/// .join()
+/// .unwrap();
+/// let result = slint_interpreter::CompilationResult::from(sent);
+/// let instance = result.component("App").unwrap().create().unwrap();
+/// # assert_eq!(instance.get_property("v").unwrap(), slint_interpreter::Value::Number(42.));
+/// ```
+pub struct CompilationResultSend {
+    /// `None` when the compilation produced no component.
+    compilation_unit: Option<i_slint_compiler::llr::CompilationUnit>,
+    /// The index of each component within the unit, by name.
+    components: HashMap<String, i_slint_compiler::llr::PublicComponentIdx>,
+    diagnostics: Vec<Diagnostic>,
+    #[cfg(feature = "internal")]
+    watch_paths: Vec<PathBuf>,
+    #[cfg(feature = "internal")]
+    structs_and_enums: Vec<LangType>,
+}
+
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<CompilationResultSend>();
+};
+
+impl CompilationResultSend {
+    /// Returns true if the compilation failed.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.iter().any(|d| d.level() == DiagnosticLevel::Error)
+    }
+
+    /// The diagnostics (errors and warnings) the compilation produced.
+    pub fn diagnostics(&self) -> impl Iterator<Item = Diagnostic> + '_ {
+        self.diagnostics.iter().cloned()
+    }
+
+    /// Print the diagnostics to stderr, in the same style as rustc errors.
+    #[cfg(feature = "display-diagnostics")]
+    pub fn print_diagnostics(&self) {
+        print_diagnostics(&self.diagnostics)
+    }
+}
+
+impl From<CompilationResultSend> for CompilationResult {
+    fn from(sent: CompilationResultSend) -> Self {
+        let CompilationResultSend {
+            compilation_unit,
+            components,
+            diagnostics,
+            #[cfg(feature = "internal")]
+            watch_paths,
+            #[cfg(feature = "internal")]
+            structs_and_enums,
+        } = sent;
+        let compilation_unit = compilation_unit.map(std::rc::Rc::new);
+        let components = components
+            .into_iter()
+            .filter_map(|(name, public_index)| {
+                let inner = std::rc::Rc::new(crate::component::ComponentDefinitionInner {
+                    compilation_unit: compilation_unit.clone()?,
+                    public_index,
+                    type_loaders: Default::default(),
+                });
+                Some((name, ComponentDefinition { inner }))
+            })
+            .collect();
+        Self {
+            components,
+            diagnostics,
+            #[cfg(feature = "internal")]
+            watch_paths,
+            #[cfg(feature = "internal")]
+            structs_and_enums,
+        }
     }
 }
 
@@ -1112,6 +1251,47 @@ impl CompilationResult {
     /// Returns an iterator over the compiled components.
     pub fn components(&self) -> impl Iterator<Item = ComponentDefinition> + '_ {
         self.components.values().cloned()
+    }
+
+    /// Consume the result so that it can be sent to another thread.
+    pub fn into_send(self) -> CompilationResultSend {
+        let Self {
+            components,
+            diagnostics,
+            #[cfg(feature = "internal")]
+            watch_paths,
+            #[cfg(feature = "internal")]
+            structs_and_enums,
+        } = self;
+
+        // Every definition of one result was built from the same unit.
+        let mut unit = None::<std::rc::Rc<i_slint_compiler::llr::CompilationUnit>>;
+        let components = components
+            .into_iter()
+            .map(|(name, definition)| {
+                let public_index = definition.inner.public_index;
+                match &unit {
+                    Some(u) => {
+                        debug_assert!(std::rc::Rc::ptr_eq(u, &definition.inner.compilation_unit))
+                    }
+                    None => unit = Some(definition.inner.compilation_unit.clone()),
+                }
+                (name, public_index)
+            })
+            .collect();
+        // The definitions are dropped by now, so the unit is only cloned when
+        // the caller kept one of them, or an instance, alive.
+        let compilation_unit = unit.map(std::rc::Rc::unwrap_or_clone);
+
+        CompilationResultSend {
+            compilation_unit,
+            components,
+            diagnostics,
+            #[cfg(feature = "internal")]
+            watch_paths,
+            #[cfg(feature = "internal")]
+            structs_and_enums,
+        }
     }
 
     /// Returns the names of the components that were compiled.

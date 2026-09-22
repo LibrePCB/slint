@@ -163,7 +163,6 @@ pub mod re_exports {
     pub use euclid::approxeq::ApproxEq;
     #[allow(unused_imports)]
     pub use i_slint_backend_selector::native_widgets::*;
-    pub use i_slint_common::TranslationsBundled;
     pub use i_slint_core::accessibility::{
         AccessibilityAction, AccessibleStringProperty, SupportedAccessibilityAction,
     };
@@ -186,7 +185,7 @@ pub mod re_exports {
     };
     pub use i_slint_core::item_tree::{
         ItemTreeNode, ItemVisitorRefMut, ItemVisitorVTable, ItemWeak, TraversalOrder,
-        VisitChildrenResult, ZSortedChild, sort_z_entries, visit_item_tree,
+        VisitChildrenResult, visit_item_tree, visit_item_tree_z_sorted,
     };
     pub use i_slint_core::items::{Transform, *};
     pub use i_slint_core::layout::*;
@@ -210,11 +209,12 @@ pub mod re_exports {
     pub use i_slint_core::string::shared_string_replace_all;
     pub use i_slint_core::timers::{Timer, TimerMode};
     pub use i_slint_core::translations::{
-        set_bundled_languages, translate_from_bundle, translate_from_bundle_with_plural,
+        TranslationsBundled, set_bundled_languages, translate_from_bundle,
+        translate_from_bundle_with_plural,
     };
     pub use i_slint_core::window::{
         InputMethodRequest, WindowAdapter, WindowAdapterRc, WindowInner, WindowKind, accent_color,
-        context_for_root,
+        context_for_root, default_window_title,
     };
     pub use i_slint_core::{
         Color, Coord, SharedString, SharedVector, format, string::ToSharedString,

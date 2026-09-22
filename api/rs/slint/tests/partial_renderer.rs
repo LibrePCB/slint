@@ -330,7 +330,10 @@ fn if_condition() {
             in property <bool> c : true;
             background: black;
             // Static siblings before and after the conditional: toggling the condition
-            // must not repaint them.
+            // must not repaint the one before. The one after currently repaints when the
+            // condition turns false: the disappearance shifts its rank among the visited
+            // siblings, which is indistinguishable from a z-order change (see the
+            // `sibling_index` comment in `CachedItemBoundingBoxAndTransform`).
             Rectangle { x: 5px; y: 5px; width: 8px; height: 8px; background: green; }
             if c: Rectangle {
                 x: 45px;
@@ -354,8 +357,8 @@ fn if_condition() {
     assert!(!window.draw_if_needed(|_| { unreachable!() }));
     ui.set_c(false);
     assert!(window.draw_if_needed(|renderer| {
-        // Currently we redraw when a condition becomes false because we don't track the position otherwise
-        do_test_render_region(renderer, 0, 0, 180, 260);
+        // The vanished conditional plus the sibling after it (see the comment above).
+        do_test_render_region(renderer, 45, 45, 100 + 20, 200 + 20);
     }));
     assert!(!window.draw_if_needed(|_| { unreachable!() }));
     ui.set_c(true);
@@ -422,14 +425,25 @@ fn list_view() {
     assert!(!window.draw_if_needed(|_| { unreachable!() }));
     model.set_vec(vec![0, 0]);
     assert!(window.draw_if_needed(|renderer| {
-        // Currently, when ItemTree are removed, we redraw the whole window.
-        do_test_render_region(renderer, 0, 0, 300, 300);
+        // The model reset drops and recreates both rows.
+        do_test_render_region(renderer, LV_X, LV_Y, LV_X + 25, LV_Y + 20);
     }));
     assert!(!window.draw_if_needed(|_| { unreachable!() }));
     model.remove(1);
     assert!(window.draw_if_needed(|renderer| {
-        // Currently, when ItemTree are removed, we redraw the whole window.
-        do_test_render_region(renderer, 0, 0, 300, 300);
+        // Only the region of the removed row repaints.
+        do_test_render_region(renderer, LV_X, LV_Y + 10, LV_X + 25, LV_Y + 20);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+    model.set_vec(vec![1, 0]);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, LV_X, LV_Y, LV_X + 25, LV_Y + 20);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+    model.remove(0);
+    assert!(window.draw_if_needed(|renderer| {
+        // Removing a leading row repaints the following rows too: they move up.
+        do_test_render_region(renderer, LV_X, LV_Y, LV_X + 25, LV_Y + 20);
     }));
     assert!(!window.draw_if_needed(|_| { unreachable!() }));
 }
@@ -799,6 +813,86 @@ fn dynamic_z_order_repeater() {
     set_z(0, 35);
     assert!(window.draw_if_needed(|renderer| {
         do_test_render_region(renderer, 10, 20, 10 + 40, 20 + 40);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+}
+
+#[test]
+/// Reversing the z order of three siblings in one frame must repaint the overlap of
+/// every pair whose relative order flipped — including a pair where neither member's
+/// rank *decreased*: here B keeps its middle rank and A only rises, yet A slides on
+/// top of B, so the A∩B overlap must be repainted (via A's rect).
+fn dynamic_z_order_reversal() {
+    slint::slint! {
+        export component Ui inherits Window {
+            in property <bool> rev: false;
+            background: black;
+            // A and B overlap each other; C is far away from both.
+            Rectangle { x: 10phx; y: 10phx; width: 30phx; height: 30phx; background: red; z: rev ? 30 : 10; } // A
+            Rectangle { x: 25phx; y: 25phx; width: 30phx; height: 30phx; background: blue; z: 20; } // B
+            Rectangle { x: 150phx; y: 150phx; width: 30phx; height: 30phx; background: green; z: rev ? 10 : 30; } // C
+        }
+    }
+
+    slint::platform::set_platform(Box::new(TestPlatform)).ok();
+    let ui = Ui::new().unwrap();
+    let window = WINDOW.with(|x| x.clone());
+    window.set_size(slint::PhysicalSize::new(300, 300));
+    ui.show().unwrap();
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 0, 0, 300, 300);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // Reverse the stacking order: A (rank 0→2) and C (rank 2→0) change rank, B stays
+    // at rank 1. The dirty region is A ∪ C, which covers both flipped overlaps
+    // (A∩B is within A, B∩C within C).
+    ui.set_rev(true);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10, 10, 180, 180);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // And back.
+    ui.set_rev(false);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10, 10, 180, 180);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+}
+
+#[test]
+/// A sibling appearing in the same frame as a z swap must not mask the swap: the
+/// conditional element enters the stacking order below everything, shifting the
+/// following ranks up, so the demoted rectangle's rank does not decrease — but the
+/// overlap of the swapped pair must still be repainted.
+fn dynamic_z_order_swap_with_appearing_sibling() {
+    slint::slint! {
+        export component Ui inherits Window {
+            in property <bool> front: false;
+            background: black;
+            // Appears below everything, away from the overlapping pair.
+            if front: Rectangle { x: 140phx; y: 140phx; width: 8phx; height: 8phx; background: green; z: -1; }
+            Rectangle { x: 20phx; y: 20phx; width: 30phx; height: 30phx; background: red; z: front ? 0 : 10; }
+            Rectangle { x: 20phx; y: 20phx; width: 30phx; height: 30phx; background: blue; z: 5; }
+        }
+    }
+
+    slint::platform::set_platform(Box::new(TestPlatform)).ok();
+    let ui = Ui::new().unwrap();
+    let window = WINDOW.with(|x| x.clone());
+    window.set_size(slint::PhysicalSize::new(200, 200));
+    ui.show().unwrap();
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 0, 0, 200, 200);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // One property flip shows the green rectangle and swaps red below blue.
+    // The dirty region is the swapped pair's rect plus the appearing rectangle.
+    ui.set_front(true);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 20, 20, 148, 148);
     }));
     assert!(!window.draw_if_needed(|_| { unreachable!() }));
 }
@@ -1716,4 +1810,42 @@ fn partial_rendering_popup_position_size_change() {
             }
         }
     }
+}
+
+#[test]
+fn destroy_never_rendered_item() {
+    slint::slint! {
+        export component Ui inherits Window {
+            in property <bool> c : false;
+            background: black;
+            Rectangle { x: 5px; y: 5px; width: 8px; height: 8px; background: green; }
+            out property <int> instantiated;
+            if c: Rectangle {
+                x: 45px; y: 45px; width: 32px; height: 3px; background: pink;
+                init => { root.instantiated += 1; }
+            }
+        }
+    }
+
+    slint::platform::set_platform(Box::new(TestPlatform)).ok();
+    let ui = Ui::new().unwrap();
+    let window = WINDOW.with(|x| x.clone());
+    window.set_size(slint::PhysicalSize::new(180, 260));
+    ui.show().unwrap();
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 0, 0, 180, 260);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // Materialize the conditional between two frames without rendering it: the pointer
+    // event's hit-testing instantiates the repeater's instance.
+    ui.set_c(true);
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(90., 90.),
+    });
+    assert_eq!(ui.get_instantiated(), 1);
+    ui.set_c(false);
+
+    // The instance is destroyed without ever having been rendered: nothing repaints.
+    do_test_no_repaint(&window);
 }

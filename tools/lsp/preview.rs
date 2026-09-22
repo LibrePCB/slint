@@ -130,6 +130,13 @@ pub fn lsp_to_preview(message: LspToPreviewMessage) {
             let _ = slint::quit_event_loop();
         }
         Message::Ping => {}
+        Message::OpenProject { .. } => {}
+        // Part of the remote pairing handshake, which the LSP's WebSocket
+        // connector completes before a session exists. A local preview is
+        // never on the receiving end of one.
+        Message::PairingHello { .. } | Message::PairingResponse { .. } => {
+            tracing::warn!("Ignoring a pairing message addressed to a local preview");
+        }
     }
 }
 
@@ -1327,7 +1334,14 @@ fn finish_parsing(preview_url: &Url, previewed_component: Option<String>, succes
                 ui::ui_set_known_components(&api, &preview_state.known_components, index);
                 let component = document_cache.get_document(preview_url).and_then(|doc| {
                     match previewed_component.as_ref() {
-                        Some(c_id) => doc.inner_components.iter().find(|c| c.id == c_id).cloned(),
+                        Some(c_id) => doc
+                            .inner_components
+                            .iter()
+                            .find(|c| {
+                                c.id == c_id
+                                    || doc.export_names(c).first().is_some_and(|n| n == c_id)
+                            })
+                            .cloned(),
                         None => doc.last_exported_component(),
                     }
                 });
@@ -1756,8 +1770,8 @@ fn set_preview_factory(
     api.set_resize_to_preferred_size(behavior != LoadBehavior::Reload);
 }
 
-/// Highlight the element pointed at the offset in the path.
-/// When the URL is None, remove the highlight.
+/// Push the remote connection's state to the Remote Preview pane, which
+/// shows it and, while pairing, collects the code from the user.
 pub fn set_remote_connection_state(
     state: i_slint_live_preview::protocol::RemoteConnectionState,
     target: String,
@@ -1769,6 +1783,8 @@ pub fn set_remote_connection_state(
             let ui_state = match state {
                 R::Disconnected => ui::RemoteConnectionState::Disconnected,
                 R::Connecting => ui::RemoteConnectionState::Connecting,
+                R::PairingRequired => ui::RemoteConnectionState::PairingRequired,
+                R::UnpairedWarning => ui::RemoteConnectionState::UnpairedWarning,
                 R::Connected => ui::RemoteConnectionState::Connected,
                 R::Failed => ui::RemoteConnectionState::Failed,
             };

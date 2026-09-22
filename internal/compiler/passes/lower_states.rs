@@ -9,7 +9,8 @@ use crate::diagnostics::Spanned;
 use crate::expression_tree::*;
 use crate::langtype::{PropertyLookupMode, Type};
 use crate::object_tree::forward_inherited_expression::{
-    ForwardedReferenceCache, InheritedExpression, forward_inherited_expression,
+    ForwardedReferenceCache, InheritedExpression, follow_two_way_bindings,
+    forward_inherited_expression, rebase_expression_to_instance,
 };
 use crate::object_tree::*;
 use crate::symbol_counters::SymbolCounters;
@@ -40,11 +41,12 @@ fn lower_state_in_element(
         return;
     }
     let has_transitions = !root_element.borrow().transitions.is_empty();
-    let state_property_name = compute_state_property_name(root_element);
-    let state_property = Expression::PropertyReference(NamedReference::new(
+    let state_property_nr = crate::layout::create_new_prop(
         root_element,
-        state_property_name.clone(),
-    ));
+        SmolStr::new_static("state"),
+        if has_transitions { state_info_type.clone() } else { Type::Int32 },
+    );
+    let state_property = Expression::PropertyReference(state_property_nr.clone());
     let state_property_ref = if has_transitions {
         Expression::StructFieldAccess {
             base: Box::new(state_property.clone()),
@@ -64,6 +66,7 @@ fn lower_state_in_element(
                 condition: Box::new(condition.clone()),
                 true_expr: Box::new(Expression::NumberLiteral((idx + 1) as _, Unit::None)),
                 false_expr: Box::new(std::mem::take(&mut state_value)),
+                source_location: state.selection.clone(),
             };
         }
         for (property_reference, expr, node) in state.property_changes {
@@ -86,36 +89,39 @@ fn lower_state_in_element(
             };
             let new_expr = Expression::Condition {
                 condition: Box::new(Expression::BinaryExpression {
+                    source_location: None,
                     lhs: Box::new(state_property_ref.clone()),
                     rhs: Box::new(Expression::NumberLiteral((idx + 1) as _, Unit::None)),
                     op: '=',
                 }),
                 true_expr: Box::new(expr),
                 false_expr: Box::new(property_expr),
+                source_location: Some(ConditionLocation::StateChange(
+                    node.QualifiedName().to_source_location(),
+                )),
             };
 
             let name = property_reference.name();
             if let Some(cell) = element.borrow().binding_cell_including_synthetic(name) {
                 // A synthetic hook is upgraded in place; a real binding's hook survives inside
                 // `property_expr` (the false-branch of `new_expr`), so replacing it is correct.
-                cell.borrow_mut().set_value_expression(new_expr);
+                let mut cell = cell.borrow_mut();
+                if !cell.has_binding() {
+                    cell.from_state = true;
+                    cell.priority = 1;
+                }
+                cell.set_value_expression(new_expr);
             } else {
                 let mut r = BindingExpression::from(new_expr);
                 r.priority = 1;
+                r.from_state = true;
                 element.borrow_mut().set_binding(name.clone(), r);
             }
         }
         states_id.insert(state.id, idx as i32 + 1);
     }
 
-    root_element.borrow_mut().property_declarations.insert(
-        state_property_name.clone(),
-        PropertyDeclaration {
-            property_type: if has_transitions { state_info_type.clone() } else { Type::Int32 },
-            ..PropertyDeclaration::default()
-        },
-    );
-    root_element.borrow_mut().set_binding(state_property_name, state_value.into());
+    root_element.borrow_mut().set_binding(state_property_nr.name().clone(), state_value.into());
 
     lower_transitions_in_element(
         root_element,
@@ -185,20 +191,6 @@ fn lower_transitions_in_element(
     }
 }
 
-/// Returns a suitable unique name for the "state" property
-fn compute_state_property_name(root_element: &ElementRc) -> SmolStr {
-    let mut property_name = "state".to_owned();
-    while root_element
-        .borrow()
-        .lookup_property(property_name.as_ref(), PropertyLookupMode::InternalName)
-        .property_type
-        != Type::Invalid
-    {
-        property_name += "-";
-    }
-    property_name.into()
-}
-
 enum ExpressionForProperty {
     TwoWayBinding,
     Expression(Expression),
@@ -216,11 +208,17 @@ fn expression_for_property(
         .binding(name)
         .map(|binding| (!binding.two_way_bindings.is_empty(), binding.expression.clone()));
     if let Some((is_two_way_binding, expression)) = local_binding {
-        if is_two_way_binding {
-            return ExpressionForProperty::TwoWayBinding;
-        }
         if !matches!(expression, Expression::Invalid) {
             return ExpressionForProperty::Expression(expression);
+        }
+        if is_two_way_binding {
+            return linked_expression(
+                element,
+                element,
+                name,
+                symbol_counters,
+                forwarded_references,
+            );
         }
     }
 
@@ -228,7 +226,15 @@ fn expression_for_property(
         InheritedExpression::Expression(expression) => {
             return ExpressionForProperty::Expression(expression);
         }
-        InheritedExpression::TwoWayBinding => return ExpressionForProperty::TwoWayBinding,
+        InheritedExpression::TwoWayBinding(base_root) => {
+            return linked_expression(
+                element,
+                &base_root,
+                name,
+                symbol_counters,
+                forwarded_references,
+            );
+        }
         InheritedExpression::Unbound => {}
     }
 
@@ -242,5 +248,40 @@ fn expression_for_property(
             )
         });
 
+    ExpressionForProperty::Expression(expression)
+}
+
+/// The value of a property that a two-way binding on `source` initializes.
+///
+/// The two ends of the binding become one property, so that value is what the other end is bound
+/// to (#1950). `source` is the element the binding is on: the element itself, or the root of a
+/// base component, whose expression is then rebased onto `element`.
+fn linked_expression(
+    element: &ElementRc,
+    source: &ElementRc,
+    name: &str,
+    symbol_counters: &SymbolCounters,
+    forwarded_references: &mut ForwardedReferenceCache,
+) -> ExpressionForProperty {
+    let Some(linked) = follow_two_way_bindings(source, name) else {
+        return ExpressionForProperty::TwoWayBinding;
+    };
+    let ExpressionForProperty::Expression(mut expression) = expression_for_property(
+        &linked.element(),
+        linked.name(),
+        symbol_counters,
+        forwarded_references,
+    ) else {
+        return ExpressionForProperty::TwoWayBinding;
+    };
+    if !Rc::ptr_eq(source, element) {
+        rebase_expression_to_instance(
+            &mut expression,
+            source,
+            element,
+            symbol_counters,
+            forwarded_references,
+        );
+    }
     ExpressionForProperty::Expression(expression)
 }

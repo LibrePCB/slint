@@ -185,11 +185,8 @@ impl std::ops::DerefMut for Collection {
     }
 }
 
-pub const FALLBACK_FAMILIES: [fontique::GenericFamily; 2] = [
-    // FemtoVG renderer needs SansSerif first, as it has difficulties rendering from SystemUi on macOS
-    fontique::GenericFamily::SansSerif,
-    fontique::GenericFamily::SystemUi,
-];
+pub const FALLBACK_FAMILIES: [fontique::GenericFamily; 2] =
+    [fontique::GenericFamily::SystemUi, fontique::GenericFamily::SansSerif];
 
 /// Wrapper around fontique::Blob to permit use of the blob as a key in the cache in the different renderers,
 /// to map the blob to the native type face representation (skia_safe::Typeface, femtovg::FontId, QRawFont, etc.).
@@ -220,5 +217,31 @@ impl From<fontique::Blob<u8>> for HashedBlob {
 impl AsRef<fontique::Blob<u8>> for HashedBlob {
     fn as_ref(&self) -> &fontique::Blob<u8> {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // cspell:ignore fonttools varLib instancer opsz pyftsubset unicodes
+    use skrifa::MetadataProvider;
+
+    // Keep the embedded font small. Regenerate it with:
+    //   fonttools varLib.instancer -o pinned.ttf Inter-VariableFont.ttf opsz=14
+    //   pyftsubset pinned.ttf --unicodes="U+0000-DFFF,U+F900-10FFFF" --output-file=Inter-VariableFont.ttf
+    #[test]
+    fn embedded_fallback_font_is_minimal() {
+        let data = include_bytes!("sharedfontique/Inter-VariableFont.ttf");
+        let font = skrifa::FontRef::new(data).unwrap();
+
+        let has_pua = font
+            .charmap()
+            .mappings()
+            .any(|(cp, _)| matches!(cp, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD));
+        assert!(!has_pua, "the embedded font maps Private Use Area codepoints; regenerate it");
+
+        assert!(
+            font.axes().iter().all(|axis| axis.tag() != "opsz"),
+            "the embedded font still has an optical-size axis; pin it"
+        );
     }
 }

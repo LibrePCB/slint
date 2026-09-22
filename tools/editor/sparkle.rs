@@ -21,6 +21,23 @@ use objc2_foundation::{NSBundle, NSError, NSString};
 use slint::ComponentHandle as _;
 use std::rc::Rc;
 
+/// Sparkle reports "there is nothing to install" as an error on the update
+/// cycle, so the one code that actually means success has to be filtered out or
+/// every check finishes looking like a failure.
+/// SUErrors.h: SUNoUpdateError = 1001, in SUSparkleErrorDomain.
+const SU_NO_UPDATE_ERROR: isize = 1001;
+const SU_ERROR_DOMAIN: &str = "SUSparkleErrorDomain";
+
+fn is_no_update(error: &NSError) -> bool {
+    error.code() == SU_NO_UPDATE_ERROR && error.domain().to_string() == SU_ERROR_DOMAIN
+}
+
+/// The message a person should see. `NSError`'s own formatting carries the
+/// domain and code, which is noise in a status banner.
+fn error_message(error: &NSError) -> String {
+    error.localizedDescription().to_string()
+}
+
 /// What the updater is doing, reported from the main thread.
 #[derive(Debug)]
 pub enum Event {
@@ -159,12 +176,15 @@ define_class!(
             _item: &AppcastItem,
             error: &NSError,
         ) {
-            self.emit(Event::Failed { message: error.to_string() });
+            self.emit(Event::Failed { message: error_message(error) });
         }
 
         #[unsafe(method(updater:didAbortWithError:))]
         fn did_abort_with_error(&self, _updater: &NSObject, error: &NSError) {
-            self.emit(Event::Failed { message: error.to_string() });
+            if is_no_update(error) {
+                return;
+            }
+            self.emit(Event::Failed { message: error_message(error) });
         }
 
         #[unsafe(method(updater:didFinishUpdateCycleForUpdateCheck:error:))]
@@ -174,9 +194,13 @@ define_class!(
             _check: isize,
             error: Option<&NSError>,
         ) {
-            if let Some(error) = error {
-                self.emit(Event::Failed { message: error.to_string() });
+            let Some(error) = error else {
+                return;
+            };
+            if is_no_update(error) {
+                return;
             }
+            self.emit(Event::Failed { message: error_message(error) });
         }
     }
 );
@@ -283,8 +307,8 @@ impl Sparkle {
     }
 
     /// Look for an update using Sparkle's own dialog, which is what a user
-    /// gesture should do, and for now the only way to run a real download and
-    /// install while the editor's own buttons are stubs.
+    /// gesture should do. It also focuses an update already in progress, so it
+    /// works as the action behind the banner in every state.
     pub fn check_for_updates(&self) {
         self.updater.check_for_updates();
     }
@@ -323,19 +347,14 @@ pub fn connect(editor: &ui::EditorUi) -> Option<Rc<Sparkle>> {
         }
     })?);
 
+    // The banner reports progress from the events above, but the download and
+    // install themselves run in Sparkle's dialog, which is what clicking it
+    // opens. Sparkle focuses an update it's already working on, so this is the
+    // right call whatever the banner currently says.
     let sparkle = updater.clone();
     api.on_check_for_update(move || sparkle.check_for_updates());
-    api.on_download_update(|| {
-        tracing::warn!(
-            "Ignoring download-update request: custom Sparkle downloads are not wired yet"
-        )
-    });
-    api.on_install_update(|| {
-        tracing::warn!("Ignoring install-update request: custom Sparkle installs are not wired yet")
-    });
 
-    // Sparkle's own dialog is the only way to drive a real update for now, so
-    // scripts/local_sparkle_update_test.sh can ask for it at startup too.
+    // scripts/local_sparkle_update_test.sh asks for that dialog at startup.
     if std::env::var_os("SLINT_SPARKLE_INTERACTIVE").is_some() {
         updater.check_for_updates();
     } else {

@@ -114,7 +114,7 @@ pub fn default_geometry(
                                 Type::LogicalLength
                             );
 
-                            elem.borrow().is_binding_set(property, true)
+                            elem.borrow().is_binding_set_outside_states(property, true)
                         };
 
                         let width_specified = has_length_property_binding(elem, "width");
@@ -134,10 +134,11 @@ pub fn default_geometry(
                                 make_default_implicit(elem, "width");
                                 make_default_implicit(elem, "height");
                             }
-                        } else if is_image {
+                        } else {
+                            fill_implicit_state_fallback(elem);
                             // If an image is in a layout and has no explicit width or height specified, change the default for image-fit
                             // to `contain`
-                            if !width_specified || !height_specified {
+                            if is_image && (!width_specified || !height_specified) {
                                 let image_fit_lookup = elem.borrow().lookup_property(
                                     "image-fit",
                                     PropertyLookupMode::ComponentLocal,
@@ -172,6 +173,9 @@ pub fn default_geometry(
                         maybe_center_in_parent(elem, parent, "y", "height");
                     }
                 }
+            } else if matches!(builtin_type.default_size_binding, DefaultSizeBinding::ImplicitSize)
+            {
+                fill_implicit_state_fallback(elem);
             }
 
             Some(elem.clone())
@@ -198,9 +202,10 @@ fn gen_layout_info_prop(
         })
         .filter_map(|c| {
             gen_layout_info_prop(c, diag, symbol_counters);
-            c.borrow()
-                .layout_info_prop
-                .clone()
+            let cb = c.borrow();
+            cb.effective_layout_info_prop(Orientation::Horizontal)
+                .cloned()
+                .zip(cb.effective_layout_info_prop(Orientation::Vertical).cloned())
                 .map(|(h, v)| {
                     (Some(Expression::PropertyReference(h)), Some(Expression::PropertyReference(v)))
                 })
@@ -285,6 +290,7 @@ fn gen_layout_info_prop(
                 lhs: Box::new(std::mem::take(&mut expr_h)),
                 rhs: Box::new(h),
                 op: '+',
+                source_location: None,
             };
         }
         if let Some(v) = child_info.1 {
@@ -292,6 +298,7 @@ fn gen_layout_info_prop(
                 lhs: Box::new(std::mem::take(&mut expr_v)),
                 rhs: Box::new(v),
                 op: '+',
+                source_location: None,
             };
         }
     }
@@ -448,6 +455,7 @@ fn fix_percent_size(
                         SmolStr::new_static(property),
                     ))),
                     op: '*',
+                    source_location: None,
                 };
 
                 // 100% of the outer size of the flickable does not mean the flickable is
@@ -502,6 +510,18 @@ fn bind_size_to_source_image(elem: &ElementRc) {
     }
 }
 
+/// Fills the value a state-set size falls back to with the implicit size.
+///
+/// For the elements this pass doesn't size itself: a component's root, whose size comes from
+/// the use site, and a layout child, whose size comes from the layout (#8852).
+fn fill_implicit_state_fallback(elem: &ElementRc) {
+    for property in ["width", "height"] {
+        if elem.borrow().is_binding_from_state(property) {
+            make_default_implicit(elem, property);
+        }
+    }
+}
+
 fn make_default_implicit(elem: &ElementRc, property: &str) {
     let e = crate::builtin_macros::min_max_expression(
         Expression::PropertyReference(NamedReference::new(
@@ -529,7 +549,7 @@ fn make_default_aspect_ratio_preserving_binding(
     missing_size_property: &'static str,
     given_size_property: &'static str,
 ) {
-    if elem.borrow().is_binding_set(missing_size_property, false) {
+    if elem.borrow().is_binding_set_outside_states(missing_size_property, false) {
         return;
     }
 
@@ -552,6 +572,7 @@ fn make_default_aspect_ratio_preserving_binding(
                 format_smolstr!("source-clip-{given_size_property}"),
             ))),
             op: '/',
+            source_location: None,
         }
     } else {
         let implicit_size_var = Box::new(Expression::ReadLocalVariable {
@@ -581,6 +602,7 @@ fn make_default_aspect_ratio_preserving_binding(
                     name: given_size_property.clone(),
                 }),
                 op: '/',
+                source_location: None,
             },
         ])
     };
@@ -588,6 +610,7 @@ fn make_default_aspect_ratio_preserving_binding(
         lhs: Box::new(ratio),
         rhs: Expression::PropertyReference(NamedReference::new(elem, given_size_property)).into(),
         op: '*',
+        source_location: None,
     };
 
     let binding_expr = binding;
@@ -600,7 +623,7 @@ fn maybe_center_in_parent(
     pos_prop: &'static str,
     size_prop: &'static str,
 ) {
-    if elem.borrow().is_binding_set(pos_prop, false) {
+    if elem.borrow().is_binding_set_outside_states(pos_prop, false) {
         return;
     }
 
@@ -609,6 +632,7 @@ fn maybe_center_in_parent(
         lhs: Expression::PropertyReference(NamedReference::new(parent, size_prop.clone())).into(),
         op: '-',
         rhs: Expression::PropertyReference(NamedReference::new(elem, size_prop)).into(),
+        source_location: None,
     };
 
     let pos_prop = SmolStr::new_static(pos_prop);
@@ -616,6 +640,7 @@ fn maybe_center_in_parent(
         lhs: diff.into(),
         op: '/',
         rhs: Expression::NumberLiteral(2., Unit::None).into(),
+        source_location: None,
     });
 }
 
@@ -634,6 +659,7 @@ fn adjust_image_clip_rect(elem: &ElementRc, builtin: &Rc<BuiltinElement>) {
         let x = NamedReference::new(elem, SmolStr::new_static("source-clip-x"));
         let y = NamedReference::new(elem, SmolStr::new_static("source-clip-y"));
         let make_expr = |dim: &str, prop: NamedReference| Expression::BinaryExpression {
+            source_location: None,
             lhs: Box::new(Expression::StructFieldAccess {
                 base: Box::new(Expression::FunctionCall {
                     function: BuiltinFunction::ImageSize.into(),

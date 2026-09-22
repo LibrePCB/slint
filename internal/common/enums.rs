@@ -360,11 +360,17 @@ macro_rules! for_each_enums {
 
             /// Enum representing the `alignment` property of a
             /// `HorizontalBox`, a `VerticalBox`,
-            /// a `HorizontalLayout`, or `VerticalLayout`.
+            /// a `HorizontalLayout`, a `VerticalLayout`, or a `FlexboxLayout`,
+            /// and the `cross-axis-line-alignment` property of a `FlexboxLayout`.
+            ///
+            /// For `cross-axis-line-alignment`, the values below apply to the flex lines
+            /// instead of the elements.
             #[non_exhaustive]
             enum LayoutAlignment {
-                /// Use the minimum size of all elements in a layout, distribute remaining space
-                /// based on `*-stretch` among all elements.
+                /// For `alignment`: use the minimum size of all elements in a layout, distribute
+                /// remaining space based on `*-stretch` among all elements.
+                /// For `cross-axis-line-alignment`: the flex lines have no stretch factor and
+                /// share the remaining space equally.
                 Stretch,
                 /// Use the preferred size for all elements, distribute remaining space evenly before the
                 /// first and after the last element.
@@ -398,31 +404,16 @@ macro_rules! for_each_enums {
                 ColumnReverse,
             }
 
-            /// Controls the distribution of flex lines along the cross axis in a flex container.
-            /// Used as the `cross-axis-line-alignment` property of `FlexboxLayout`.
-            #[non_exhaustive]
-            enum CrossAxisLineAlignment {
-                /// Lines are stretched to fill the container along the cross axis.
-                Stretch,
-                /// Lines are placed at the start of the cross axis.
-                Start,
-                /// Lines are placed at the end of the cross axis.
-                End,
-                /// Lines are centered along the cross axis.
-                Center,
-                /// Equal gaps between lines, no gap at the edges.
-                SpaceBetween,
-                /// Equal gaps around each line (half-size at edges).
-                SpaceAround,
-                /// Equal gaps between lines and at the edges.
-                SpaceEvenly,
-            }
-
-            /// Controls the alignment of individual items along the cross axis of a layout.
+            /// Controls the alignment of items along the cross axis of a layout.
             /// Used as the `cross-axis-alignment` property of `HorizontalLayout`, `VerticalLayout`,
-            /// and `FlexboxLayout`.
+            /// and `FlexboxLayout`, and as the `cross-axis-self-alignment` property of their
+            /// children, which overrides the container's alignment for a single item.
             #[non_exhaustive]
             enum CrossAxisAlignment {
+                /// The default: for `cross-axis-self-alignment`, use the container's
+                /// `cross-axis-alignment` value. For an unset `cross-axis-alignment` it is
+                /// equivalent to `stretch`; it is an error to set it explicitly there.
+                Auto,
                 /// Items are stretched to fill the cross axis.
                 Stretch,
                 /// Items are placed at the start of the cross axis.
@@ -430,23 +421,6 @@ macro_rules! for_each_enums {
                 /// Items are placed at the end of the cross axis.
                 End,
                 /// Items are centered along the cross axis.
-                Center,
-            }
-
-            /// Overrides the container's `cross-axis-alignment` for a single item.
-            /// Used as the `cross-axis-self-alignment` property of the children of a
-            /// `FlexboxLayout`, `HorizontalLayout`, or `VerticalLayout`.
-            #[non_exhaustive]
-            enum CrossAxisSelfAlignment {
-                /// Use the container's `cross-axis-alignment` value (default).
-                Auto,
-                /// The item is stretched to fill the line along the cross axis.
-                Stretch,
-                /// The item is placed at the start of the cross axis.
-                Start,
-                /// The item is placed at the end of the cross axis.
-                End,
-                /// The item is centered along the cross axis.
                 Center,
             }
 
@@ -533,6 +507,9 @@ macro_rules! for_each_enums {
                 RadioButton,
                 /// The element is a container grouping related `RadioButton`s.
                 RadioGroup,
+                /// The element is a window title bar, typically containing the window title and controls
+                /// such as minimize, maximize, and close.
+                WindowTitleBar,
                 // Landmark roles
                 /// Landmark: the header area of the application, typically containing a logo, title, or global navigation.
                 Banner,

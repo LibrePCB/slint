@@ -12,7 +12,6 @@ use derive_more::{Add, Mul, Sub};
 use i_slint_core::Color;
 use i_slint_core::graphics::{Rgb8Pixel, TexturePixelFormat};
 use i_slint_core::lengths::{PointLengths, SizeLengths};
-use integer_sqrt::IntegerSquareRoot;
 #[allow(unused_imports)]
 use num_traits::Float;
 
@@ -210,14 +209,15 @@ pub(super) fn draw_texture_line(
                 if color.alpha() == 0 {
                     for pix in line_buffer {
                         let pos = pos(4).0;
-                        let alpha = ((data[pos + 3] as u16 * alpha as u16) / 255) as u8;
-                        let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
-                            alpha,
-                            data[pos + 0],
-                            data[pos + 1],
-                            data[pos + 2],
-                        ));
-                        pix.blend(c);
+                        let p: &[u8] = &data[pos..pos + 4];
+                        let alpha = ((p[3] as u16 * alpha as u16) / 255) as u8;
+                        if alpha == 0xff {
+                            *pix = TargetPixel::from_rgb(p[0], p[1], p[2]);
+                        } else {
+                            pix.blend(PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+                                alpha, p[0], p[1], p[2],
+                            )));
+                        }
                     }
                 } else {
                     for pix in line_buffer {
@@ -347,7 +347,7 @@ pub(super) fn draw_rounded_rectangle_line(
         }
         #[inline(always)]
         pub fn sqrt(self) -> Self {
-            Self(self.0.integer_sqrt())
+            Self(self.0.isqrt())
         }
     }
     impl core::ops::Mul for Shifted {
@@ -691,10 +691,7 @@ pub(super) fn draw_radial_gradient(
         // Find the two gradient stops to interpolate between
         let mut color = g.stops.first().map(|s| s.color).unwrap_or_default();
 
-        for window in g.stops.windows(2) {
-            let stop1 = &window[0];
-            let stop2 = &window[1];
-
+        for [stop1, stop2] in g.stops.array_windows() {
             if position >= stop1.position && position <= stop2.position {
                 // Interpolate between the two stops
                 let t = if stop2.position == stop1.position {
@@ -766,10 +763,7 @@ pub(super) fn draw_conic_gradient(
         // Find the two gradient stops to interpolate between
         let mut color = g.stops.first().map(|s| s.color).unwrap_or_default();
 
-        for window in g.stops.windows(2) {
-            let stop1 = &window[0];
-            let stop2 = &window[1];
-
+        for [stop1, stop2] in g.stops.array_windows() {
             if position >= stop1.position && position <= stop2.position {
                 // Interpolate between the two stops
                 let t = if stop2.position == stop1.position {

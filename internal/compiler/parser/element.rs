@@ -125,7 +125,7 @@ pub fn parse_element_content(p: &mut impl Parser) {
                 _ if p.peek().as_str() == "if" => {
                     parse_if_element(&mut *p);
                 }
-                SyntaxKind::Identifier | SyntaxKind::LParent if p.peek().as_str() == "match" => {
+                _ if p.peek().as_str() == "match" => {
                     let mut i = 2;
                     loop {
                         match p.nth(i).kind() {
@@ -362,6 +362,8 @@ fn parse_if_element(p: &mut impl Parser) {
 /// match (foo) { one_case: Elem { } }
 /// match foo { one_case: Elem { } another_case: Elem { } }
 /// match (foo) { one_case: Elem { } another_case: Elem { } *: Elem { } }
+/// match 1 { 1: Elem { } *: Elem { } }
+/// match -1 { -1: Elem { } *: Elem { } }
 /// ```
 fn parse_match_element(p: &mut impl Parser) {
     debug_assert_eq!(p.peek().as_str(), "match");
@@ -442,6 +444,7 @@ fn parse_case_inner(p: &mut impl Parser, after: &str) {
 /// ```test,Binding
 /// foo: bar;
 /// foo: {}
+/// foo: {};
 /// ```
 fn parse_property_binding(p: &mut impl Parser) {
     let mut p = p.start_node(SyntaxKind::Binding);
@@ -456,10 +459,17 @@ fn parse_property_binding(p: &mut impl Parser) {
 /// expression ;
 /// {expression }
 /// {object: 42};
+/// {};
 /// ```
 fn parse_binding_expression(p: &mut impl Parser) -> bool {
     let mut p = p.start_node(SyntaxKind::BindingExpression);
-    if p.nth(0).kind() == SyntaxKind::LBrace && p.nth(2).kind() != SyntaxKind::Colon {
+    // Tell a code block from an object literal, which is '{};' or '{ identifier:'
+    if p.nth(0).kind() == SyntaxKind::LBrace
+        && !matches!(
+            (p.nth(1).kind(), p.nth(2).kind()),
+            (_, SyntaxKind::Colon) | (SyntaxKind::RBrace, SyntaxKind::Semicolon)
+        )
+    {
         parse_code_block(&mut *p);
         p.test(SyntaxKind::Semicolon);
         true

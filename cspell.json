@@ -13,6 +13,7 @@
         "codemap",
         "concat",
         "Consts",
+        "desugars",
         "evenodd",
         "FBOs", // plural of FBO (frame buffer object)
         "fontdb",
@@ -99,10 +100,15 @@
         "TSCHÜSS",
         "ὈΔΥΣΣΕΎΣ",
         "ὀδυσσεύς",
+        "animatable",
         "commonmark",
+        "newtype",
         "strikethroughs",
         "unlocalized",
         "binstall"
+      ],
+      "ignoreRegExpList": [
+        "/\\bhref=\\{`[^`]*`\\}/g"
       ]
     }
   ],
@@ -151,6 +157,7 @@
     "grayscale",
     "gridlayout",
     "groupbox",
+    "hardlinks",
     "Hausmann",
     "Helvetica",
     "imagefilter",
@@ -164,6 +171,7 @@
     "lineedit",
     "LINUXFB",
     "listview",
+    "lucide",
     "lvalue",
     "mdns",
     "microcontroller",
@@ -181,6 +189,7 @@
     "Oooops",
     "opengl",
     "opengles",
+    "overdamped",
     "Pandoc",
     "pico",
     "Pipfile",
@@ -193,6 +202,7 @@
     "replacen",
     "rehype",
     "retarget",
+    "retargeted",
     "Rgba",
     "riscv",
     "rowspan",
@@ -221,6 +231,8 @@
     "tabwidget",
     "testcase",
     "textedit",
+    "threadsafe", // asyncio loop.call_soon_threadsafe()
+    "tmpfs",
     "tmpobj",
     "toolchain",
     "toolkit",
@@ -233,6 +245,7 @@
     "uefi",
     "uncompiled",
     "Unshiftable",
+    "underdamped",
     "unerase",
     "unmapping",
     "unminimize",
@@ -363,9 +376,10 @@
     "pnpm-lock.yaml",
     "pnpm-workspace.yaml",
     "REUSE.toml",
+    "tools/viewer/android/fdroid/dev.slint.viewer.yml",
     "**/Cargo.lock",
     "docs/common/src/utils/slint.tmLanguage.json",
-    "ui-libraries/material/docs/vendor/**",
+    "ui-libraries/material/docs/public/fonts/Inter-LICENSE.txt",
     ".cspell/slint-project-words.txt",
     ".cspell/slint-project-words-audit.tsv",
     "tools/figma-inspector/tests/figma_output.json",
@@ -377,6 +391,17 @@
     "**/node_modules/**"
   ],
   "overrides": [
+    {
+      "filename": "tools/editor/ui-tests/**",
+      "words": [
+        "backslashreplace",
+        "lineterm",
+        "testpaths",
+        "tofile",
+        "worksteal",
+        "xdist"
+      ]
+    },
     {
       "filename": "demos/printerdemo/lang/fr/**",
       "language": "en,fr",

@@ -96,12 +96,15 @@ fn rewrite_layoutinfo_v_for_constraint(expr: &mut Expression, width_param: &Expr
                     };
                     return;
                 }
-                // Builtin height-for-width: replace the default -1 with
-                // the cross-axis size. The second arg is the
+                // Builtin height-for-width: replace the unconstrained argument
+                // with the cross-axis size. The second arg is the
                 // `cross_axis_constraint` of `ImplicitLayoutInfo`.
                 if target.borrow().is_builtin_height_for_width() {
                     debug_assert!(arguments.len() >= 2);
                     if let Some(second) = arguments.get_mut(1) {
+                        // The binding analysis reads the same argument to tell
+                        // whether the item reads its own width.
+                        debug_assert!(is_unconstrained_layout_info_arg(second));
                         *second = width_param.clone();
                     }
                 }
@@ -111,13 +114,6 @@ fn rewrite_layoutinfo_v_for_constraint(expr: &mut Expression, width_param: &Expr
             // PropertyReference to an element's vertical layout-info prop
             // whose target has the parametrized function: swap for the function call.
             let target = nr.element();
-            let is_vertical_layout_info = target
-                .borrow()
-                .layout_info_prop(Orientation::Vertical)
-                .map(|prop_nr| {
-                    prop_nr.name() == nr.name() && Rc::ptr_eq(&prop_nr.element(), &target)
-                })
-                .unwrap_or(false);
             // A forwarded scalar constraint (`min-height: inner.min-height`) reads
             // the target's implicit min/preferred/max-height, which is its
             // layoutinfo-v at the *unconstrained* width. Thread the cross-axis
@@ -130,6 +126,17 @@ fn rewrite_layoutinfo_v_for_constraint(expr: &mut Expression, width_param: &Expr
                 _ => None,
             };
             if let Some(field) = constraint_field {
+                // A bare forward is what the replacement below handles; only a constraint
+                // wrapping one has to be rewritten through its binding (#13523).
+                let own_binding = target.borrow().binding(nr.name()).and_then(|b| {
+                    (!matches!(b.expression, Expression::PropertyReference(..)))
+                        .then(|| b.expression.clone())
+                });
+                if let Some(mut own_binding) = own_binding {
+                    rewrite_layoutinfo_v_for_constraint(&mut own_binding, width_param);
+                    *sub = own_binding;
+                    return;
+                }
                 if let Some(constrained_nr) =
                     target.borrow().inherited_layout_info_v_with_constraint()
                 {
@@ -150,6 +157,13 @@ fn rewrite_layoutinfo_v_for_constraint(expr: &mut Expression, width_param: &Expr
                 }
                 return;
             }
+            let is_vertical_layout_info = target
+                .borrow()
+                .effective_layout_info_prop(Orientation::Vertical)
+                .map(|prop_nr| {
+                    prop_nr.name() == nr.name() && Rc::ptr_eq(&prop_nr.element(), &target)
+                })
+                .unwrap_or(false);
             if !is_vertical_layout_info {
                 return;
             }
@@ -167,159 +181,6 @@ fn rewrite_layoutinfo_v_for_constraint(expr: &mut Expression, width_param: &Expr
         }
         _ => {}
     });
-}
-
-/// Mirror of [`synthesize_layoutinfo_v_with_constraint_on`] for the horizontal axis.
-pub(crate) fn synthesize_layoutinfo_h_with_constraint_on(
-    elem: &ElementRc,
-    span: crate::diagnostics::SourceLocation,
-    body: Expression,
-) {
-    let function_ty = Type::Function(Arc::new(crate::langtype::Function {
-        return_type: crate::typeregister::layout_info_type().into(),
-        args: vec![Type::LogicalLength],
-        arg_names: vec![SmolStr::new_static("height")],
-    }));
-    let prop_name = SmolStr::new_static("layoutinfo-h-with-constraint");
-    let nr = crate::namedreference::NamedReference::new(elem, prop_name.clone());
-
-    let mut elem_mut = elem.borrow_mut();
-    elem_mut.property_declarations.insert(
-        prop_name.clone(),
-        PropertyDeclaration {
-            property_type: function_ty,
-            visibility: crate::object_tree::PropertyVisibility::Private,
-            pure: Some(true),
-            ..Default::default()
-        },
-    );
-    elem_mut.set_binding(prop_name, BindingExpression::new_with_span(body, span));
-    elem_mut.layout_info_h_with_constraint = Some(nr);
-}
-
-/// Same as `rewrite_layoutinfo_v_for_constraint`, but for the horizontal
-/// axis. Only `ComputeFlexboxLayoutInfo` and `PropertyReference` are
-/// rewritten — there's no width-for-height equivalent in box/grid
-/// layouts, and `ImplicitLayoutInfo(Horizontal)` on a non-component
-/// element doesn't depend on `self.height`.
-fn rewrite_layoutinfo_h_for_constraint(expr: &mut Expression, height_param: &Expression) {
-    expr.visit_recursive_mut(&mut |sub| match sub {
-        Expression::ComputeFlexboxLayoutInfo {
-            orientation: Orientation::Horizontal,
-            cross_axis_size,
-            ..
-        } => {
-            *cross_axis_size = Some(Box::new(height_param.clone()));
-        }
-        Expression::PropertyReference(nr) => {
-            // PropertyReference to an element's horizontal layout-info
-            // prop whose target has the parametrized function: swap for the function call.
-            let target = nr.element();
-            let is_horizontal_layout_info = target
-                .borrow()
-                .layout_info_prop(Orientation::Horizontal)
-                .map(|prop_nr| {
-                    prop_nr.name() == nr.name() && Rc::ptr_eq(&prop_nr.element(), &target)
-                })
-                .unwrap_or(false);
-            if !is_horizontal_layout_info {
-                return;
-            }
-            if let Some(constrained_nr) = target.borrow().inherited_layout_info_h_with_constraint()
-            {
-                *sub = Expression::FunctionCall {
-                    function: Callable::Function(crate::namedreference::NamedReference::new(
-                        &target,
-                        constrained_nr.name().clone(),
-                    )),
-                    arguments: vec![height_param.clone()],
-                    source_location: None,
-                };
-            }
-        }
-        _ => {}
-    });
-}
-
-/// Same as `synthesize_layoutinfo_v_with_constraint`, but for the
-/// horizontal axis. Fires on any element whose `layoutinfo-h` depends
-/// (transitively) on a flex with horizontal cross-axis — directly
-/// (column-direction flex) or via a descendant / base component.
-pub fn synthesize_layoutinfo_h_with_constraint(component: &Rc<Component>) {
-    /// Bottom-up walk, returns `true` if the subtree contains an
-    /// h-cross-axis dependency (a flex with cross axis on horizontal,
-    /// or a descendant / base component that has `layoutinfo-h-with-constraint`).
-    fn walk(elem: &ElementRc) -> bool {
-        let children = elem.borrow().children.clone();
-        let mut has_h_cross = false;
-        for c in &children {
-            has_h_cross |= walk(c);
-        }
-        // Repeated elements moved their body into a sub-component;
-        // recurse into it so we synthesize on the body's tree too.
-        let repeated_body = {
-            let elem_b = elem.borrow();
-            if elem_b.repeated.is_some() {
-                if let ElementType::Component(base_comp) = &elem_b.base_type {
-                    Some(base_comp.root_element.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-        if let Some(body_root) = repeated_body {
-            has_h_cross |= walk(&body_root);
-        }
-
-        let (already_synthesized, base_has_constraint, self_is_h_cross_flex, h_nr_clone) = {
-            let elem_b = elem.borrow();
-            let layout_type = elem_b.debug.first().and_then(|d| d.layout.as_ref()).cloned();
-            let self_is = matches!(
-                layout_type,
-                Some(crate::layout::Layout::FlexboxLayout(ref l))
-                    if !matches!(
-                        l.axis_relation(Orientation::Horizontal),
-                        crate::layout::FlexboxAxisRelation::MainAxis,
-                    )
-            );
-            let base_has = matches!(
-                &elem_b.base_type,
-                ElementType::Component(base_comp)
-                    if base_comp.root_element.borrow().layout_info_h_with_constraint.is_some()
-            );
-            (
-                elem_b.layout_info_h_with_constraint.is_some(),
-                base_has,
-                self_is,
-                elem_b.layout_info_prop(Orientation::Horizontal).cloned(),
-            )
-        };
-        has_h_cross |= self_is_h_cross_flex | base_has_constraint;
-
-        if !has_h_cross || already_synthesized {
-            return has_h_cross;
-        }
-        let Some(h_nr) = h_nr_clone else { return has_h_cross };
-        // `h_nr.element()` may be stale for repeater-body elements (their
-        // bindings were moved to a new sub-component root by
-        // `repeater_component`). Read from `elem` itself, which is the
-        // current owner of the binding.
-        let Some(h_binding) = elem.borrow().binding(h_nr.name()).map(|b| b.clone()) else {
-            return has_h_cross;
-        };
-
-        let span = h_binding.span.clone().unwrap_or_else(|| elem.borrow().to_source_location());
-        let mut body = h_binding.expression.clone();
-        let height_param =
-            Expression::FunctionParameterReference { index: 0, ty: Type::LogicalLength };
-        rewrite_layoutinfo_h_for_constraint(&mut body, &height_param);
-
-        synthesize_layoutinfo_h_with_constraint_on(elem, span, body);
-        has_h_cross
-    }
-    walk(&component.root_element);
 }
 
 /// Synthesize `layoutinfo-v-with-constraint` on every element whose
@@ -374,7 +235,7 @@ pub fn synthesize_layoutinfo_v_with_constraint(component: &Rc<Component>) {
                 elem_b.layout_info_v_with_constraint.is_some(),
                 base_has,
                 self_is,
-                elem_b.layout_info_prop(Orientation::Vertical).cloned(),
+                elem_b.effective_layout_info_prop(Orientation::Vertical).cloned(),
             )
         };
         has_v_cross |= self_is_v_cross_flex | base_has_constraint;
@@ -423,6 +284,11 @@ pub fn lower_layouts(
             elem_mut.default_fill_parent.0 |= base.default_fill_parent.0;
             elem_mut.default_fill_parent.1 |= base.default_fill_parent.1;
         }
+    });
+    // Before any layout is lowered, while the bindings are the source's.
+    recurse_elem_including_sub_components(component, &(), &mut |elem, _| {
+        let height_is_literal = crate::object_tree::Element::compute_height_is_literal(elem);
+        elem.borrow_mut().height_is_literal = height_is_literal;
     });
 
     *component.root_constraints.borrow_mut() =
@@ -646,7 +512,8 @@ fn lower_grid_layout(
             );
             collected_children.push(layout_child);
             new_row = true;
-        } else if layout_child.borrow().base_type.type_name() == Some("Row") {
+        } else if matches!(&layout_child.borrow().base_type, ElementType::Builtin(b) if b.name == "Row")
+        {
             new_row = true;
             let row_children = std::mem::take(&mut layout_child.borrow_mut().children);
             for row_child in row_children {
@@ -1085,6 +952,7 @@ impl GridLayout {
                             lhs: Box::new(base.clone()),
                             rhs: Box::new(model_idx),
                             op: '+',
+                            source_location: None,
                         }
                     } else {
                         model_idx
@@ -1136,6 +1004,7 @@ impl GridLayout {
                             condition: Box::new(model_expr),
                             true_expr: Box::new(Expression::NumberLiteral(1., Unit::None)),
                             false_expr: Box::new(Expression::NumberLiteral(0., Unit::None)),
+                            source_location: None,
                         }
                     } else {
                         Expression::FunctionCall {
@@ -1149,6 +1018,7 @@ impl GridLayout {
                             lhs: Box::new(prev),
                             rhs: Box::new(len_expr),
                             op: '+',
+                            source_location: None,
                         }
                     } else {
                         len_expr
@@ -1160,6 +1030,7 @@ impl GridLayout {
                             lhs: Box::new(prev),
                             rhs: Box::new(Expression::NumberLiteral(1., Unit::None)),
                             op: '+',
+                            source_location: None,
                         }
                     } else {
                         Expression::NumberLiteral(1., Unit::None)
@@ -1349,7 +1220,15 @@ fn optimize_single_cell_layout(
     layout_element.borrow_mut().take_binding(cache_name);
     layout_element.borrow_mut().property_declarations.remove(cache_name);
     for o in [Orientation::Horizontal, Orientation::Vertical] {
-        let Some(nr) = layout_element.borrow().layout_info_prop(o).cloned() else { continue };
+        // The element's own property, through the field: this overwrites the
+        // binding, and `Element::effective_layout_info_prop` may answer with
+        // another property entirely.
+        let Some(nr) = layout_element.borrow().layout_info_prop.as_ref().map(|p| match o {
+            Orientation::Horizontal => p.0.clone(),
+            Orientation::Vertical => p.1.clone(),
+        }) else {
+            continue;
+        };
         let Some(info) =
             single_cell_layout_info_binding(layout, &layout.elems[0], o, single_cell.stretch)
         else {
@@ -1380,12 +1259,6 @@ fn single_cell_box_layout(layout: &BoxLayout) -> Option<SingleCellBoxLayout> {
     let orientation = layout.orientation;
     let [item] = layout.elems.as_slice() else { return None };
     if item.element.borrow().repeated.is_some() {
-        return None;
-    }
-    // Cells with a cross-axis-parametrized layout info need the runtime cells machinery.
-    if orientation == Orientation::Horizontal
-        && item.element.borrow().inherited_layout_info_h_with_constraint().is_some()
-    {
         return None;
     }
     // The alignment must be a compile-time constant. A state-dependent
@@ -1440,7 +1313,12 @@ fn single_cell_box_layout(layout: &BoxLayout) -> Option<SingleCellBoxLayout> {
 }
 
 fn bin(op: char, lhs: Expression, rhs: Expression) -> Expression {
-    Expression::BinaryExpression { lhs: Box::new(lhs), rhs: Box::new(rhs), op }
+    Expression::BinaryExpression {
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+        op,
+        source_location: None,
+    }
 }
 
 fn min_max(op: MinMaxOp, lhs: Expression, rhs: Expression) -> Expression {
@@ -1611,7 +1489,7 @@ fn single_cell_layout_info_binding(
 /// in the LLR lowering: the element's own layoutinfo property when it has one,
 /// otherwise [`implicit_layout_info_call`].
 fn cell_implicit_info(elem: &ElementRc, orientation: Orientation) -> Option<Expression> {
-    let own_info = elem.borrow().layout_info_prop(orientation).cloned();
+    let own_info = elem.borrow().effective_layout_info_prop(orientation).cloned();
     match own_info {
         Some(nr) => Some(Expression::PropertyReference(nr)),
         None => implicit_layout_info_call(elem, orientation, BuiltinFilter::All, None),
@@ -1662,16 +1540,32 @@ fn clamp_cross_stretch_size(
     size_expr
 }
 
+/// `auto` is the unset default of `cross-axis-alignment` and only valid for
+/// `cross-axis-self-alignment`; setting it explicitly is an error.
+fn check_cross_axis_alignment_not_auto(elem: &ElementRc, diag: &mut BuildDiagnostics) {
+    if let Some(b) = elem.borrow().binding("cross-axis-alignment")
+        && let Expression::EnumerationValue(ev) = b.value_expression()
+        && ev.to_string() == "auto"
+    {
+        diag.push_error(
+            "cross-axis-alignment cannot be set to 'auto', which is only valid for cross-axis-self-alignment; the default is 'stretch'".into(),
+            &*b,
+        );
+    }
+}
+
 fn lower_box_layout(
     layout_element: &ElementRc,
     diag: &mut BuildDiagnostics,
     orientation: Orientation,
 ) {
+    check_cross_axis_alignment_not_auto(layout_element, diag);
     let mut layout = BoxLayout {
         orientation,
         elems: Default::default(),
         geometry: LayoutGeometry::new(layout_element),
         cross_alignment: binding_reference(layout_element, "cross-axis-alignment"),
+        is_synthesized_repeated_merge: false,
     };
 
     let layout_info_prop_v = create_new_prop(
@@ -1691,11 +1585,12 @@ fn lower_box_layout(
     // needs to know whether any cell sets `cross-axis-self-alignment`.
     let items: Vec<_> =
         layout_children.iter().map(|child| create_layout_item(child, diag)).collect();
-    // A repeated cell with `cross-axis-self-alignment` returns that value through
-    // the generated `layout_item_info`, which needs the layout's orientation to
-    // restrict it to the cross axis.
+    // A repeated cell needs the layout's orientation: `lower_to_item_tree` uses
+    // it to restrict a `cross-axis-self-alignment` to the cross axis and a
+    // `layout-order` to the main axis, and to generate
+    // `layout_item_info_at_cross_width` for a height-for-width instance.
     for item in &items {
-        if item.repeater_index.is_some() && item.item.cross_axis_self_alignment.is_some() {
+        if item.repeater_index.is_some() {
             item.elem.borrow_mut().parent_box_layout_orientation = Some(orientation);
         }
     }
@@ -1829,6 +1724,7 @@ fn lower_box_layout(
 }
 
 fn lower_flexbox_layout(layout_element: &ElementRc, diag: &mut BuildDiagnostics) {
+    check_cross_axis_alignment_not_auto(layout_element, diag);
     let direction = crate::layout::binding_reference(layout_element, "flex-direction");
     let cross_axis_line_alignment =
         crate::layout::binding_reference(layout_element, "cross-axis-line-alignment");
@@ -1896,8 +1792,7 @@ fn lower_flexbox_layout(layout_element: &ElementRc, diag: &mut BuildDiagnostics)
                 diag,
             );
         }
-        let order = crate::layout::binding_reference(actual_elem, "layout-order");
-        layout.elems.push(crate::layout::FlexboxLayoutItem { item: item.item, order });
+        layout.elems.push(item.item);
     }
     layout_element.borrow_mut().children = layout_children;
     let span = layout_element.borrow().to_source_location();
@@ -1928,9 +1823,39 @@ fn lower_flexbox_layout(layout_element: &ElementRc, diag: &mut BuildDiagnostics)
                 orientation: Orientation::Vertical,
                 cross_axis_size: None,
             },
-            span,
+            span.clone(),
         ),
     );
+    // The horizontal info counting the columns that fit the flex's own height,
+    // for the readers `Element::effective_layout_info_prop` sends there. An instance of
+    // a component may settle the height the root does not.
+    let is_root = layout_element
+        .borrow()
+        .enclosing_component
+        .upgrade()
+        .is_some_and(|c| Rc::ptr_eq(&c.root_element, layout_element));
+    if layout.axis_relation(Orientation::Horizontal) != crate::layout::FlexboxAxisRelation::MainAxis
+        && (is_root || layout_element.borrow().height_is_literal)
+        && let Some(height) = layout.geometry.rect.height_reference.clone()
+    {
+        let at_own_height = create_new_prop(
+            layout_element,
+            SmolStr::new_static("layoutinfo-h-at-own-height"),
+            layout_info_type().into(),
+        );
+        at_own_height.element().borrow_mut().set_binding(
+            at_own_height.name().clone(),
+            BindingExpression::new_with_span(
+                Expression::ComputeFlexboxLayoutInfo {
+                    layout: layout.clone(),
+                    orientation: Orientation::Horizontal,
+                    cross_axis_size: Some(Box::new(Expression::PropertyReference(height))),
+                },
+                span,
+            ),
+        );
+        layout_element.borrow_mut().layout_info_h_at_own_height = Some(at_own_height);
+    }
     layout_element.borrow_mut().layout_info_prop = Some((layout_info_prop_h, layout_info_prop_v));
     for d in layout_element.borrow_mut().debug.iter_mut() {
         d.layout = Some(Layout::FlexboxLayout(layout.clone()));
@@ -2087,7 +2012,7 @@ fn lower_dialog_layout(
                                         pure: None,
                                         shadowed_name: None,
                                         shadowable: false,
-                                        moved_to_root: false,
+                                        moved_from: None,
                                         deprecated: None,
                                     });
                             }
@@ -2271,8 +2196,14 @@ fn create_layout_item(
     let constraints = LayoutConstraints::new(&actual_elem, Some((diag, DiagnosticLevel::Error)));
     let cross_axis_self_alignment =
         crate::layout::binding_reference(&actual_elem, "cross-axis-self-alignment");
+    let layout_order = crate::layout::binding_reference(&actual_elem, "layout-order");
     CreateLayoutItemResult {
-        item: LayoutItem { element: item_element.clone(), constraints, cross_axis_self_alignment },
+        item: LayoutItem {
+            element: item_element.clone(),
+            constraints,
+            cross_axis_self_alignment,
+            layout_order,
+        },
         elem: actual_elem,
         repeater_index,
     }
@@ -2543,10 +2474,7 @@ fn check_no_layout_properties(
         {
             diag.push_error(format!("{prop} used outside of a GridLayout's cell"), &*expr.borrow());
         }
-        if prop == "layout-order" && parent_layout_type.as_deref() != Some("FlexboxLayout") {
-            diag.push_error(format!("{prop} used outside of a FlexboxLayout"), &*expr.borrow());
-        }
-        if prop == "cross-axis-self-alignment"
+        if matches!(prop.as_ref(), "layout-order" | "cross-axis-self-alignment")
             && !matches!(
                 parent_layout_type.as_deref(),
                 Some("FlexboxLayout" | "HorizontalLayout" | "VerticalLayout")

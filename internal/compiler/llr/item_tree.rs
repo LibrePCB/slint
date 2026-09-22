@@ -20,6 +20,8 @@ pub struct CallbackIdx(usize);
 pub struct SubComponentIdx(usize);
 #[derive(Debug, Clone, Copy, Into, From, Hash, PartialEq, Eq)]
 pub struct GlobalIdx(usize);
+#[derive(Debug, Clone, Copy, Into, From, Hash, PartialEq, Eq)]
+pub struct PublicComponentIdx(usize);
 #[derive(Debug, Clone, Copy, Into, From, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SubComponentInstanceIdx(usize);
 #[derive(Debug, Clone, Copy, Into, From, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,7 +41,15 @@ pub enum RowChildTemplateInfo {
     /// A static child. `child_index` is an index into `SubComponent::grid_layout_children`.
     Static { child_index: GridLayoutChildIdx },
     /// An inner repeated child.
-    Repeated { repeater_index: RepeatedElementIdx },
+    Repeated {
+        repeater_index: RepeatedElementIdx,
+        /// Whether this child's width comes from the grid's horizontal cache,
+        /// so `layout_item_info(Vertical, ..)` may measure it at that width
+        /// through `SubComponent::grid_row_child_cross_width`. False for a
+        /// child that is not height-for-width (nothing to re-measure) or that
+        /// has a fixed width (the grid never assigns it one).
+        measure_at_cross_width: bool,
+    },
 }
 
 /// Returns `true` if the optional template list contains at least one inner repeater.
@@ -60,6 +70,13 @@ pub struct LayoutRepeatedElement {
     /// Template of children for a repeated Row (statics and inner repeaters in declaration order).
     /// `None` means a single child per repeater entry (no Row with multiple children).
     pub row_child_templates: Option<Vec<RowChildTemplateInfo>>,
+    /// GridLayout vertical pass only: reads this cell's solved column width out
+    /// of the grid's horizontal cache, once per instance with
+    /// `GRID_MEASURE_REPEATER_INDEX_LOCAL` bound to the instance index. The
+    /// generated code measures each instance through
+    /// `layout_item_info_at_cross_width` at that width, so a height-for-width
+    /// instance wraps like an equivalent static cell. `None` everywhere else.
+    pub cross_width: Option<Expression>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,7 +147,7 @@ pub struct BindingExpression {
     pub use_count: Cell<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GlobalComponent {
     pub name: SmolStr,
     pub properties: TiVec<PropertyIdx, Property>,
@@ -332,7 +349,7 @@ impl TwoWayBinding {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Property {
     pub name: SmolStr,
     pub ty: Type,
@@ -341,7 +358,7 @@ pub struct Property {
     pub use_count: Cell<usize>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Callback {
     pub name: SmolStr,
     pub ret_ty: Type,
@@ -360,7 +377,7 @@ pub struct Callback {
     pub needs_tracker: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Function {
     pub name: SmolStr,
     pub ret_ty: Type,
@@ -393,7 +410,7 @@ pub struct ListViewInfo {
     pub prop_height: MemberReference,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RepeatedElement {
     pub model: MutExpression,
     /// Within the sub_tree's root component. None for `if`
@@ -414,7 +431,7 @@ pub struct RepeatedElement {
     pub container_item_index: Option<ItemInstanceIdx>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ComponentContainerElement {
     /// The index of the `ComponentContainer` in the enclosing components `item_tree` array
     pub component_container_item_tree_index: u32,
@@ -424,6 +441,7 @@ pub struct ComponentContainerElement {
     pub component_placeholder_item_tree_index: u32,
 }
 
+#[derive(Clone)]
 pub struct Item {
     pub ty: Arc<NativeClass>,
     pub name: SmolStr,
@@ -441,7 +459,7 @@ impl std::fmt::Debug for Item {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TreeNode {
     pub sub_component_path: Vec<SubComponentInstanceIdx>,
     /// Either an index in the items, or the local dynamic index for repeater or component container
@@ -511,7 +529,7 @@ impl TreeNode {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SubComponent {
     pub name: SmolStr,
     pub properties: TiVec<PropertyIdx, Property>,
@@ -556,6 +574,12 @@ pub struct SubComponent {
     /// of it. The cross-axis layout-info pass shares that accessor and so also
     /// evaluates it, unlike static cells (`box_layout_info_ortho` ignores it).
     pub cross_axis_self_alignment_for_repeated: Option<(crate::layout::Orientation, MutExpression)>,
+    /// The root's `layout-order` for a repeated element in a box layout,
+    /// returned by the generated `layout_item_info` for the given (main-axis)
+    /// orientation only, so the cross-axis cache stays independent of it. The
+    /// main-axis layout-info pass shares that accessor and so also evaluates
+    /// it, unlike static cells (`box_layout_info` ignores the field).
+    pub layout_order_for_repeated: Option<(crate::layout::Orientation, MutExpression)>,
     /// Vertical `LayoutInfo` for a repeated element, computed with a width
     /// constraint (its preferred width) so a height-for-width instance in a
     /// column FlexboxLayout doesn't read `self.width` and recurse through the
@@ -563,23 +587,20 @@ pub struct SubComponent {
     /// `layoutinfo-v-with-constraint`. See `flexbox_layout_item_info`.
     pub layout_info_v_constrained_for_repeated: Option<MutExpression>,
     /// Same as `layout_info_v_constrained_for_repeated`, but measured at the
-    /// width passed in the `flex_cross_width` local instead of the preferred
+    /// width passed in the `cross_width` local instead of the preferred
     /// width. Drives the generated `flexbox_layout_item_info_at_cross_width` method,
     /// which a column FlexboxLayout calls with its real container width so a
     /// repeated cell wraps to the same height as an equivalent static cell.
     pub layout_info_v_at_cross_width_for_repeated: Option<MutExpression>,
-    /// Horizontal counterpart of `layout_info_v_constrained_for_repeated`:
-    /// computed with an unbounded height constraint so a width-for-height
-    /// instance (e.g. a wrapping column FlexboxLayout) doesn't read
-    /// `self.height` and recurse through the parent flex cache. `Some` only
-    /// when the element carries a `layoutinfo-h-with-constraint`.
-    pub layout_info_h_constrained_for_repeated: Option<MutExpression>,
-    /// Same as `layout_info_h_constrained_for_repeated`, but measured at the
-    /// height passed in the `flex_cross_height` local. Drives the generated
-    /// `flexbox_layout_item_info_at_cross_height` method, which a FlexboxLayout
-    /// calls with the height it assigned so a repeated cell resolves to the
-    /// same width as an equivalent static cell.
-    pub layout_info_h_at_cross_height_for_repeated: Option<MutExpression>,
+    /// GridLayout repeated Row only: reads the solved column width of the child
+    /// at `GRID_MEASURE_CHILD_INDEX_LOCAL` out of the grid's horizontal cache.
+    /// `layout_item_info(Vertical, Some(i))` measures an inner repeated child at
+    /// that width, so it wraps like a static one — which reads its own width
+    /// through its geometry binding. A Row child's cache slot is addressed by
+    /// its flattened index, so this one expression serves every child; which
+    /// children it applies to is `RowChildTemplateInfo::Repeated`'s
+    /// `measure_at_cross_width`. `Some` when at least one of them sets it.
+    pub grid_row_child_cross_width: Option<MutExpression>,
     /// True when this is a repeated Row in a GridLayout, meaning layout_item_info
     /// needs to be able to return layout info for individual children
     pub is_repeated_row: bool,
@@ -604,14 +625,14 @@ pub struct SubComponent {
     pub debug_info: Option<super::debug_info::SubComponentDebugInfo>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PopupWindow {
     pub item_tree: ItemTree,
     pub position: MutExpression,
     pub is_tooltip: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PopupMenu {
     pub item_tree: ItemTree,
     pub sub_menu: MemberReference,
@@ -620,7 +641,7 @@ pub struct PopupMenu {
     pub entries: MemberReference,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Timer {
     pub interval: MutExpression,
     pub running: MutExpression,
@@ -654,7 +675,7 @@ impl SubComponent {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SubComponentInstance {
     pub ty: SubComponentIdx,
     pub name: SmolStr,
@@ -663,7 +684,7 @@ pub struct SubComponentInstance {
     pub repeater_offset: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ItemTree {
     pub root: SubComponentIdx,
     pub tree: TreeNode,
@@ -678,7 +699,7 @@ pub enum TopLevelComponentType {
     SystemTrayIcon,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PublicComponent {
     pub public_properties: PublicProperties,
     pub private_properties: PrivateProperties,
@@ -689,7 +710,7 @@ pub struct PublicComponent {
 
 /// One name the generated module exposes for a declared type (or a component alias):
 /// its own name, a renamed export, or a name kept only for backward compatibility.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypeExport {
     /// The name users write.
     pub exported_name: SmolStr,
@@ -728,9 +749,9 @@ impl TypeExport {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompilationUnit {
-    pub public_components: Vec<PublicComponent>,
+    pub public_components: TiVec<PublicComponentIdx, PublicComponent>,
     /// Storage for all sub-components
     pub sub_components: TiVec<SubComponentIdx, SubComponent>,
     /// The sub-components that are not item-tree root
@@ -746,6 +767,12 @@ pub struct CompilationUnit {
     #[cfg(feature = "bundle-translations")]
     pub translations: Option<crate::translations::Translations>,
 }
+
+// The code generators may run on another thread, so the LLR must not reference the object tree.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<CompilationUnit>();
+};
 
 impl CompilationUnit {
     pub fn needs_window_adapter(&self) -> bool {
@@ -822,16 +849,16 @@ impl CompilationUnit {
             if let Some((_, e)) = &sc.cross_axis_self_alignment_for_repeated {
                 visitor(e, ctx);
             }
+            if let Some((_, e)) = &sc.layout_order_for_repeated {
+                visitor(e, ctx);
+            }
             if let Some(e) = &sc.layout_info_v_constrained_for_repeated {
                 visitor(e, ctx);
             }
             if let Some(e) = &sc.layout_info_v_at_cross_width_for_repeated {
                 visitor(e, ctx);
             }
-            if let Some(e) = &sc.layout_info_h_constrained_for_repeated {
-                visitor(e, ctx);
-            }
-            if let Some(e) = &sc.layout_info_h_at_cross_height_for_repeated {
+            if let Some(e) = &sc.grid_row_child_cross_width {
                 visitor(e, ctx);
             }
             for e in sc.accessible_prop.values() {
@@ -856,8 +883,9 @@ impl CompilationUnit {
                 visitor(&t.triggered, ctx);
             }
             if let EvaluationScope::SubComponent(idx, _) = ctx.current_scope {
-                // A parent-less context, matching how `count_property_use` counts
-                // function bodies, so both passes rewrite the same references.
+                // A parent-less context, so the inliner only rewrites the
+                // `parent_level == 0` references of a body. It may then leave a use
+                // count higher than needed, which only keeps a property alive.
                 let fn_ctx = EvaluationContext::new_sub_component(self, idx, (), None);
                 visit_function_bodies(&sc.functions, &fn_ctx, visitor);
             }

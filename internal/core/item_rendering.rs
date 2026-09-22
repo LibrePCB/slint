@@ -144,6 +144,14 @@ impl<T> ItemCache<T> {
         self.map.borrow().is_empty()
     }
 
+    /// Keeps only the entries for which `f` returns true.
+    pub fn retain(&self, mut f: impl FnMut(&T) -> bool) {
+        self.map.borrow_mut().retain(|_, per_component| {
+            per_component.retain(|_, entry| f(&entry.data));
+            !per_component.is_empty()
+        });
+    }
+
     /// Returns a [`RefMut`](std::cell::RefMut) referencing the cached value associated with
     /// `item_rc`, updating the cache entry first if necessary using `update_fn`.
     ///
@@ -202,14 +210,16 @@ pub fn render_item_children(
             renderer.save_state();
             let item_rc = ItemRc::new(component.clone(), index);
 
-            let (do_draw, item_geometry) = renderer.filter_item(&item_rc, window_adapter);
+            let (do_draw, item_origin, item_size) = renderer.filter_item(&item_rc, window_adapter);
 
-            let item_origin = item_geometry.origin;
             renderer.translate(item_origin.to_vector());
 
             // Don't render items that are clipped, with the exception of the Clip or Flickable since
             // they themselves clip their content.
-            let render_result = if do_draw
+            let render_result = if renderer.global_alpha_transparent() {
+                // apply_opacity only multiplies, so the whole subtree stays transparent.
+                RenderingResult::ContinueRenderingWithoutChildren
+            } else if do_draw
                || item.as_ref().clips_children()
                // HACK, the geometry of the box shadow does not include the shadow, because when the shadow is the root for repeated elements it would translate the children
                || ItemRef::downcast_pin::<BoxShadow>(item).is_some()
@@ -218,11 +228,10 @@ pub fn render_item_children(
                || ItemRef::downcast_pin::<Opacity>(item).is_some()
                || ItemRef::downcast_pin::<Layer>(item).is_some()
             {
-                item.as_ref().render(
-                    &mut (renderer as &mut dyn ItemRenderer),
-                    &item_rc,
-                    item_geometry.size,
-                )
+                let size = item_size.unwrap_or_else(|| {
+                    crate::properties::evaluate_no_tracking(|| item_rc.geometry()).size
+                });
+                item.as_ref().render(&mut (renderer as &mut dyn ItemRenderer), &item_rc, size)
             } else {
                 RenderingResult::ContinueRenderingChildren
             };
@@ -488,6 +497,26 @@ pub trait RenderString: HasFont {
     }
 }
 
+/// Returns the text box's alignment anchor in physical pixels.
+/// Renderers can snap this point while preserving the box dimensions used for layout.
+pub fn text_alignment_anchor(
+    size: euclid::Size2D<f32, PhysicalPx>,
+    horizontal: TextHorizontalAlignment,
+    vertical: TextVerticalAlignment,
+) -> euclid::Point2D<f32, PhysicalPx> {
+    let x = match horizontal {
+        TextHorizontalAlignment::Start | TextHorizontalAlignment::Left => 0.0,
+        TextHorizontalAlignment::Center => size.width / 2.0,
+        TextHorizontalAlignment::End | TextHorizontalAlignment::Right => size.width,
+    };
+    let y = match vertical {
+        TextVerticalAlignment::Top => 0.0,
+        TextVerticalAlignment::Center => size.height / 2.0,
+        TextVerticalAlignment::Bottom => size.height,
+    };
+    euclid::Point2D::new(x, y)
+}
+
 /// Trait for an item that represents an Text towards the renderer
 #[allow(missing_docs)]
 pub trait RenderText: RenderString {
@@ -662,6 +691,10 @@ pub trait ItemRenderer {
     fn scale(&mut self, scale_x_factor: f32, scale_y_factor: f32);
     /// Apply the opacity (between 0 and 1) for all following items until the next call to restore_state.
     fn apply_opacity(&mut self, opacity: f32);
+    /// Returns true when the opacity accumulated via [`Self::apply_opacity`] is zero.
+    fn global_alpha_transparent(&self) -> bool {
+        false
+    }
 
     fn save_state(&mut self);
     fn restore_state(&mut self);
@@ -688,19 +721,24 @@ pub trait ItemRenderer {
     /// This is called before it is being rendered (before the draw_* function).
     /// Returns
     ///  - if the item needs to be drawn (false means it is clipped or doesn't need to be drawn)
-    ///  - the geometry of the item
+    ///  - the origin of the item
+    ///  - the size of the item, or None if it doesn't need to be drawn and the size wasn't computed
     fn filter_item(
         &mut self,
         item: &ItemRc,
         window_adapter: &WindowAdapterRc,
-    ) -> (bool, LogicalRect) {
+    ) -> (bool, LogicalPoint, Option<LogicalSize>) {
         let item_geometry = item.geometry();
         // Query bounding rect untracked, as properties that affect the bounding rect are already tracked
         // when rendering the item.
         let bounding_rect = crate::properties::evaluate_no_tracking(|| {
             item.bounding_rect(&item_geometry, window_adapter)
         });
-        (self.get_current_clip().intersects(&bounding_rect), item_geometry)
+        (
+            self.get_current_clip().intersects(&bounding_rect),
+            item_geometry.origin,
+            Some(item_geometry.size),
+        )
     }
 
     fn window(&self) -> &crate::window::WindowInner;

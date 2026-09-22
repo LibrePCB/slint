@@ -21,7 +21,10 @@ use typed_index_collections::TiVec;
 /// name (deprecated when not reachable from the public API), the renamed export aliases,
 /// and the deprecated pre-rename names. Collision-renamed types are omitted — they were
 /// never public.
-fn type_exports(document: &object_tree::Document) -> Vec<TypeExport> {
+fn type_exports(
+    document: &object_tree::Document,
+    exported_roots: &[(Rc<Component>, Vec<SmolStr>)],
+) -> Vec<TypeExport> {
     let used_types = document.used_types.borrow();
     let public = public_facing_type_names(document);
     let mut list = Vec::new();
@@ -43,6 +46,24 @@ fn type_exports(document: &object_tree::Document) -> Vec<TypeExport> {
     }
     for (internal_name, exported_name) in document.exports.named_type_aliases() {
         list.push(TypeExport { exported_name, internal_name, deprecated: false });
+    }
+    for (component, names) in exported_roots {
+        let (internal_name, aliases) =
+            names.split_first().expect("an exported root has at least one export name");
+        for exported_name in aliases {
+            list.push(TypeExport {
+                exported_name: exported_name.clone(),
+                internal_name: internal_name.clone(),
+                deprecated: false,
+            });
+        }
+        if component.id != *internal_name {
+            list.push(TypeExport {
+                exported_name: component.id.clone(),
+                internal_name: internal_name.clone(),
+                deprecated: true,
+            });
+        }
     }
     for (old_name, new_name) in &used_types.deprecated_type_aliases {
         list.push(TypeExport {
@@ -107,27 +128,35 @@ pub fn lower_to_item_tree(
         state.sub_component_mapping.insert(ByAddress(c.clone()), idx);
     }
 
-    let public_components = document
+    let exported_roots: Vec<(Rc<Component>, Vec<SmolStr>)> = document
         .exported_roots()
-        .map(|component| {
+        .map(|c| {
+            let names = document.export_names(&c);
+            (c, names)
+        })
+        .collect();
+    let public_components = exported_roots
+        .iter()
+        .map(|(component, names)| {
+            let name = &names[0];
             let top_level_type = if component.inherits_system_tray_icon() {
                 TopLevelComponentType::SystemTrayIcon
             } else {
                 TopLevelComponentType::Window
             };
-            let mut sc = lower_sub_component(&component, &mut state, None, compiler_config);
-            let public_properties = public_properties(&component, &sc.mapping, &state);
-            sc.sub_component.name = component.id.clone();
+            let mut sc = lower_sub_component(component, &mut state, None, compiler_config);
+            let public_properties = public_properties(component, &sc.mapping, &state);
+            // For C++ codegen, the root component must have the same name as the public component
+            sc.sub_component.name = name.clone();
             let item_tree = ItemTree {
                 tree: make_tree(&state, &component.root_element, &sc, &[]),
                 root: state.push_sub_component(sc),
             };
-            // For C++ codegen, the root component must have the same name as the public component
             PublicComponent {
                 item_tree,
                 public_properties,
                 private_properties: component.private_properties.borrow().clone(),
-                name: component.id.clone(),
+                name: name.clone(),
                 top_level_type,
             }
         })
@@ -171,7 +200,7 @@ pub fn lower_to_item_tree(
             .collect(),
         has_debug_info: compiler_config.debug_info,
         popup_menu,
-        type_exports: type_exports(document),
+        type_exports: type_exports(document, &exported_roots),
         #[cfg(feature = "bundle-translations")]
         translations: state.translation_builder.map(|x| x.result()),
     };
@@ -390,10 +419,10 @@ fn lower_sub_component(
         grid_layout_input_for_repeated: None,
         flexbox_layout_item_info_for_repeated: None,
         cross_axis_self_alignment_for_repeated: None,
+        layout_order_for_repeated: None,
         layout_info_v_constrained_for_repeated: None,
         layout_info_v_at_cross_width_for_repeated: None,
-        layout_info_h_constrained_for_repeated: None,
-        layout_info_h_at_cross_height_for_repeated: None,
+        grid_row_child_cross_width: None,
         is_repeated_row: component
             .root_element
             .borrow()
@@ -772,16 +801,10 @@ fn lower_sub_component(
                 root_elem,
                 &component.root_constraints.borrow(),
             );
-        let h_constrained =
-            super::lower_layout_expression::get_layout_info_h_constrained_for_repeated(
-                &mut ctx,
-                root_elem,
-                &component.root_constraints.borrow(),
-            );
         // Generate the flex item-info accessor when the element sets flex
-        // properties, or when it needs one of the constrained-axis fixes (a
-        // height-for-width instance in a column flex, or a width-for-height one).
-        if has_flex_binding || v_constrained.is_some() || h_constrained.is_some() {
+        // properties, or when it is a height-for-width instance in a column
+        // flex, which needs the constrained vertical info.
+        if has_flex_binding || v_constrained.is_some() {
             sub_component.flexbox_layout_item_info_for_repeated = Some(
                 super::lower_layout_expression::get_flexbox_layout_item_info_for_repeated(
                     &mut ctx, root_elem,
@@ -795,21 +818,15 @@ fn lower_sub_component(
                 &mut ctx,
                 root_elem,
                 &component.root_constraints.borrow(),
-            )
-            .map(Into::into);
-        sub_component.layout_info_h_constrained_for_repeated = h_constrained.map(Into::into);
-        sub_component.layout_info_h_at_cross_height_for_repeated =
-            super::lower_layout_expression::get_layout_info_h_at_cross_height_for_repeated(
-                &mut ctx,
-                root_elem,
-                &component.root_constraints.borrow(),
+                true,
             )
             .map(Into::into);
     } else if let Some(box_orientation) =
         component.root_element.borrow().parent_box_layout_orientation
     {
         // A repeated element in a box layout returns its `cross-axis-self-alignment`
-        // through the generated `layout_item_info`, on the cross axis only.
+        // through the generated `layout_item_info`, on the cross axis only, and its
+        // `layout-order` on the main axis only.
         if let Some(nr) =
             crate::layout::binding_reference(&component.root_element, "cross-axis-self-alignment")
         {
@@ -818,6 +835,40 @@ fn lower_sub_component(
                 super::Expression::PropertyReference(ctx.map_property_reference(&nr)).into(),
             ));
         }
+        if let Some(nr) = crate::layout::binding_reference(&component.root_element, "layout-order")
+        {
+            sub_component.layout_order_for_repeated = Some((
+                box_orientation,
+                super::Expression::PropertyReference(ctx.map_property_reference(&nr)).into(),
+            ));
+        }
+        // The parent box layout measures a height-for-width instance at the
+        // width it lays it out at, through `layout_item_info_at_cross_width` —
+        // the plain `layout_info` measures at the instance's preferred width.
+        // A vertical layout queries it from its main-axis pass, a horizontal
+        // one from its ortho measure pass.
+        sub_component.layout_info_v_at_cross_width_for_repeated =
+            super::lower_layout_expression::get_layout_info_v_at_cross_width_for_repeated(
+                &mut ctx,
+                &component.root_element,
+                &component.root_constraints.borrow(),
+                false,
+            )
+            .map(Into::into);
+    }
+
+    if component.root_element.borrow().grid_layout_cell.is_some() {
+        // A GridLayout measures a height-for-width instance at the column width
+        // it assigns, through `layout_item_info_at_cross_width`; the plain
+        // `layout_info` measures at the instance's preferred width.
+        sub_component.layout_info_v_at_cross_width_for_repeated =
+            super::lower_layout_expression::get_layout_info_v_at_cross_width_for_repeated(
+                &mut ctx,
+                &component.root_element,
+                &component.root_constraints.borrow(),
+                false,
+            )
+            .map(Into::into);
     }
 
     if let Some(grid_layout_cell) = component.root_element.borrow().grid_layout_cell.as_ref() {
@@ -860,6 +911,19 @@ fn lower_sub_component(
                             .push(super::RowChildTemplateInfo::Static { child_index });
                     }
                     crate::layout::RowChildTemplate::Repeated { repeated_element, .. } => {
+                        // Measure this child at the column width the grid
+                        // assigns it. The expression is the same for every
+                        // child of the Row, so only the first one that needs
+                        // it builds it.
+                        let cross_width = super::lower_layout_expression::grid_measure_cross_width(
+                            &mut ctx,
+                            repeated_element,
+                            super::lower_layout_expression::GridMeasureIndex::RowChild,
+                        );
+                        let measure_at_cross_width = cross_width.is_some();
+                        if sub_component.grid_row_child_cross_width.is_none() {
+                            sub_component.grid_row_child_cross_width = cross_width.map(Into::into);
+                        }
                         // Inner repeater: layout_info is computed at runtime per instance.
                         if let Some(super::lower_to_item_tree::LoweredElement::Repeated {
                             repeated_index,
@@ -867,6 +931,7 @@ fn lower_sub_component(
                         {
                             row_child_templates.push(super::RowChildTemplateInfo::Repeated {
                                 repeater_index: *repeated_index,
+                                measure_at_cross_width,
                             });
                         }
                     }

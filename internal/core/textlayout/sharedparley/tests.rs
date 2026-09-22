@@ -14,13 +14,9 @@ fn layout_text_with_options(text: &str, options: LayoutOptions) -> Layout {
     layout_text_with_builder(text, super::shaping::plain_builder_for_tests(), options)
 }
 
-fn layout_text_with_builder(
-    text: &str,
-    builder: super::shaping::LayoutWithoutLineBreaksBuilder,
-    options: LayoutOptions,
-) -> Layout {
-    // Don't load system fonts: that goes through fontconfig FFI, which Miri
-    // can't execute. Use the bundled Inter font instead.
+// Don't load system fonts: that goes through fontconfig FFI, which Miri
+// can't execute. Use the bundled Inter font instead.
+fn test_font_context() -> parley::FontContext {
     let mut font_ctx = parley::FontContext {
         collection: fontique::Collection::new(fontique::CollectionOptions {
             system_fonts: false,
@@ -34,6 +30,15 @@ fn layout_text_with_builder(
         fontique::GenericFamily::SansSerif,
         families.iter().map(|(id, _)| *id),
     );
+    font_ctx
+}
+
+fn layout_text_with_builder(
+    text: &str,
+    builder: super::shaping::LayoutWithoutLineBreaksBuilder,
+    options: LayoutOptions,
+) -> Layout {
+    let mut font_ctx = test_font_context();
     let paragraphs = create_text_paragraphs(
         &builder,
         &mut font_ctx,
@@ -49,6 +54,24 @@ fn layout_text(text: &str) -> Layout {
 
 fn visual_line_count(text: &str) -> usize {
     layout_text(text).paragraphs.iter().map(|p| p.layout.lines().len()).sum()
+}
+
+#[test]
+fn styled_text_across_a_line_break_shapes() {
+    // The shaper slices the text with the spans it is given, so a span that starts inside a
+    // character panics there (#13548). The style opens at byte 5 of the first paragraph, which
+    // in the second one falls inside its third character.
+    let text = crate::styled_text::StyledText::from_markdown(
+        "\u{44f}\u{44f} **a\n\u{44f}\u{44f}\u{44f}**",
+    )
+    .unwrap();
+    let paragraphs = create_text_paragraphs(
+        &super::shaping::plain_builder_for_tests(),
+        &mut test_font_context(),
+        PlainOrStyledText::Styled(text),
+        Color::default(),
+    );
+    assert_eq!(paragraphs.len(), 2);
 }
 
 #[test]
@@ -68,10 +91,10 @@ fn bidi_selection_spans_are_ascending_in_x() {
             let spans = layout.selection_geometry(
                 start..end,
                 &(PhysicalLength::new(f32::NEG_INFINITY)..PhysicalLength::new(f32::INFINITY)),
+                f32::round,
             );
             saw_line_with_several_spans |= spans.0.len() > 1;
-            for pair in spans.0.windows(2) {
-                let (left, right) = (&pair[0], &pair[1]);
+            for [left, right] in spans.0.array_windows() {
                 if (left.paragraph, left.line) != (right.paragraph, right.line) {
                     continue;
                 }
@@ -86,6 +109,31 @@ fn bidi_selection_spans_are_ascending_in_x() {
     }
     // Otherwise the ranges above stopped producing a split line and this proves nothing.
     assert!(saw_line_with_several_spans, "expected a bidi selection to split into spans");
+}
+
+#[test]
+fn test_text_line_height_matches_shaped_single_line() {
+    for (pixel_size, line_height_factor) in [(12.0, None), (25.5, None), (12.0, Some(1.5))] {
+        let font_request = FontRequest {
+            pixel_size: Some(LogicalLength::new(pixel_size)),
+            line_height_factor,
+            ..Default::default()
+        };
+        let builder = super::shaping::LayoutWithoutLineBreaksBuilder::new(
+            Some(font_request.clone()),
+            TextWrap::NoWrap,
+            None,
+            ScaleFactor::new(1.0),
+        );
+        let shaped = layout_text_with_builder("Hello world", builder, LayoutOptions::default());
+        let fast = text_line_height(&mut test_font_context(), &font_request).unwrap();
+        assert!(
+            (shaped.height.get() - fast.get()).abs() < 0.01,
+            "shaped {} != estimated {} (size {pixel_size}, factor {line_height_factor:?})",
+            shaped.height.get(),
+            fast.get(),
+        );
+    }
 }
 
 #[test]

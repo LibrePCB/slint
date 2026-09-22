@@ -10,8 +10,8 @@ When adding an item or a property, it needs to be kept in sync with different pl
 (This is less than ideal and maybe we can have some automation later)
 
  - It needs to be changed in this module
- - In the compiler: builtins.slint
- - In the interpreter (new item only): dynamic_item_tree.rs
+ - In the compiler: internal/compiler/builtin_elements.rs
+ - In the interpreter (new item only): item_registry.rs
  - For the C++ code (new item only): the cbindgen.rs to export the new item
  - Don't forget to update the documentation
 */
@@ -1241,7 +1241,7 @@ pub struct PropertyAnimation {
 impl Default for PropertyAnimation {
     fn default() -> Self {
         // Defaults for PropertyAnimation are defined here (for internal Rust code doing programmatic animations)
-        // as well as in `builtins.slint` (for generated C++ and Rust code)
+        // as well as in `internal/compiler/builtin_elements.rs` (for generated C++ and Rust code)
         Self {
             delay: 0,
             duration: 0,
@@ -2191,11 +2191,26 @@ macro_rules! builtin_struct_field_default {
     };
 }
 
+/// Expands to the documentation text of a builtin struct field's declared default value:
+/// an intra-doc link to the variant for an enum value, plain code for a literal.
+/// The parentheses an enum value needs to be a single token tree are dropped.
+macro_rules! builtin_struct_field_default_doc {
+    (($($default:tt)*)) => {
+        builtin_struct_field_default_doc!($($default)*)
+    };
+    ($enum:ident :: $value:ident) => {
+        concat!("[`", stringify!($enum), "::", stringify!($value), "`]")
+    };
+    ($default:literal) => {
+        concat!("`", stringify!($default), "`")
+    };
+}
+
 macro_rules! declare_builtin_structs {
     ($(
         $(#[$struct_attr:meta])*
         $vis:vis struct $Name:ident {
-            $( $(#[$field_attr:meta])* $field:ident : $field_type:ident $(= $field_default:expr)?, )*
+            $( $(#[$field_attr:meta])* $field:ident : $field_type:ident $(= $field_default:tt)?, )*
         }
     )*) => {
         $(
@@ -2205,6 +2220,10 @@ macro_rules! declare_builtin_structs {
             pub struct $Name {
                 $(
                     $(#[$field_attr])*
+                    $(
+                        #[doc = ""]
+                        #[doc = concat!("Defaults to ", builtin_struct_field_default_doc!($field_default), ".")]
+                    )?
                     pub $field : $field_type,
                 )*
             }

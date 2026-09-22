@@ -4,6 +4,7 @@
 #pragma once
 
 #include "private/slint_item_tree.h"
+#include "private/slint_platform_internal.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -27,7 +28,7 @@ struct ModelChangeListener
 using ModelPeer = std::weak_ptr<ModelChangeListener>;
 
 template<typename M>
-auto access_array_index(const std::shared_ptr<M> &model, std::ptrdiff_t index)
+auto access_array_index(const std::shared_ptr<M> &model, int index)
 {
     if (!model || index < 0) {
         return decltype(*model->row_data_tracked(index)) {};
@@ -39,37 +40,66 @@ auto access_array_index(const std::shared_ptr<M> &model, std::ptrdiff_t index)
 }
 
 template<typename M>
-long int model_length(const std::shared_ptr<M> &model)
+int model_length(const std::shared_ptr<M> &model)
 {
     if (!model) {
         return 0;
     } else {
         model->track_row_count_changes();
-        return model->row_count();
+        return static_cast<int>(model->row_count());
     }
+}
+
+/// Logs that the `.slint` array function \a function was rejected by a model
+/// that does not support the modification.
+inline void log_model_unsupported(std::string_view function)
+{
+    auto message =
+            SharedString("array.") + function + "(): the model does not support this modification";
+    cbindgen_private::slint_debug(&message);
+}
+
+/// Logs that the `.slint` array function \a function was called with a row index
+/// that is out of the bounds of a model with \a row_count rows.
+inline void log_model_out_of_bounds(std::string_view function, size_t row_count)
+{
+    auto message = SharedString("array.") + function
+            + "(): the row index is out of bounds (the model has "
+            + SharedString::from_number(static_cast<double>(row_count)) + " rows)";
+    cbindgen_private::slint_debug(&message);
 }
 
 template<typename M, typename ModelData>
 void model_push(const std::shared_ptr<M> &model, const ModelData &value)
 {
-    if (model) {
-        model->push_row(value);
+    if (model && !model->push_row(value)) {
+        log_model_unsupported("push");
     }
 }
 
 template<typename M>
-void model_remove(const std::shared_ptr<M> &model, std::ptrdiff_t index)
+void model_remove(const std::shared_ptr<M> &model, int index)
 {
-    if (model) {
-        model->remove_row(index);
+    if (!model) {
+        return;
+    }
+    if (index < 0 || static_cast<size_t>(index) >= model->row_count()) {
+        log_model_out_of_bounds("remove", model->row_count());
+    } else if (!model->remove_row(index)) {
+        log_model_unsupported("remove");
     }
 }
 
 template<typename M, typename ModelData>
-void model_insert(const std::shared_ptr<M> &model, std::ptrdiff_t index, const ModelData &value)
+void model_insert(const std::shared_ptr<M> &model, int index, const ModelData &value)
 {
-    if (model) {
-        model->insert_row(index, value);
+    if (!model) {
+        return;
+    }
+    if (index < 0 || static_cast<size_t>(index) > model->row_count()) {
+        log_model_out_of_bounds("insert", model->row_count());
+    } else if (!model->insert_row(index, value)) {
+        log_model_unsupported("insert");
     }
 }
 
@@ -80,9 +110,9 @@ bool model_any(const std::shared_ptr<M> &model, P predicate)
         return false;
     }
     model->track_any_change();
-    long int count = model->row_count();
+    int count = static_cast<int>(model->row_count());
 
-    for (long int i = 0; i < count; ++i) {
+    for (int i = 0; i < count; ++i) {
         if (const auto data = model->row_data(i); data && predicate(*data)) {
             return true;
         }
@@ -98,9 +128,9 @@ bool model_all(const std::shared_ptr<M> &model, P predicate)
         return true;
     }
     model->track_any_change();
-    long int count = model->row_count();
+    int count = static_cast<int>(model->row_count());
 
-    for (long int i = 0; i < count; ++i) {
+    for (int i = 0; i < count; ++i) {
         // A row without data is skipped, as it is by model_any and model_find_index,
         // rather than failing the whole model.
         if (const auto data = model->row_data(i); data && !predicate(*data)) {
@@ -118,9 +148,9 @@ int32_t model_find_index(const std::shared_ptr<M> &model, P predicate)
         return -1;
     }
     model->track_any_change();
-    long int count = model->row_count();
+    int count = static_cast<int>(model->row_count());
 
-    for (long int i = 0; i < count; ++i) {
+    for (int i = 0; i < count; ++i) {
         if (const auto data = model->row_data(i); data && predicate(*data)) {
             return static_cast<int32_t>(i);
         }
@@ -177,44 +207,26 @@ public:
     };
 
     /// Adds a new row with the given \a data at the end of the model.
+    /// Returns true when the row was added, false when the model rejected it.
     ///
-    /// If the model cannot support data changes, then it is ok to do nothing.
-    /// The default implementation will print a warning to stderr.
-    ///
-    /// If the model can update the data, it should also call `notify_row_added`
-    virtual void push_row(const ModelData &)
-    {
-#ifndef SLINT_FEATURE_FREESTANDING
-        std::cerr << "Model::push_row was called on a read-only model" << std::endl;
-#endif
-    };
+    /// The default implementation inserts the row after the last one with `insert_row`,
+    /// so implementing `insert_row` is enough to support push.
+    virtual bool push_row(const ModelData &data) { return insert_row(row_count(), data); }
 
     /// Removes the row at the given \a index from the model.
+    /// Returns true when the row was removed, false when the model rejected it.
     ///
-    /// If the model cannot support data changes, then it is ok to do nothing.
-    /// The default implementation will print a warning to stderr.
-    ///
-    /// If the model can update the data, it should also call `notify_row_removed`
-    virtual void remove_row(std::ptrdiff_t)
-    {
-#ifndef SLINT_FEATURE_FREESTANDING
-        std::cerr << "Model::remove_row was called on a read-only model" << std::endl;
-#endif
-    };
+    /// The default implementation does nothing and returns false. A model that
+    /// supports removing rows should also call `notify_row_removed`.
+    virtual bool remove_row(size_t) { return false; }
 
     /// Inserts a new row with the given \a data at the given \a index, shifting the
     /// following rows by one.
+    /// Returns true when the row was inserted, false when the model rejected it.
     ///
-    /// If the model cannot support data changes, then it is ok to do nothing.
-    /// The default implementation will print a warning to stderr.
-    ///
-    /// If the model can update the data, it should also call `notify_row_added`
-    virtual void insert_row(std::ptrdiff_t, const ModelData &)
-    {
-#ifndef SLINT_FEATURE_FREESTANDING
-        std::cerr << "Model::insert_row was called on a read-only model" << std::endl;
-#endif
-    };
+    /// The default implementation does nothing and returns false. A model that
+    /// supports inserting rows should also call `notify_row_added`.
+    virtual bool insert_row(size_t, const ModelData &) { return false; }
 
     /// \private
     /// Internal function called by the view to register itself
@@ -406,20 +418,22 @@ public:
         }
     }
 
-    void push_row(const ModelData &value) override { push_back(value); }
-
-    void remove_row(std::ptrdiff_t index) override
+    bool remove_row(size_t index) override
     {
-        if (index >= 0 && index < static_cast<std::ptrdiff_t>(data.size())) {
-            erase(static_cast<size_t>(index));
+        if (index >= data.size()) {
+            return false;
         }
+        erase(index);
+        return true;
     }
 
-    void insert_row(std::ptrdiff_t index, const ModelData &value) override
+    bool insert_row(size_t index, const ModelData &value) override
     {
-        if (index >= 0 && index <= static_cast<std::ptrdiff_t>(data.size())) {
-            insert(static_cast<size_t>(index), value);
+        if (index > data.size()) {
+            return false;
         }
+        insert(index, value);
+        return true;
     }
 
     /// Append a new row with the given value
@@ -547,7 +561,8 @@ struct FilterModelInner : private_api::ModelChangeListener
 
         auto mapped_removed_index =
                 (mapped_row_start != accepted_rows.end() && *mapped_row_start == index)
-                ? std::optional<int>(mapped_row_start - accepted_rows.begin())
+                ? std::optional<size_t>(
+                          static_cast<size_t>(mapped_row_start - accepted_rows.begin()))
                 : std::nullopt;
 
         auto it = accepted_rows.erase(mapped_row_start, mapped_row_end);
@@ -757,10 +772,13 @@ struct SortModelInner : private_api::ModelChangeListener
             return;
         }
 
-        // Adjust the existing sorted row indices to match the updated source model
-        for (auto &row : sorted_rows) {
-            if (row >= first_inserted_row)
-                row += count;
+        // Adjust the existing sorted row indices to match the updated source model.
+        // Skipped for an append: every existing index is below `first_inserted_row` then.
+        if (first_inserted_row + count < source_model->row_count()) {
+            for (auto &row : sorted_rows) {
+                if (row >= first_inserted_row)
+                    row += count;
+            }
         }
 
         for (size_t row = first_inserted_row; row < first_inserted_row + count; ++row) {
@@ -819,18 +837,22 @@ struct SortModelInner : private_api::ModelChangeListener
         std::vector<size_t> removed_rows;
         removed_rows.reserve(count);
 
-        for (auto it = sorted_rows.begin(); it != sorted_rows.end();) {
-            if (*it >= first_removed_row) {
-                if (*it < first_removed_row + count) {
-                    removed_rows.push_back(std::distance(sorted_rows.begin(), it));
-                    it = sorted_rows.erase(it);
+        // `write` is the position the removed row would have had with one-at-a-time
+        // removal, so the emitted notifications are unchanged.
+        size_t write = 0;
+        for (size_t read = 0; read < sorted_rows.size(); ++read) {
+            size_t sort_index = sorted_rows[read];
+            if (sort_index >= first_removed_row) {
+                if (sort_index < first_removed_row + count) {
+                    removed_rows.push_back(write);
                     continue;
-                } else {
-                    *it -= count;
                 }
+                sort_index -= count;
             }
-            ++it;
+            sorted_rows[write] = sort_index;
+            ++write;
         }
+        sorted_rows.resize(write);
 
         for (auto removed_row : removed_rows) {
             target_model.notify_row_removed(removed_row, 1);
@@ -1316,37 +1338,10 @@ public:
         return std::numeric_limits<uint64_t>::max();
     }
 
-    /// Call the visitor for the root of the given instance.
-    /// Used when the repeated element has a dynamic z binding and the instances are
-    /// visited in the z order of the parent's children.
-    uint64_t visit_instance(uint32_t instance, TraversalOrder order,
-                            private_api::ItemVisitorRefMut visitor) const
-    {
-        if (inner && instance < inner->data.size() && inner->data[instance].ptr) {
-            auto ref = item_at(instance);
-            if (ref.vtable->visit_children_item(ref, -1, order, visitor)
-                != std::numeric_limits<uint64_t>::max()) {
-                return instance;
-            }
-        }
-        return std::numeric_limits<uint64_t>::max();
-    }
-
-    /// Visit a single instance when `instance` is a specific index (coming from a
-    /// z-ordered traversal), or all the instances when it is the maximum value.
-    uint64_t visit_maybe_instance(uint32_t instance, TraversalOrder order,
-                                  private_api::ItemVisitorRefMut visitor) const
-    {
-        if (instance == std::numeric_limits<uint32_t>::max()) {
-            return visit(order, visitor);
-        } else {
-            return visit_instance(instance, order, visitor);
-        }
-    }
-
-    /// Call `cb` with the index and the z value of every instance, when the repeated
-    /// element has a dynamic z binding (the generated component has a `z_order()`
-    /// member function).
+    /// Call `cb` with the model row index and the z value of every instance, when the
+    /// repeated element has a dynamic z binding (the generated component has a
+    /// `z_order()` member function). The row index is the one accepted by
+    /// `instance_at` (and thus by the `get_subtree` vtable entry).
     /// Also registers model dependencies so the current tracking scope is notified
     /// when the model changes.
     template<typename F>
@@ -1355,8 +1350,9 @@ public:
         track_model_changes();
         if (!inner)
             return;
+        const auto offset = inner->layout_state.offset;
         for (std::size_t i = 0; i < inner->data.size(); ++i) {
-            cb(uint32_t(i), inner->data[i].ptr ? (*inner->data[i].ptr)->z_order() : 0.f);
+            cb(uint32_t(offset + i), inner->data[i].ptr ? (*inner->data[i].ptr)->z_order() : 0.f);
         }
     }
 
@@ -1504,14 +1500,6 @@ public:
             }
         }
         return std::numeric_limits<uint64_t>::max();
-    }
-
-    /// Same as visit: a conditional has at most one instance, so a specific
-    /// `instance` from a z-ordered traversal can only be 0.
-    uint64_t visit_maybe_instance(uint32_t, TraversalOrder order,
-                                  private_api::ItemVisitorRefMut visitor) const
-    {
-        return visit(order, visitor);
     }
 
     /// Call `cb` with the index and the z value of the instance if the condition is

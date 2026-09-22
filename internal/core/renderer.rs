@@ -6,6 +6,7 @@ use alloc::rc::Rc;
 use core::pin::Pin;
 
 use crate::api::PlatformError;
+#[cfg(feature = "std")]
 use crate::graphics::{Rgba8Pixel, SharedPixelBuffer};
 use crate::item_tree::ItemTreeRef;
 use crate::items::{ItemRc, TextWrap};
@@ -106,7 +107,12 @@ pub trait RendererSealed {
     ) -> Option<ContentWidths> {
         #[cfg(feature = "shared-parley")]
         {
-            crate::textlayout::sharedparley::text_content_widths(self, text_item, item_rc)
+            crate::textlayout::sharedparley::text_content_widths(
+                self,
+                text_item,
+                item_rc,
+                self.text_layout_cache(),
+            )
         }
         #[cfg(not(feature = "shared-parley"))]
         {
@@ -161,6 +167,25 @@ pub trait RendererSealed {
                 crate::textlayout::sharedparley::font_metrics(&mut font_ctx, font_request)
             })
             .unwrap_or_default()
+    }
+
+    /// The height of one line of text: what a shaped single-line layout reports, without
+    /// shaping. `None` means the caller must measure through [`Self::text_size`].
+    fn text_line_height(
+        &self,
+        font_request: crate::graphics::FontRequest,
+    ) -> Option<LogicalLength> {
+        #[cfg(feature = "shared-parley")]
+        {
+            let ctx = self.slint_context()?;
+            let mut font_ctx = ctx.font_context().borrow_mut();
+            crate::textlayout::sharedparley::text_line_height(&mut font_ctx, &font_request)
+        }
+        #[cfg(not(feature = "shared-parley"))]
+        {
+            let _ = font_request;
+            None
+        }
     }
 
     /// Returns the (UTF-8) byte offset in the text property that refers to the character that contributed to
@@ -348,6 +373,7 @@ pub trait RendererSealed {
 
     /// Re-implement this function to support Window::take_snapshot(), i.e. return
     /// the contents of the window in an image buffer.
+    #[cfg(feature = "std")]
     fn take_snapshot(&self) -> Result<SharedPixelBuffer<Rgba8Pixel>, PlatformError> {
         Err("WindowAdapter::take_snapshot is not implemented by the platform".into())
     }

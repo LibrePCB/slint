@@ -108,8 +108,12 @@ pub fn generate(
         }
         #[cfg(feature = "slint-sc")]
         OutputFormat::SlintSc => {
-            let output = slint_sc::generate(doc, compiler_config)?;
-            write!(destination, "{output}")?;
+            let generated = slint_sc::generate(doc, compiler_config)?;
+            write!(destination, "{}", generated.code)?;
+            if let (true, Some(path)) = (compiler_config.coverage, destination_path) {
+                let map = path.with_extension("slintcov");
+                crate::fileaccess::write_file_if_changed(&map, generated.coverage_map.as_bytes())?;
+            }
         }
         OutputFormat::Interpreter => {
             return Err(std::io::Error::other(
@@ -522,7 +526,7 @@ pub fn to_kebab_case(str: &str) -> String {
 }
 
 /// The number of arguments taken by the accessibility action of the given name, where the name
-/// is the `AccessibilityAction` variant in pascal case (such as `SetSelection`).
+/// is the `AccessibilityAction` variant in pascal case (such as `SetSelectionOffsets`).
 ///
 /// The `AccessibilityAction` enum of the run-time library mirrors the `accessible-action-*`
 /// callbacks declared in the type register: a variant has one field per callback argument, so

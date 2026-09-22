@@ -329,15 +329,15 @@ def class_members(
 
     Includes public members inherited from base classes that live in the
     package (e.g. `Model` inherits `row_count` from the native `PyModelBase`),
-    mirroring the fix-up the old pdoc generator performed by hand. `init_self`
-    and underscore-prefixed names are excluded."""
+    mirroring the fix-up the old pdoc generator performed by hand.
+    Underscore-prefixed names are excluded."""
     seen: set[str] = set()
     members: list[griffe.Object] = []
     for _, m in public_named_members(cls):
         seen.add(m.name)
         members.append(m)
     for name, inherited in cls.inherited_members.items():
-        if name.startswith("_") or name == "init_self" or name in seen:
+        if name.startswith("_") or name in seen:
             continue
         resolved = resolve(inherited)
         if resolved is None or is_private_doc(resolved):
@@ -417,12 +417,15 @@ def render_class(
     if is_enum(cls):
         lines += ["## Values", ""]
         for m in members:
+            # The manifest points cross-references to a member at this anchor,
+            # so every value carries the id its `<XRef>` links to.
+            value = f'<span id="{m.name}">`{m.name}`</span>'
             if m.docstring:
                 lines.append(
-                    f"- **`{m.name}`** — {docstring_to_mdx(m.docstring.value, manifest)}"
+                    f"- **{value}** — {docstring_to_mdx(m.docstring.value, manifest)}"
                 )
             else:
-                lines.append(f"- **`{m.name}`**")
+                lines.append(f"- **{value}**")
         lines.append("")
         return "\n".join(lines)
 

@@ -138,7 +138,7 @@ pub async fn run_passes(
         );
         lower_states::lower_states(component, &symbol_counters, &mut forwarded_references, diag);
         lower_text_input_interface::lower_text_input_interface(component);
-        compile_paths::compile_paths(component, &doc.local_registry, diag);
+        compile_paths::check_derived_paths(component, &doc.local_registry, diag);
         repeater_component::process_repeater_components(component);
         lower_popups::lower_popups(component, &doc.local_registry, diag);
         collect_init_code::collect_init_code(component);
@@ -164,17 +164,20 @@ pub async fn run_passes(
     }
 
     doc.visit_all_used_components(|component| {
+        // After inlining, so that path elements added through `@children` or to a
+        // component inheriting `Path` are direct children of the `Path` element
+        compile_paths::compile_paths(component, &doc.local_registry, diag);
         border_radius::handle_border_radius(component, diag);
         check_drag_area::check_drag_area(component, diag);
         deprecated_rotation_origin::handle_rotation_origin(component, diag);
         flickable::handle_flickable(component, &global_type_registry.borrow());
         lower_layout::lower_layouts(component, type_loader, &style_metrics, diag);
         default_geometry::default_geometry(component, diag, &symbol_counters);
+        crate::layout::mark_repeated_cells_child_of_layout(component);
         lower_layout::optimize_single_cell_layouts(component);
         lower_layout::synthesize_layoutinfo_v_with_constraint(component);
-        lower_layout::synthesize_layoutinfo_h_with_constraint(component);
         lower_absolute_coordinates::lower_absolute_coordinates(component);
-        z_order::reorder_by_z_order(component, diag);
+        z_order::reorder_by_z_order(component);
         lower_property_to_element::lower_property_to_element(
             component,
             core::iter::once("opacity"),
@@ -194,12 +197,12 @@ pub async fn run_passes(
             diag,
         );
         visible::handle_visible(component, &global_type_registry.borrow(), diag);
-        lower_shadows::lower_shadow_properties(component, &doc.local_registry, diag);
         lower_property_to_element::lower_transform_properties(
             component,
             &global_type_registry.borrow(),
             diag,
         );
+        lower_shadows::lower_shadow_properties(component, &doc.local_registry, diag);
         clip::handle_clip(component, &global_type_registry.borrow(), diag);
         if type_loader.compiler_config.accessibility {
             lower_accessibility::lower_accessibility_properties(component, diag);
@@ -307,10 +310,11 @@ pub async fn run_passes(
     .await;
 
     #[cfg(feature = "bundle-translations")]
-    if let Some(path) = &type_loader.compiler_config.translation_path_bundle {
+    if let Some(path) = &type_loader.compiler_config.bundled_translations_path {
         match crate::translations::TranslationsBuilder::load_translations(
             path,
             type_loader.compiler_config.translation_domain.as_deref().unwrap_or(""),
+            &mut diag.all_loaded_files,
         ) {
             Ok(builder) => {
                 doc.translation_builder = Some(builder);

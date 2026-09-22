@@ -9,8 +9,9 @@
 //! into one type, so a value of one silently becomes a value of the other (see #6880, #9358).
 //! Renaming the extra declarations here keeps each one distinct.
 
+use crate::diagnostics::SourceLocation;
 use crate::expression_tree::Expression;
-use crate::langtype::{DeclNode, Struct, StructName, Type, visit_declared_types};
+use crate::langtype::{Struct, StructName, Type, visit_declared_types};
 use crate::object_tree::*;
 use smol_str::{SmolStr, format_smolstr};
 use std::cell::RefCell;
@@ -19,11 +20,11 @@ use std::sync::Arc;
 
 /// Identifies a declaration by its source location, so two references to the same declared type
 /// share an identity while two same-named declarations in different places do not.
-type Identity = (SmolStr, u32, u32);
+type Identity = (SmolStr, usize);
 
-fn identity(node: &DeclNode) -> Identity {
-    let range = node.text_range();
-    (node.source_file().path().to_string_lossy().into(), range.start().into(), range.end().into())
+fn identity(node: &SourceLocation) -> Identity {
+    let file = node.source_file.as_ref().map(|f| f.path().to_string_lossy().into());
+    (file.unwrap_or_default(), node.span.offset)
 }
 
 type Renames = HashMap<Identity, SmolStr>;
@@ -97,12 +98,14 @@ pub fn assign_unique_declared_type_names(doc: &mut Document) {
     // as a deprecated alias.
     let export_names: BTreeSet<SmolStr> =
         doc.exports.iter().map(|(name, _)| name.name.clone()).collect();
+    let mut renamed_on_export = BTreeSet::new();
     let mut deprecated_type_aliases = Vec::new();
     for (export_name, component_or_type) in doc.exports.iter() {
         if let itertools::Either::Right(ty) = component_or_type
             && let Some((type_name, id)) = declared_name_and_identity(ty)
             && type_name != export_name.name
             && !export_names.contains(&type_name)
+            && renamed_on_export.insert(id.clone())
         {
             renames.insert(id, export_name.name.clone());
             deprecated_type_aliases.push((type_name, export_name.name.clone()));

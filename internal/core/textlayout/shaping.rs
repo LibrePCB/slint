@@ -89,6 +89,7 @@ pub trait TextShaper {
         + core::cmp::PartialOrd
         + core::ops::Mul<Self::LengthPrimitive, Output = Self::Length>
         + core::ops::Div<Self::LengthPrimitive, Output = Self::Length>
+        + DivCount
         + core::fmt::Debug;
     // Shapes the given string and emits the result into the given glyphs buffer.
     fn shape_text<GlyphStorage: core::iter::Extend<Glyph<Self::Length>>>(
@@ -97,6 +98,35 @@ pub trait TextShaper {
         glyphs: &mut GlyphStorage,
     );
     fn glyph_for_char(&self, ch: char) -> Option<Glyph<Self::Length>>;
+}
+
+/// How many times one length fits into another of the same unit.
+/// euclid's `Length / Length` produces a `Scale` rather than a plain number, so the division the
+/// paragraph layout needs is spelled out here instead of as a `core::ops::Div` bound.
+pub trait DivCount {
+    /// The number of whole `divisor`s in `self`, truncated, and zero when that count is negative.
+    /// `divisor` must not be zero.
+    fn div_count(self, divisor: Self) -> usize;
+}
+
+impl DivCount for f32 {
+    fn div_count(self, divisor: Self) -> usize {
+        // Casts from float saturate, so a negative or NaN ratio ends up at zero.
+        (self / divisor) as usize
+    }
+}
+
+impl DivCount for i16 {
+    fn div_count(self, divisor: Self) -> usize {
+        // Widen so that i16::MIN / -1 can't overflow.
+        (i32::from(self) / i32::from(divisor)).max(0) as usize
+    }
+}
+
+impl<T: DivCount + Clone, U> DivCount for euclid::Length<T, U> {
+    fn div_count(self, divisor: Self) -> usize {
+        self.get().div_count(divisor.get())
+    }
 }
 
 pub trait FontMetrics<Length: Copy + core::ops::Sub<Output = Length>> {
@@ -216,6 +246,19 @@ impl<Length> ShapeBuffer<Length> {
 
                 layout.font.shape_text(&text[*run_start..run_end], &mut glyphs);
 
+                // Make the cluster index absolute.
+                //
+                // A shaper sees one run's slice, so the offset it reports is
+                // relative to that slice. Everything downstream compares these
+                // against indices into the whole string: TextLine::byte_range,
+                // a selection range, and the byte offset a click maps to. This
+                // is the one place the run's start is still in hand, and
+                // folding it in here makes TextRun::byte_range and the glyph
+                // offsets mean the same thing.
+                for glyph in &mut glyphs[glyphs_start..] {
+                    glyph.text_byte_offset += *run_start;
+                }
+
                 if let Some(letter_spacing) = layout.letter_spacing
                     && glyphs.len() > glyphs_start
                 {
@@ -244,6 +287,24 @@ impl<Length> ShapeBuffer<Length> {
 
         Self { glyphs, text_runs }
     }
+}
+
+#[test]
+fn test_div_count() {
+    assert_eq!(9.0_f32.div_count(3.0), 3);
+    assert_eq!(10.0_f32.div_count(3.0), 3);
+    assert_eq!((-10.0_f32).div_count(3.0), 0);
+    assert_eq!(3.0_f32.div_count(10.0), 0);
+    assert_eq!(f32::NAN.div_count(16.0), 0);
+
+    assert_eq!(i16::MIN.div_count(-1), 32768);
+
+    type IntLen = euclid::Length<i16, euclid::UnknownUnit>;
+    assert_eq!(IntLen::new(10).div_count(IntLen::new(3)), 3);
+    assert_eq!(IntLen::new(-10).div_count(IntLen::new(3)), 0);
+
+    type FloatLen = euclid::Length<f32, euclid::UnknownUnit>;
+    assert_eq!(FloatLen::new(10.).div_count(FloatLen::new(3.)), 3);
 }
 
 #[test]
@@ -398,6 +459,43 @@ fn test_shaping() {
             assert!(shaped_glyphs[2].glyph_id.is_some());
             assert_eq!(shaped_glyphs[2].text_byte_offset, 2);
         }
+    });
+}
+
+/// The byte offset on a glyph is an index into the whole string, on every run.
+///
+/// A shaper sees one run's slice, so the offset it reports is relative to that slice.
+/// Text that changes script part way through is more than one run,
+/// and a line that opens with a bracketed number is exactly that shape.
+/// Line breaking, selection and the byte offset a click maps to
+/// all compare these offsets against indices into the whole string.
+#[test]
+#[cfg_attr(
+    not(feature = "unicode-script"),
+    ignore = "Not supported without the unicode-script feature"
+)]
+fn test_byte_offsets_are_absolute() {
+    with_default_font(|face| {
+        // `Common` script up to the space, `Latin` from `a` on.
+        let text = "[01] abc";
+        let layout = TextLayout { font: &face, letter_spacing: None, line_height: None };
+        let buffer = ShapeBuffer::new(&layout, text);
+
+        assert_eq!(buffer.text_runs.len(), 2, "expected a run boundary at the script change");
+        let second_run = &buffer.text_runs[1];
+        assert_eq!(second_run.byte_range.start, 5);
+
+        // Every offset is an index into `text`, and the first glyph of the second
+        // run points at the character that run starts with.
+        for glyph in &buffer.glyphs {
+            assert!(
+                text.is_char_boundary(glyph.text_byte_offset),
+                "{} is not an index into {text:?}",
+                glyph.text_byte_offset
+            );
+        }
+        assert_eq!(buffer.glyphs[second_run.glyph_range.start].text_byte_offset, 5);
+        assert_eq!(buffer.glyphs.last().unwrap().text_byte_offset, text.len() - 1);
     });
 }
 

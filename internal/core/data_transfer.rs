@@ -255,6 +255,15 @@ impl DataTransfer {
         }
     }
 
+    /// Whether this transfer carries data another application could receive: plain text,
+    /// an image or file paths. User data stays within the process, so it doesn't count.
+    ///
+    /// Reads the payload as a whole rather than testing each kind, so a payload added to
+    /// [`DataTransferInner`] later counts without touching the callers.
+    pub(crate) fn has_native_data(&self) -> bool {
+        self.inner.is_some()
+    }
+
     /// Returns `true` if this data transfer advertises that it is readable as an [`Image`].
     ///
     /// This does not necessarily mean that `image` will return `Ok`, as an I/O error
@@ -325,7 +334,7 @@ impl DataTransfer {
     #[cfg(feature = "std")]
     pub fn file_paths(
         &self,
-    ) -> Result<impl ExactSizeIterator<Item = &std::path::Path> + '_, DataTransferError> {
+    ) -> Result<impl Iterator<Item = &std::path::Path> + '_, DataTransferError> {
         self.inner
             .as_ref()
             .and_then(|inner| inner.file_paths.as_ref())
@@ -406,6 +415,27 @@ mod tests {
         assert!(dt.is_empty());
         assert!(dt.inner.is_none());
         assert_eq!(dt, DataTransfer::default());
+    }
+
+    #[test]
+    fn every_payload_counts_as_native_data() {
+        assert!(!DataTransfer::default().has_native_data());
+
+        for set in [
+            (|dt: &mut DataTransfer| {
+                dt.set_plain_text("hello".into());
+            }) as fn(&mut DataTransfer),
+            |dt| {
+                dt.set_image(Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::new(2, 2)));
+            },
+            |dt| {
+                dt.set_file_paths(["/tmp/a"]);
+            },
+        ] {
+            let mut dt = DataTransfer::default();
+            set(&mut dt);
+            assert!(dt.has_native_data());
+        }
     }
 
     #[test]

@@ -206,9 +206,9 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
-#[cfg(not(feature = "compat-1-2"))]
+#[cfg(not(feature = "compat-1-18"))]
 compile_error!(
-    "The feature `compat-1-2` must be enabled to ensure \
+    "The feature `compat-1-18` must be enabled to ensure \
     forward compatibility with future version of this crate"
 );
 
@@ -229,8 +229,8 @@ pub use i_slint_core::items::StandardListViewItem;
 #[deprecated(note = "Use slint::language::TableColumn instead")]
 pub use i_slint_core::items::TableColumn;
 pub use i_slint_core::model::{
-    FilterModel, MapModel, Model, ModelExt, ModelNotify, ModelPeer, ModelRc, ModelTracker,
-    ReverseModel, SortModel, VecModel,
+    FilterModel, MapModel, Model, ModelError, ModelExt, ModelNotify, ModelPeer, ModelRc,
+    ModelTracker, ReverseModel, SortModel, VecModel,
 };
 pub use i_slint_core::styled_text::StyledText;
 #[cfg(feature = "std")]
@@ -461,7 +461,7 @@ pub mod platform {
         pub use i_slint_renderer_femtovg::opengl::OpenGLInterface;
     }
 
-    /// This module contains the [`skia_renderer::SkiaWGPURenderer`] and related types.
+    /// This module contains the Skia WGPU renderers and related types.
     ///
     /// It is only enabled when the `renderer-skia` Slint feature is enabled.
     #[cfg(all(
@@ -477,6 +477,7 @@ pub mod platform {
         pub use i_slint_renderer_skia::SkiaWGPU29Renderer;
         #[cfg(feature = "unstable-wgpu-30")]
         pub use i_slint_renderer_skia::SkiaWGPU30Renderer;
+        #[allow(deprecated)]
         pub use i_slint_renderer_skia::SkiaWGPURenderer;
     }
 
@@ -492,7 +493,7 @@ pub mod platform {
 #[i_slint_core_macros::slint_doc]
 /// This module contains some of the enums and structs from the Slint language.
 ///
-/// See also the list of [global structs and enums](slint:StructType)
+/// See also the list of [global structs and enums](slint:struct)
 pub mod language {
     macro_rules! export_builtin_structs {
         ($(
@@ -534,7 +535,7 @@ pub mod android;
 /// Helper type that helps checking that the generated code is generated for the right version
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
-pub struct VersionCheck_1_18_0;
+pub struct VersionCheck_1_19_0;
 
 #[cfg(doctest)]
 mod compile_fail_tests;
@@ -586,7 +587,7 @@ pub mod wgpu_30 {
     //!
     //! `Cargo.toml`:
     //! ```toml
-    //! slint = { version = "~1.18", features = ["unstable-wgpu-30"] }
+    //! slint = { version = "~1.19", features = ["unstable-wgpu-30"] }
     //! ```
     //!
     //! `main.rs`:
@@ -673,7 +674,7 @@ pub mod winit_030 {
     //!
     //! `Cargo.toml`:
     //! ```toml
-    //! slint = { version = "~1.18", features = ["unstable-winit-030"] }
+    //! slint = { version = "~1.19", features = ["unstable-winit-030"] }
     //! ```
     //!
     //! `main.rs`:
@@ -721,7 +722,7 @@ pub mod winit_030 {
 
     pub use i_slint_backend_winit::{
         CustomApplicationHandler, EventLoopBuilder, EventResult, SlintEvent, WinitWindowAccessor,
-        winit,
+        invoke_from_active_event_loop, winit,
     };
 
     #[deprecated(note = "Renamed to `EventResult`")]
@@ -754,7 +755,7 @@ pub mod fontique_011 {
     ///
     /// `Cargo.toml`:
     /// ```toml
-    /// slint = { version = "~1.18", features = ["unstable-fontique-011"] }
+    /// slint = { version = "~1.19", features = ["unstable-fontique-011"] }
     /// ```
     ///
     /// `main.rs`:
@@ -777,10 +778,9 @@ pub mod fontique_011 {
     /// }
     /// ```
     pub fn shared_collection() -> fontique::Collection {
-        i_slint_core::with_global_context(
-            || panic!("slint platform not initialized"),
-            |ctx| ctx.font_context().borrow().collection.clone(),
-        )
+        i_slint_backend_selector::with_global_context(|ctx| {
+            ctx.font_context().borrow().collection.clone()
+        })
         .unwrap()
     }
 }

@@ -150,7 +150,17 @@ fn builtin_structs(path: &Path) -> anyhow::Result<()> {
                         "f32" | "Coord" => "float",
                         other => other,
                     };
-                    writeln!(file, "    {} {}{{ {} }};", field_type, stringify!($field), stringify!($($field_default)*))?;
+                    // The raw tokens of the default value stringify with spaces, such as
+                    // `CapitalizationMode :: Sentences`; the header reads better without them.
+                    let default_value: String = stringify!($($field_default)*)
+                        .chars().filter(|c| !c.is_whitespace()).collect();
+                    // Doxygen documents the attribute without its initializer, so document
+                    // the default value in the comment too.
+                    if !default_value.is_empty() {
+                        let documented = default_value.trim_matches(|c| c == '(' || c == ')');
+                        writeln!(file, "    /// Defaults to `{documented}`.")?;
+                    }
+                    writeln!(file, "    {} {}{{ {} }};", field_type, stringify!($field), default_value)?;
                 )*
                 writeln!(file, "    /// \\private")?;
                 writeln!(file, "    {}", format!("friend bool operator==(const {name}&, const {name}&) = default;", name = stringify!($Name)))?;
@@ -729,7 +739,7 @@ fn gen_corelib(
             }",
         ),
         (
-            vec!["MouseEvent", "TouchPhase"],
+            vec!["MouseEvent", "BackendMouseEvent", "TouchPhase"],
             "slint_events_internal.h",
             "#include \"private/slint_point.h\"
             #include \"private/slint_builtin_structs_internal.h\"
@@ -741,7 +751,7 @@ fn gen_corelib(
             }",
         ),
         (
-            vec!["Keys", "KeysInner", "slint_keys_to_string", "slint_keys", "slint_keys_from_parts"],
+            vec!["Keys", "KeysInner", "slint_keys_to_string", "slint_keys", "slint_keys_from_parts", "slint_keys_to_parts"],
             "slint_keys_internal.h",
             "#include \"private/slint_builtin_structs.h\"\n\
             namespace slint::cbindgen_private::types {\n\
@@ -759,6 +769,7 @@ fn gen_corelib(
             "slint_keys_to_string",
             "slint_keys",
             "slint_keys_from_parts",
+            "slint_keys_to_parts",
             "slint_visit_item_tree",
             "slint_windowrc_drop",
             "slint_windowrc_clone",
@@ -926,7 +937,7 @@ fn gen_corelib(
     );
     config.export.body.insert(
         "EasingCurve".to_owned(),
-        "    constexpr EasingCurve(EasingCurve::Tag tag = Tag::Linear, float a = 0, float b = 0, float c = 1, float d = 1) : tag(tag), cubic_bezier{{a,b,c,d}} {}".into()
+        "    constexpr EasingCurve(EasingCurve::Tag tag = Tag::Linear, float a = 0, float b = 0, float c = 1, float d = 1) : tag(tag), cubic_bezier{{a,b,c,d}} { if (tag == Tag::Spring) { spring._0 = a; } }".into()
     );
     config.export.body.insert(
         "LayoutInfo".to_owned(),
@@ -1044,6 +1055,7 @@ namespace slint {
         struct ItemVTable;
         using types::IntRect;
         using types::Size;
+        using types::BackendMouseEvent;
         using types::MouseEvent;
 
         template<typename T> struct Option;
@@ -1323,7 +1335,8 @@ declare_features! {
     backend_winit_x11
     backend_winit_wayland
     backend_linuxkms
-    backend_linuxkms_noseat
+    backend_linuxkms_libseat
+    backend_linuxkms_libinput
     renderer_femtovg
     renderer_skia
     renderer_skia_opengl

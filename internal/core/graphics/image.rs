@@ -133,6 +133,11 @@ impl<Pixel: Clone> SharedPixelBuffer<Pixel> {
     /// Creates a new SharedPixelBuffer by cloning and converting pixels from an existing
     /// slice. This function is useful when another crate was used to allocate an image
     /// and you would like to convert it for use in Slint.
+    ///
+    /// The slice must hold exactly `width * height * bytes_per_pixel` bytes,
+    /// where `bytes_per_pixel` is the size of the target pixel type: 4 for [`Rgba8Pixel`], 3 for [`Rgb8Pixel`].
+    /// This panics otherwise.
+    #[track_caller]
     pub fn clone_from_slice<SourcePixelType>(
         pixel_slice: &[SourcePixelType],
         width: u32,
@@ -142,7 +147,13 @@ impl<Pixel: Clone> SharedPixelBuffer<Pixel> {
         [SourcePixelType]: rgb::AsPixels<Pixel>,
     {
         use rgb::AsPixels;
-        Self { width, height, data: pixel_slice.as_pixels().into() }
+        let data: SharedVector<Pixel> = pixel_slice.as_pixels().into();
+        assert_eq!(
+            data.len() as u64,
+            width as u64 * height as u64,
+            "SharedPixelBuffer::clone_from_slice: the slice does not cover the requested {width}x{height} pixels",
+        );
+        Self { width, height, data }
     }
 }
 
@@ -152,6 +163,18 @@ pub type Rgb8Pixel = rgb::RGB8;
 /// Convenience alias for a pixel with four color channels (red, green, blue and alpha), each
 /// encoded as u8.
 pub type Rgba8Pixel = rgb::RGBA8;
+
+impl From<crate::Color> for Rgb8Pixel {
+    fn from(value: crate::Color) -> Self {
+        Self { r: value.red(), g: value.green(), b: value.blue() }
+    }
+}
+
+impl From<crate::Color> for Rgba8Pixel {
+    fn from(value: crate::Color) -> Self {
+        Self { r: value.red(), g: value.green(), b: value.blue(), a: value.alpha() }
+    }
+}
 
 /// SharedImageBuffer is a container for images that are stored in CPU accessible memory.
 ///
@@ -587,8 +610,8 @@ impl ImageInner {
                 crate::debug_log!("Compressed SVG (.svgz) is not supported on the web");
                 return None;
             }
-            return htmlimage::HTMLImage::new_from_data(data.as_slice(), mime_type)
-                .map(|html_image| ImageInner::HTMLImage(vtable::VRc::new(html_image)));
+            htmlimage::HTMLImage::new_from_data(data.as_slice(), mime_type)
+                .map(|html_image| ImageInner::HTMLImage(vtable::VRc::new(html_image)))
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -862,16 +885,6 @@ impl Image {
         self.render_to_rgba8(None)
     }
 
-    /// Same as [`Self::to_rgba8`], but scalable sources (such as SVGs) are rasterized to
-    /// `target_size` (in physical pixels) instead of their intrinsic size.
-    /// Returns None if the pixels cannot be obtained.
-    pub fn to_rgba8_with_target_size(
-        &self,
-        target_size: IntSize,
-    ) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
-        self.render_to_rgba8(Some(target_size.cast_unit()))
-    }
-
     fn render_to_rgba8(
         &self,
         target_size: Option<euclid::Size2D<u32, PhysicalPx>>,
@@ -1090,6 +1103,16 @@ impl Image {
             _ => None,
         }
     }
+}
+
+/// Like [`Image::to_rgba8`], but scalable sources (such as SVGs) are rasterized to
+/// `target_size` (in physical pixels) instead of their intrinsic size.
+/// Returns None if the pixels cannot be obtained.
+pub fn image_to_rgba8_with_target_size(
+    image: &Image,
+    target_size: IntSize,
+) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+    image.render_to_rgba8(Some(target_size.cast_unit()))
 }
 
 #[cfg(any(feature = "image-decoders", all(target_arch = "wasm32", feature = "std")))]
@@ -1795,9 +1818,26 @@ pub struct BorrowedOpenGLTexture {
 
 #[cfg(test)]
 mod tests {
-    use crate::graphics::Rgba8Pixel;
+    use crate::graphics::{Rgba8Pixel, SharedPixelBuffer};
 
     use super::Image;
+
+    #[test]
+    #[should_panic(expected = "the requested 8x8 pixels")]
+    fn clone_from_slice_rejects_a_short_slice() {
+        // One byte per pixel read as four: what an 8 bit grayscale buffer handed to
+        // `Image::from_rgba8` looks like (#13491).
+        let gray = [0u8; 8 * 8];
+        SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&gray, 8, 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "the requested 8x8 pixels")]
+    fn clone_from_slice_rejects_a_long_slice() {
+        // Four bytes per pixel read as three, the same mistake the other way around.
+        let rgba = [0u8; 8 * 8 * 4];
+        SharedPixelBuffer::<crate::graphics::Rgb8Pixel>::clone_from_slice(&rgba, 8, 8);
+    }
 
     #[test]
     fn test_premultiplied_to_rgb_zero_alpha() {
