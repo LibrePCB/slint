@@ -16,7 +16,7 @@ use crate::expression_tree::{BindingExpression, BuiltinFunction, Expression};
 use crate::langtype::ElementType;
 use crate::layout::{LayoutItem, Orientation};
 use crate::namedreference::NamedReference;
-use crate::object_tree::{Document, ElementRc, PropertyAnimation, find_parent_element};
+use crate::object_tree::{Document, Element, ElementRc, PropertyAnimation, find_parent_element};
 use derive_more as dm;
 
 use crate::CompilerConfiguration;
@@ -321,6 +321,21 @@ fn analyze_element(
     }
 }
 
+/// The element as a message names it: its id, or else the type it is written with.
+/// The id may be one a pass assigned, such as `root` or `root_window`.
+/// `type_name` is taken before lowering, so a layout still reads as one, and `inlining` appends
+/// to `debug`, so `first` is the type written at the use site.
+fn element_name(elem: &Element) -> Option<SmolStr> {
+    match elem.id.as_str() {
+        "" => elem
+            .debug
+            .first()
+            .map(|d| SmolStr::from(d.type_name.as_str()))
+            .filter(|name| !name.is_empty()),
+        id => Some(id.into()),
+    }
+}
+
 #[derive(Copy, Clone, dm::BitAnd, dm::BitOr, dm::BitAndAssign, dm::BitOrAssign)]
 struct DependsOnExternal(bool);
 
@@ -362,15 +377,11 @@ fn analyze_binding(
             if !out.is_empty() {
                 out.push_str(" -> ");
             }
-            let name = prop.prop.declared_name();
-            match prop.prop.element().borrow().id.as_str() {
-                "" => out.push_str(&name),
-                id => {
-                    out.push_str(id);
-                    out.push('.');
-                    out.push_str(&name);
-                }
+            if let Some(owner) = element_name(&prop.prop.element().borrow()) {
+                out.push_str(&owner);
+                out.push('.');
             }
+            out.push_str(&prop.prop.declared_name());
         }
 
         // Build description by iterating in reverse (trigger direction: "A triggers B")
@@ -1004,7 +1015,7 @@ fn visit_layout_items_dependencies<'a>(
             }
             element = it.element.borrow().base_type.as_component().root_element.clone();
             // Conservative for a repeated cell: whether the layout hands the
-            // instance its width depends on it (see `cell_is_height_for_width`).
+            // instance its width depends on it (see `builtin_height_depends_on_width`).
             CrossAxisSize::ReadByCell
         } else {
             cross_size
@@ -1211,9 +1222,6 @@ fn visit_implicit_layout_info_dependencies(
         "Image" => {
             vis(&NamedReference::new(item, SmolStr::new_static("source")).into(), N);
             vis(&NamedReference::new(item, SmolStr::new_static("source-clip-width")).into(), N);
-            if reads_own_width {
-                vis(&NamedReference::new(item, SmolStr::new_static("width")).into(), N);
-            }
             if orientation == Orientation::Vertical {
                 vis(
                     &NamedReference::new(item, SmolStr::new_static("source-clip-height")).into(),
@@ -1236,16 +1244,6 @@ fn visit_implicit_layout_info_dependencies(
                 );
             }
             vis(&NamedReference::new(item, SmolStr::new_static("wrap")).into(), N);
-            let wrap_set = item.borrow().is_binding_set("wrap", false)
-                || item
-                    .borrow()
-                    .property_analysis
-                    .borrow()
-                    .get("wrap")
-                    .is_some_and(|a| a.is_set || a.is_set_externally);
-            if wrap_set && reads_own_width {
-                vis(&NamedReference::new(item, SmolStr::new_static("width")).into(), N);
-            }
             if base_type.as_str() == "TextInput" {
                 vis(&NamedReference::new(item, SmolStr::new_static("single-line")).into(), N);
             } else {
@@ -1262,13 +1260,12 @@ fn visit_implicit_layout_info_dependencies(
             // A line dropped by the limit is also excluded from the content widths, so
             // `max-lines` is a dependency of both orientations, not just the height.
             vis(&NamedReference::new(item, SmolStr::new_static("max-lines")).into(), N);
-            if reads_own_width {
-                // StyledText always word-wraps, so its height depends on the width.
-                vis(&NamedReference::new(item, SmolStr::new_static("width")).into(), N);
-            }
         }
 
         _ => (),
+    }
+    if reads_own_width && crate::layout::builtin_height_depends_on_width(&item.borrow()) {
+        vis(&NamedReference::new(item, SmolStr::new_static("width")).into(), N);
     }
 }
 

@@ -77,24 +77,24 @@ export default defineConfig({
                 // each with its own URL prefix and its own sidebar.
                 starlightSidebarTopics([
                     {
-                        label: "Safety Manual",
-                        link: "/safety-manual/",
+                        label: "User Manual",
+                        link: "/user-manual/",
                         items: [
-                            { label: "Overview", slug: "safety-manual" },
+                            { label: "Overview", slug: "user-manual" },
                             {
                                 label: "Known Problems",
-                                slug: "safety-manual/known-problems",
+                                slug: "user-manual/known-problems",
                             },
                             {
                                 label: "Coverage of Slint Code",
-                                slug: "safety-manual/slint-coverage",
+                                slug: "user-manual/slint-coverage",
                             },
                             {
                                 label: "Slint Compiler",
                                 items: [
                                     {
                                         label: "Constraints",
-                                        slug: "safety-manual/compiler/constraints",
+                                        slug: "user-manual/compiler/constraints",
                                     },
                                 ],
                             },
@@ -103,9 +103,136 @@ export default defineConfig({
                                 items: [
                                     {
                                         label: "Constraints",
-                                        slug: "safety-manual/runtime/constraints",
+                                        slug: "user-manual/runtime/constraints",
                                     },
                                 ],
+                            },
+                        ],
+                    },
+                    {
+                        label: "Reference",
+                        link: "/reference/",
+                        items: [
+                            { label: "Overview", slug: "reference" },
+                            {
+                                label: "Language Specification",
+                                collapsed: true,
+                                items: [
+                                    {
+                                        label: "Introduction",
+                                        slug: "reference/language",
+                                    },
+                                    {
+                                        label: "Source Files",
+                                        slug: "reference/language/source-files",
+                                    },
+                                    {
+                                        label: "Lexical Structure",
+                                        slug: "reference/language/lexical-structure",
+                                    },
+                                    {
+                                        label: "File Structure",
+                                        slug: "reference/language/file-structure",
+                                    },
+                                    {
+                                        label: "Name Resolution",
+                                        slug: "reference/language/name-resolution",
+                                    },
+                                    {
+                                        label: "Imports",
+                                        slug: "reference/language/imports",
+                                    },
+                                    {
+                                        label: "Exports",
+                                        slug: "reference/language/exports",
+                                    },
+                                    {
+                                        label: "Properties",
+                                        slug: "reference/language/properties",
+                                    },
+                                    {
+                                        label: "Bindings",
+                                        slug: "reference/language/bindings",
+                                    },
+                                    {
+                                        label: "Expressions",
+                                        slug: "reference/language/expressions",
+                                    },
+                                    {
+                                        label: "Operators",
+                                        slug: "reference/language/operators",
+                                    },
+                                    {
+                                        label: "Callbacks",
+                                        slug: "reference/language/callbacks",
+                                    },
+                                    {
+                                        label: "Structs and Enums",
+                                        slug: "reference/language/structs-and-enums",
+                                    },
+                                    {
+                                        label: "Geometry",
+                                        slug: "reference/language/geometry",
+                                    },
+                                    {
+                                        label: "States and Transitions",
+                                        slug: "reference/language/states-and-transitions",
+                                    },
+                                ],
+                            },
+                            {
+                                label: "Generated Code",
+                                slug: "reference/generated-code",
+                            },
+                            { label: "Rendering", slug: "reference/rendering" },
+                            {
+                                label: "Touch Input",
+                                slug: "reference/input",
+                            },
+                            {
+                                label: "Elements",
+                                items: [
+                                    {
+                                        label: "Image",
+                                        slug: "reference/image",
+                                    },
+                                    {
+                                        label: "Rectangle",
+                                        slug: "reference/rectangle",
+                                    },
+                                    {
+                                        label: "TouchArea",
+                                        slug: "reference/toucharea",
+                                    },
+                                    {
+                                        label: "Window",
+                                        slug: "reference/window",
+                                    },
+                                ],
+                            },
+                            {
+                                label: "Property Types",
+                                items: [
+                                    {
+                                        label: "Colors & Brushes",
+                                        slug: "reference/property-types/colors-and-brushes",
+                                    },
+                                    {
+                                        label: "Images",
+                                        slug: "reference/property-types/images",
+                                    },
+                                    {
+                                        label: "Numeric Types",
+                                        slug: "reference/property-types/numeric-types",
+                                    },
+                                ],
+                            },
+                            {
+                                // Directory form: `trailingSlash: "always"` would
+                                // rewrite a link ending in `index.html` to `index/`.
+                                label: "slint-sc Runtime API ↗",
+                                link: "/api/slint_sc/",
+                                attrs: { target: "_blank" },
                             },
                         ],
                     },
@@ -197,130 +324,6 @@ export default defineConfig({
                             {
                                 label: "Test Results",
                                 slug: "qualification-report/test-results",
-                            },
-                        ],
-                    },
-                    {
-                        label: "Language Specification",
-                        link: "/language/",
-                        items: [
-                            { label: "Introduction", slug: "language" },
-                            {
-                                label: "Source Files",
-                                slug: "language/source-files",
-                            },
-                            {
-                                label: "Lexical Structure",
-                                slug: "language/lexical-structure",
-                            },
-                            {
-                                label: "File Structure",
-                                slug: "language/file-structure",
-                            },
-                            {
-                                label: "Name Resolution",
-                                slug: "language/name-resolution",
-                            },
-                            {
-                                label: "Imports",
-                                slug: "language/imports",
-                            },
-                            {
-                                label: "Exports",
-                                slug: "language/exports",
-                            },
-                            {
-                                label: "Properties",
-                                slug: "language/properties",
-                            },
-                            {
-                                label: "Bindings",
-                                slug: "language/bindings",
-                            },
-                            {
-                                label: "Expressions",
-                                slug: "language/expressions",
-                            },
-                            {
-                                label: "Operators",
-                                slug: "language/operators",
-                            },
-                            {
-                                label: "Callbacks",
-                                slug: "language/callbacks",
-                            },
-                            {
-                                label: "Structs and Enums",
-                                slug: "language/structs-and-enums",
-                            },
-                            {
-                                label: "Geometry",
-                                slug: "language/geometry",
-                            },
-                            {
-                                label: "States and Transitions",
-                                slug: "language/states-and-transitions",
-                            },
-                        ],
-                    },
-                    {
-                        label: "API Reference",
-                        link: "/reference/",
-                        items: [
-                            { label: "Overview", slug: "reference" },
-                            {
-                                label: "Generated Code",
-                                slug: "reference/generated-code",
-                            },
-                            { label: "Rendering", slug: "reference/rendering" },
-                            {
-                                label: "Touch Input",
-                                slug: "reference/input",
-                            },
-                            {
-                                label: "Elements",
-                                items: [
-                                    {
-                                        label: "Image",
-                                        slug: "reference/image",
-                                    },
-                                    {
-                                        label: "Rectangle",
-                                        slug: "reference/rectangle",
-                                    },
-                                    {
-                                        label: "TouchArea",
-                                        slug: "reference/toucharea",
-                                    },
-                                    {
-                                        label: "Window",
-                                        slug: "reference/window",
-                                    },
-                                ],
-                            },
-                            {
-                                label: "Property Types",
-                                items: [
-                                    {
-                                        label: "Colors & Brushes",
-                                        slug: "reference/property-types/colors-and-brushes",
-                                    },
-                                    {
-                                        label: "Images",
-                                        slug: "reference/property-types/images",
-                                    },
-                                    {
-                                        label: "Numeric Types",
-                                        slug: "reference/property-types/numeric-types",
-                                    },
-                                ],
-                            },
-                            {
-                                // Directory form: `trailingSlash: "always"` would
-                                // rewrite a link ending in `index.html` to `index/`.
-                                label: "slint-sc Runtime API ↗",
-                                link: "/api/slint_sc/",
-                                attrs: { target: "_blank" },
                             },
                         ],
                     },
