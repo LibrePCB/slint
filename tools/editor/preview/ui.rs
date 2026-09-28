@@ -107,6 +107,14 @@ pub fn create_ui() -> Result<EditorUi, PlatformError> {
             })
             .clone()
     });
+    let scrub_horizontal_cursor = {
+        let image = slint::Image::load_from_svg_data(include_bytes!(
+            "../ui/assets/cursors/scrub-horizontal.svg"
+        ))
+        .expect("valid horizontal scrub cursor SVG");
+        slint::Image::from_rgba8(image.to_rgba8().expect("horizontal scrub cursor pixels"))
+    };
+    ui.global::<EditorCursors>().on_scrub_horizontal_image(move || scrub_horizontal_cursor.clone());
     Ok(ui)
 }
 
@@ -267,6 +275,16 @@ pub fn initialize_editor(
         };
 
         current_property_value_data(&api, property_name).unwrap_or_default()
+    });
+    let color_field_api_weak = api_weak.clone();
+    api.on_current_color_field_data(move |property_name| {
+        let Some(api) = color_field_api_weak.upgrade() else {
+            return ColorFieldData::default();
+        };
+
+        current_property_value_data(&api, property_name)
+            .map(brushes::color_field_data)
+            .unwrap_or_default()
     });
     let property_value_api_weak = api_weak.clone();
     api.on_current_property_value(move |property_name, fallback| {
@@ -1653,6 +1671,15 @@ mod tests {
         let horizontal = cursors.invoke_resize_image(0.);
         assert_eq!(horizontal, cursors.invoke_resize_image(180.));
         assert_ne!(horizontal, cursors.invoke_resize_image(90.));
+    }
+
+    #[test]
+    fn scrub_cursor_uses_fixed_pixel_size() {
+        i_slint_backend_testing::init_no_event_loop();
+        let editor = super::create_ui().unwrap();
+        let cursor = editor.global::<super::EditorCursors>().invoke_scrub_horizontal_image();
+        assert_eq!(cursor.size().width, 32);
+        assert_eq!(cursor.size().height, 32);
     }
 
     #[test]

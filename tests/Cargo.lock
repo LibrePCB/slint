@@ -2484,6 +2484,7 @@ dependencies = [
  "accesskit",
  "async-channel",
  "bitflags 2.13.2",
+ "bytemuck",
  "chrono",
  "clru",
  "const-field-offset",
@@ -5723,6 +5724,16 @@ dependencies = [
  "spin_on",
  "test_driver_lib",
  "walkdir",
+]
+
+[[package]]
+name = "test-driver-typescript"
+version = "1.19.0"
+dependencies = [
+ "i-slint-compiler",
+ "spin_on",
+ "tempfile",
+ "test_driver_lib",
 ]
 
 [[package]]
