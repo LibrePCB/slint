@@ -7,7 +7,8 @@
 //! this driver:
 //! 1. Runs `slint-compiler --slint-sc` to generate Rust code
 //! 2. Extracts test code from `` ```rust `` blocks in comments
-//! 3. Calls `rustc` directly to compile the generated + test code
+//! 3. Calls `rustc` directly to compile the generated + test code, and
+//!    `clippy-driver` to lint the generated code
 //! 4. Runs the resulting binary; `` ```rust compile_fail `` blocks are
 //!    compiled separately and must fail with every `//~ ERROR` substring in
 //!    the rustc output
@@ -45,17 +46,19 @@ fn main() {
 
     let target_dir = find_target_dir();
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let clippy_driver = std::env::var("CLIPPY_DRIVER").unwrap_or_else(|_| "clippy-driver".into());
     // Where each case's coverage (see the `coverage` module) is kept.
     let coverage_dir = std::env::var_os("SLINT_SC_COVERAGE_DIR").map(PathBuf::from);
     let update_coverage = std::env::var(expectations::UPDATE_VAR).is_ok_and(|var| var == "1");
     let compiler = build_compiler(&target_dir);
-    let slint_sc_rlib = find_slint_sc_rlib(&target_dir);
+    let slint_sc_rlib = build_slint_sc_rlib(&target_dir);
     let rx = Regex::new(r"(?sU)\r?\n```rust( compile_fail)?\r?\n(.+)\r?\n```\r?\n").unwrap();
 
     let config = TestConfig {
         compiler: &compiler,
         slint_sc_rlib: &slint_sc_rlib,
         rustc: &rustc,
+        clippy_driver: &clippy_driver,
         coverage_dir: coverage_dir.as_deref(),
         update_coverage,
         create_screenshots: std::env::var("SLINT_CREATE_SCREENSHOTS").is_ok_and(|var| var == "1"),
@@ -148,6 +151,7 @@ struct TestConfig<'a> {
     compiler: &'a Path,
     slint_sc_rlib: &'a Path,
     rustc: &'a str,
+    clippy_driver: &'a str,
     /// Where each case's coverage is kept, when it is.
     coverage_dir: Option<&'a Path>,
     /// Rewrite what a case states about its coverage from the measurement.
@@ -165,16 +169,22 @@ fn find_target_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn build_compiler(target_dir: &Path) -> PathBuf {
+/// A `cargo build` into the same target directory as the test binary itself,
+/// so the artifacts end up next to us (important for cargo-llvm-cov which
+/// uses a separate target dir).
+fn cargo_build(target_dir: &Path) -> Command {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(&cargo);
-    cmd.args(["build", "-p", "slint-compiler", "--no-default-features", "--features", "slint-sc"]);
-    // Use the same target directory as the test binary itself, so the
-    // compiler ends up next to us (important for cargo-llvm-cov which
-    // uses a separate target dir).
+    cmd.arg("build");
     if let Some(parent) = target_dir.parent() {
         cmd.arg("--target-dir").arg(parent);
     }
+    cmd
+}
+
+fn build_compiler(target_dir: &Path) -> PathBuf {
+    let mut cmd = cargo_build(target_dir);
+    cmd.args(["-p", "slint-compiler", "--no-default-features", "--features", "slint-sc"]);
     // Coverage measures the slint-sc runtime alone, so the compiler builds
     // uninstrumented: clear the rustc wrapper cargo-llvm-cov injects the
     // instrumentation with, and the flag variables older versions used.
@@ -188,20 +198,18 @@ fn build_compiler(target_dir: &Path) -> PathBuf {
     compiler
 }
 
-/// Find the slint-sc rlib in the deps directory for --extern: the newest,
-/// as builds with other features leave theirs behind.
-fn find_slint_sc_rlib(target_dir: &Path) -> PathBuf {
-    let deps_dir = target_dir.join("deps");
-    let rlibs = std::fs::read_dir(&deps_dir).into_iter().flatten().flatten().filter(|entry| {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        name.starts_with("libslint_sc-") && name.ends_with(".rlib")
-    });
-    let newest = rlibs.max_by_key(|entry| entry.metadata().and_then(|m| m.modified()).ok());
-    match newest {
-        Some(entry) => entry.path(),
-        None => panic!("Could not find slint-sc rlib in {}", deps_dir.display()),
-    }
+/// Cargo places the library of the package it builds in the target directory.
+/// The environment is kept, so under cargo-llvm-cov this is the instrumented
+/// build that the test binary links.
+fn build_slint_sc_rlib(target_dir: &Path) -> PathBuf {
+    let status = cargo_build(target_dir)
+        .args(["-p", "slint-sc", "--lib"])
+        .status()
+        .expect("Failed to run cargo build for slint-sc");
+    assert!(status.success(), "Failed to build slint-sc");
+    let rlib = target_dir.join("libslint_sc.rlib");
+    assert!(rlib.exists(), "slint-sc rlib not found at {}", rlib.display());
+    rlib
 }
 
 fn run_test(slint_path: &Path, rel: &Path, config: &TestConfig) -> Result<(), String> {
@@ -239,6 +247,8 @@ fn run_test(slint_path: &Path, rel: &Path, config: &TestConfig) -> Result<(), St
         let stderr = String::from_utf8_lossy(&rustc_output.stderr);
         return Err(format!("rustc failed:\n{stderr}"));
     }
+
+    lint(config, &test_rs, tmp.path())?;
 
     // The compile_fail blocks must fail to compile with the expected errors
     for (i, block) in compile_fail_blocks.iter().enumerate() {
@@ -483,6 +493,31 @@ fn extract_rust_test_code(source: &str, rx: &Regex) -> (String, Vec<String>) {
     (code, compile_fail)
 }
 
+/// The lints denied for the generated code only. The harness and the test
+/// bodies don't ship, and report a failure by panicking, so the program
+/// allows them there.
+const GENERATED_CODE_LINTS: &[&str] = &[
+    //#sls.gen.no-shadow
+    "clippy::shadow_same",
+    "clippy::shadow_reuse",
+    "clippy::shadow_unrelated",
+    //#sls.gen.no-panic
+    "clippy::unwrap_used",
+    "clippy::expect_used",
+    "clippy::panic",
+    "clippy::unreachable",
+    "clippy::todo",
+    "clippy::unimplemented",
+    //#sls.gen.no-indexing
+    "clippy::indexing_slicing",
+    //#sls.gen.no-question-mark
+    "clippy::question_mark_used",
+    //#sls.gen.no-overflow
+    "clippy::arithmetic_side_effects",
+    //#sls.gen.no-as
+    "clippy::as_conversions",
+];
+
 /// A test program: the generated code, the harness, and `body` as the main
 /// function.
 fn assemble_program(gen_path: &str, body: &str) -> String {
@@ -491,22 +526,43 @@ fn assemble_program(gen_path: &str, body: &str) -> String {
         .to_string_lossy()
         .replace('\\', "/");
     let mut content = String::new();
-    // no_std so that accidental use of std in the generated code doesn't compile
+    // Only the harness declares `extern crate std`, so the generated code at
+    // the crate root can name neither `std` nor `alloc`
+    //#sls.gen.no-std
     writeln!(content, "#![no_std]").unwrap();
-    writeln!(content, "extern crate std;").unwrap();
+    //#sls.gen.no-unsafe
+    writeln!(content, "#![forbid(unsafe_code)]").unwrap();
+    let generated_code_lints = GENERATED_CODE_LINTS.join(", ");
+    writeln!(content, "#![deny({generated_code_lints})]").unwrap();
     writeln!(content).unwrap();
+    writeln!(content, "#[allow({generated_code_lints})]").unwrap();
     writeln!(content, "#[macro_use]").unwrap();
     writeln!(content, r#"#[path = "{harness_path}"]"#).unwrap();
     writeln!(content, "mod harness;").unwrap();
     writeln!(content).unwrap();
     writeln!(content, r#"include!("{gen_path}");"#).unwrap();
     writeln!(content).unwrap();
-    writeln!(content, "fn main() -> Result<(), std::boxed::Box<dyn std::error::Error>> {{")
-        .unwrap();
+    writeln!(content, "#[allow({generated_code_lints})]").unwrap();
+    writeln!(content, "fn main() -> Result<(), harness::Error> {{").unwrap();
     writeln!(content, "    {}", body.replace('\n', "\n    ")).unwrap();
     writeln!(content, "    Ok(())").unwrap();
     writeln!(content, "}}").unwrap();
     content
+}
+
+/// Run clippy on the test program at `rs_path`, which denies the lints of
+/// [`assemble_program`].
+fn lint(config: &TestConfig, rs_path: &Path, tmp_dir: &Path) -> Result<(), String> {
+    let output = rust_command(config.clippy_driver, config, rs_path)
+        .args(["--emit=metadata", "--out-dir"])
+        .arg(tmp_dir)
+        .output()
+        .map_err(|e| format!("{} spawn: {e}", config.clippy_driver))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("clippy failed:\n{stderr}"));
+    }
+    Ok(())
 }
 
 /// Invoke rustc on `rs_path`, linking against the slint-sc rlib.
@@ -515,30 +571,29 @@ fn compile(
     rs_path: &Path,
     out_path: &Path,
 ) -> Result<std::process::Output, String> {
-    let deps_dir = config.slint_sc_rlib.parent().unwrap_or_else(|| Path::new("."));
-    let mut rustc_cmd = Command::new(config.rustc);
-    rustc_cmd
-        .arg(rs_path)
+    let mut rustc_cmd = rust_command(config.rustc, config, rs_path);
+    rustc_cmd.arg("-o").arg(out_path);
+    // Instrumented for the coverage of the case's .slint code (see the
+    // `coverage` module); under cargo-llvm-cov, the runtime code the case
+    // exercises is in the runtime's coverage too.
+    rustc_cmd.arg("-Cinstrument-coverage");
+    rustc_cmd.output().map_err(|e| format!("rustc spawn: {e}"))
+}
+
+/// A `program` command, rustc or clippy-driver, for the test program at `rs_path`.
+fn rust_command(program: &str, config: &TestConfig, rs_path: &Path) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.arg(rs_path)
         .arg("--edition=2024")
-        .arg("-o")
-        .arg(out_path)
-        .arg("-L")
-        .arg(deps_dir)
         // slint-sc is the only `--extern`, so the generated code fails to build
         // if it references any other crate.
         //#sls.gen.output
         .arg("--extern")
         .arg(format!("slint_sc={}", config.slint_sc_rlib.display()));
-
-    // Instrumented for the coverage of the case's .slint code (see the
-    // `coverage` module); under cargo-llvm-cov, the runtime code the case
-    // exercises is in the runtime's coverage too.
-    rustc_cmd.arg("-Cinstrument-coverage");
     // The generated code must build on stable, even when the suite enables
     // unstable options for the runtime's branch coverage.
-    rustc_cmd.env_remove("RUSTC_BOOTSTRAP");
-
-    rustc_cmd.output().map_err(|e| format!("rustc spawn: {e}"))
+    cmd.env_remove("RUSTC_BOOTSTRAP");
+    cmd
 }
 
 /// The cases are the `.slint` files one level below `dir`, in a group

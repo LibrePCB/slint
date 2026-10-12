@@ -112,6 +112,8 @@ or
 tests/run_tests.sh rust layout --features build-time
 ```
 
+With the build-time feature, set `SLINT_TEST_DETERMINISTIC_OUTPUT=1` to also check that compiling each test case twice generates the same code.
+
 ### C++ driver
 
 The C++ test driver will take each .slint and generate a .h for it. It will also generate a .cpp that
@@ -120,11 +122,9 @@ Each program is compiled separately. And then run.
 
 Some macro like `assert_eq` are defined to look similar to the rust equivalent.
 
-It requires the Slint C++ library to be built first (see
-[building.md](./building.md#c-tests)):
+It builds the Slint C++ library itself (see [building.md](./building.md#c-tests)):
 
 ```
-cargo build --lib -p slint-cpp
 cargo test --manifest-path tests/Cargo.toml -p test-driver-cpp --
 ```
 
