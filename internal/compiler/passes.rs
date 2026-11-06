@@ -445,5 +445,6 @@ pub fn run_import_passes(
     check_expressions::check_expressions(doc, diag);
     windows::warn_about_child_windows(doc, diag);
     unique_id::check_unique_id(doc, diag);
-    redundant_property_bindings::check_redundant_property_bindings(doc, diag);
+    // Disabled for LibrePCB: These hints are annoying in many cases.
+    //redundant_property_bindings::check_redundant_property_bindings(doc, diag);
 }

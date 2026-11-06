@@ -16,6 +16,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+#[allow(unused)]
 pub fn check_redundant_property_bindings(doc: &Document, diag: &mut BuildDiagnostics) {
     if doc.node.as_ref().and_then(|n| n.source_file()).is_some_and(|sf| sf.path().is_builtin()) {
         return;
