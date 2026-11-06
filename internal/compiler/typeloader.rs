@@ -16,7 +16,7 @@ use crate::parser::{NodeOrToken, SyntaxKind, SyntaxToken, syntax_nodes};
 use crate::source_path::SourcePath;
 use crate::typeregister::TypeRegister;
 use crate::{CompilerConfiguration, expression_tree};
-use crate::{fileaccess, langtype, layout, parser};
+use crate::{element_type, fileaccess, layout, parser};
 use core::future::Future;
 use itertools::Itertools;
 
@@ -26,6 +26,13 @@ enum LoadedDocument {
     /// A dependency of this file has changed, so we need to re-analyze it.
     /// The file contents have not changed, so we can keep the parsed CST around.
     Invalidated(syntax_nodes::Document),
+}
+
+/// Return value of [`TypeLoader::claim_document`].
+enum Claim {
+    Loaded,
+    Invalidated(syntax_nodes::Document, Vec<crate::diagnostics::Diagnostic>),
+    Claimed,
 }
 
 /// Storage for a cache of all loaded documents
@@ -187,7 +194,7 @@ impl Snapshotter {
             .all_elements()
             .values()
             .filter_map(|ty| match ty {
-                langtype::ElementType::Component(c) if c.is_global() => Some(c),
+                element_type::ElementType::Component(c) if c.is_global() => Some(c),
                 _ => None,
             })
             .for_each(|c| {
@@ -237,6 +244,7 @@ impl Snapshotter {
             revision: type_loader.revision,
             // Share the counters so names generated after the snapshot stay unique.
             symbol_counters: type_loader.symbol_counters.clone(),
+            library_projects: type_loader.library_projects.clone(),
         })
     }
 
@@ -332,6 +340,7 @@ impl Snapshotter {
             imports: document.imports.clone(),
             exports,
             library_exports: document.library_exports.clone(),
+            referenced_file_resources: document.referenced_file_resources.clone(),
             embedded_file_resources: document.embedded_file_resources.clone(),
             #[cfg(feature = "bundle-translations")]
             translation_builder: document.translation_builder.clone(),
@@ -360,12 +369,23 @@ impl Snapshotter {
 
             let root_element = self.create_element(&component.root_element);
 
+            let optimized = component.optimized_elements.borrow();
+            let elements =
+                optimized.iter().map(|o| self.create_element(&o.element)).collect::<Vec<_>>();
             let optimized_elements = RefCell::new(
-                component
-                    .optimized_elements
-                    .borrow()
+                optimized
                     .iter()
-                    .map(|e| self.create_element(e))
+                    .zip(elements)
+                    .map(|(o, element)| object_tree::OptimizedElement {
+                        element,
+                        former_parent: o
+                            .former_parent
+                            .upgrade()
+                            .and_then(|parent| {
+                                self.element_map.get(&by_address::ByAddress(parent)).cloned()
+                            })
+                            .unwrap_or_default(),
+                    })
                     .collect(),
             );
 
@@ -489,6 +509,8 @@ impl Snapshotter {
 
         target_element.base_type = self.snapshot_element_type(&elem.base_type);
         target_element.slot_target = elem.slot_target.clone();
+        target_element.slot_default = elem.slot_default.clone();
+        target_element.empty_slot_assignments = elem.empty_slot_assignments.clone();
         target_element.forwarded_slots = elem.forwarded_slots.clone();
         target_element.typed_slot_interface =
             elem.typed_slot_interface.as_ref().map(|c| self.use_component(c).upgrade().unwrap());
@@ -545,6 +567,7 @@ impl Snapshotter {
         target_element.repeated =
             elem.repeated.as_ref().map(|r| object_tree::RepeatedElementInfo {
                 model: self.snapshot_expression(&r.model),
+                model_location: r.model_location.clone(),
                 model_data_id: r.model_data_id.clone(),
                 index_id: r.index_id.clone(),
                 is_conditional_element: r.is_conditional_element,
@@ -554,6 +577,8 @@ impl Snapshotter {
                     content_width: lv.content_width.as_ref().map(|width| width.snapshot(self)),
                     listview_height: lv.listview_height.snapshot(self),
                     listview_width: lv.listview_width.snapshot(self),
+                    ensure_row_visible: lv.ensure_row_visible.as_ref().map(|e| e.snapshot(self)),
+                    row_height: lv.row_height.snapshot(self),
                 }),
             });
 
@@ -580,6 +605,7 @@ impl Snapshotter {
                     pure: v.pure,
                     shadowed_name: v.shadowed_name.clone(),
                     shadowable: v.shadowable,
+                    testable: v.testable,
                     moved_from: v.moved_from.clone(),
                     deprecated: v.deprecated.clone(),
                     synthesized: v.synthesized,
@@ -667,19 +693,19 @@ impl Snapshotter {
 
     pub(crate) fn snapshot_element_type(
         &mut self,
-        element_type: &langtype::ElementType,
-    ) -> langtype::ElementType {
+        element_type: &element_type::ElementType,
+    ) -> element_type::ElementType {
         // Components need to get adapted, the rest is fine I think...
         match element_type {
-            langtype::ElementType::Component(component) => {
+            element_type::ElementType::Component(component) => {
                 // Some components that will get compiled out later...
-                langtype::ElementType::Component(
+                element_type::ElementType::Component(
                     Weak::upgrade(&self.use_component(component))
                         .expect("I can unwrap at this point"),
                 )
             }
-            langtype::ElementType::Interface(base) => {
-                langtype::ElementType::Interface(base.as_ref().map(|component| {
+            element_type::ElementType::Interface(base) => {
+                element_type::ElementType::Interface(base.as_ref().map(|component| {
                     Weak::upgrade(&self.use_component(component))
                         .expect("I can unwrap at this point")
                 }))
@@ -905,11 +931,11 @@ impl Snapshotter {
                     .map(|(e1, e2)| (self.snapshot_expression(e1), self.snapshot_expression(e2)))
                     .collect(),
             },
-            Expression::RadialGradient { center, radius, stops } => Expression::RadialGradient {
+            Expression::RadialGradient { center, shape, stops } => Expression::RadialGradient {
                 center: center.as_ref().map(|(cx, cy)| {
                     (Box::new(self.snapshot_expression(cx)), Box::new(self.snapshot_expression(cy)))
                 }),
-                radius: radius.as_ref().map(|r| Box::new(self.snapshot_expression(r))),
+                shape: shape.map(|r| self.snapshot_expression(r)),
                 stops: stops
                     .iter()
                     .map(|(e1, e2)| (self.snapshot_expression(e1), self.snapshot_expression(e2)))
@@ -971,6 +997,61 @@ impl Snapshotter {
     }
 }
 
+/// A library whose entry in `library-paths` names its project file.
+struct LibraryProject {
+    source_path: SourcePath,
+    /// The directory of the project file, which holds the library's files.
+    root: SourcePath,
+    main: Option<SourcePath>,
+    edition: crate::project_file::SlintEdition,
+    include_paths: Vec<PathBuf>,
+    library_paths: HashMap<String, PathBuf>,
+}
+
+impl LibraryProject {
+    /// Compares the paths as text, since `file` may come from an editor URL.
+    fn is_main(&self, file: &SourcePath) -> bool {
+        self.main.as_ref().is_some_and(|main| main.to_string() == file.to_string())
+    }
+}
+
+/// The settings for the files of the application, or of a library with a project file.
+struct ProjectSettings<'a> {
+    edition: Option<crate::project_file::SlintEdition>,
+    include_paths: &'a [PathBuf],
+    library_paths: &'a HashMap<String, PathBuf>,
+}
+
+/// Makes the project roots and the library project files of `compiler_config` absolute, like the
+/// path of a changed file that an editor passes to `TypeLoader::drop_document`.
+fn make_project_paths_absolute(compiler_config: &mut CompilerConfiguration) {
+    use crate::project_file::normalize_project_file_path;
+    for path in compiler_config.library_paths.values_mut() {
+        if crate::project_file::is_project_file(path)
+            && let Some(absolute) =
+                normalize_project_file_path(SourcePath::new(&*path)).into_native_path()
+        {
+            *path = absolute;
+        }
+    }
+    for root in &mut compiler_config.project_roots {
+        *root = normalize_project_file_path(root.clone());
+    }
+}
+
+/// Returns whether `file` is in the directory `root`, or below it.
+fn is_within(root: &SourcePath, file: &SourcePath) -> bool {
+    match (root, file) {
+        (SourcePath::File(root), SourcePath::File(file)) => file.starts_with(root),
+        (_, SourcePath::Builtin(_)) => false,
+        _ => root.to_url().zip(file.to_url()).is_some_and(|(root, file)| {
+            file.as_str()
+                .strip_prefix(root.as_str().trim_end_matches('/'))
+                .is_some_and(|rest| rest.starts_with('/'))
+        }),
+    }
+}
+
 pub struct TypeLoader {
     pub global_type_registry: Rc<RefCell<TypeRegister>>,
     pub compiler_config: CompilerConfiguration,
@@ -985,6 +1066,9 @@ pub struct TypeLoader {
     /// passes. Shared across all documents of the compilation so the names stay
     /// unique even after inlining merges components from different documents.
     pub symbol_counters: Rc<crate::symbol_counters::SymbolCounters>,
+    /// The library project files by path, or why one failed to load, reported when an import uses
+    /// the library.
+    library_projects: HashMap<SourcePath, Result<Rc<LibraryProject>, Diagnostic>>,
 }
 
 struct BorrowedTypeLoader<'a> {
@@ -993,7 +1077,8 @@ struct BorrowedTypeLoader<'a> {
 }
 
 impl TypeLoader {
-    pub fn new(compiler_config: CompilerConfiguration, diag: &mut BuildDiagnostics) -> Self {
+    pub fn new(mut compiler_config: CompilerConfiguration, diag: &mut BuildDiagnostics) -> Self {
+        make_project_paths_absolute(&mut compiler_config);
         let mut style = compiler_config.style.clone().unwrap_or_else(|| "fluent".into());
 
         if style == "native" {
@@ -1001,17 +1086,18 @@ impl TypeLoader {
         }
 
         let symbol_counters = crate::symbol_counters::SymbolCounters::shared();
+        let global_type_registry = crate::typeregister::TypeRegister::builtin();
+        global_type_registry
+            .borrow_mut()
+            .set_experimental_features(compiler_config.experimental_features);
         let myself = Self {
-            global_type_registry: if compiler_config.enable_experimental {
-                crate::typeregister::TypeRegister::builtin_experimental()
-            } else {
-                crate::typeregister::TypeRegister::builtin()
-            },
+            global_type_registry,
             compiler_config,
             resolved_style: style.clone(),
             revision: 0,
             all_documents: Default::default(),
             symbol_counters,
+            library_projects: HashMap::new(),
         };
 
         let mut known_styles = fileaccess::styles();
@@ -1035,6 +1121,15 @@ impl TypeLoader {
         myself
     }
 
+    /// Replaces the compiler configuration, forgets the library projects of the previous one,
+    /// and invalidates every document.
+    pub fn set_compiler_config(&mut self, mut compiler_config: CompilerConfiguration) {
+        make_project_paths_absolute(&mut compiler_config);
+        self.compiler_config = compiler_config;
+        self.library_projects.clear();
+        self.invalidate_all_documents();
+    }
+
     fn bump_revision(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
@@ -1052,8 +1147,15 @@ impl TypeLoader {
         &mut self,
         path: &SourcePath,
     ) -> Result<HashSet<SourcePath>, std::io::Error> {
-        let dependencies = self.invalidate_document(path);
-        self.all_documents.docs.remove(path);
+        let dependencies = if self.library_projects.contains_key(path) {
+            // The nested library projects of the changed one may have changed too
+            self.library_projects.clear();
+            self.invalidate_all_documents()
+        } else {
+            let dependencies = self.invalidate_document(path);
+            self.all_documents.docs.remove(path);
+            dependencies
+        };
         self.bump_revision();
 
         if self.all_documents.currently_loading.contains_key(path) {
@@ -1061,6 +1163,16 @@ impl TypeLoader {
         } else {
             Ok(dependencies)
         }
+    }
+
+    /// Invalidates every document, and returns their paths and the paths of their dependencies.
+    pub fn invalidate_all_documents(&mut self) -> HashSet<SourcePath> {
+        let mut dependencies = HashSet::new();
+        for document in self.all_files().cloned().collect::<Vec<_>>() {
+            dependencies.extend(self.invalidate_document(&document));
+            dependencies.insert(document);
+        }
+        dependencies
     }
 
     /// Invalidate a document and all its dependencies.
@@ -1110,6 +1222,7 @@ impl TypeLoader {
         registry_to_populate: &'a Rc<RefCell<TypeRegister>>,
     ) -> (Vec<ImportedTypes>, Exports) {
         let state = RefCell::new(BorrowedTypeLoader { tl: self, diag });
+        Self::load_library_projects(&state).await;
         Self::load_dependencies_recursively_impl(
             &state,
             doc,
@@ -1128,6 +1241,15 @@ impl TypeLoader {
         let mut imports = Vec::new();
         let mut dependencies_futures = Vec::new();
         for mut import in Self::collect_dependencies(state, doc) {
+            Self::use_library_project(state, &import);
+            let error = state.borrow().tl.library_import_error(
+                Some(import.import_uri_token.source_file.path()),
+                &import.file,
+            );
+            if let Some(error) = error {
+                state.borrow_mut().diag.push_error(error, &import.import_uri_token);
+                continue;
+            }
             // The embedded files import each other by that path, so only a
             // document outside them is rejected.
             if SourcePath::new(&import.file).is_builtin()
@@ -1384,6 +1506,7 @@ impl TypeLoader {
         diag: &mut BuildDiagnostics,
     ) -> Option<Rc<object_tree::Component>> {
         let state = RefCell::new(BorrowedTypeLoader { tl: self, diag });
+        Self::load_library_projects(&state).await;
         let doc_path =
             match Self::ensure_document_loaded(&state, file_to_import, None, Default::default())
                 .await
@@ -1405,10 +1528,10 @@ impl TypeLoader {
         import_token: Option<&NodeOrToken>,
         maybe_relative_path_or_url: &str,
     ) -> Option<SourcePath> {
+        let referencing_file = import_token.and_then(|tok| tok.source_file()).map(|f| f.path());
         if let Some(maybe_library_import) = maybe_relative_path_or_url.strip_prefix('@') {
-            self.find_file_in_library_path(maybe_library_import)
+            self.find_file_in_library_path(referencing_file, maybe_library_import)
         } else {
-            let referencing_file = import_token.and_then(|tok| tok.source_file()).map(|f| f.path());
             self.find_file_in_include_path(referencing_file, maybe_relative_path_or_url).or_else(
                 || {
                     referencing_file
@@ -1431,7 +1554,8 @@ impl TypeLoader {
         let mut borrowed_state = state.borrow_mut();
 
         let mut resolved = false;
-        let path_canon = match borrowed_state
+        let mut include_candidates = Vec::new();
+        let first_path = match borrowed_state
             .tl
             .resolve_import_path(import_token.as_ref(), file_to_import)
         {
@@ -1469,28 +1593,273 @@ impl TypeLoader {
                 } else {
                     // We will load using the `open_import_callback`
                     // Simplify the path to remove the ".."
-                    let base_dir = import_token
-                        .as_ref()
-                        .and_then(|tok| tok.source_file())
-                        .map_or_else(SourcePath::default, |f| f.path().parent());
-                    base_dir.join(file_to_import).ok_or(None)?
+                    let referencing_file =
+                        import_token.as_ref().and_then(|tok| tok.source_file()).map(|f| f.path());
+                    let base_dir =
+                        referencing_file.map_or_else(SourcePath::default, SourcePath::parent);
+                    let path = base_dir.join(file_to_import).ok_or(None)?;
+                    include_candidates = borrowed_state
+                        .tl
+                        .include_path_candidates(referencing_file, file_to_import)
+                        .into_iter()
+                        .filter(|candidate| !candidate.is_builtin() && *candidate != path)
+                        .unique()
+                        .collect();
+                    path
                 }
             }
         };
 
-        if !import_stack.insert(path_canon.clone()) {
-            borrowed_state
-                .diag
-                .push_error(format!("Recursive import of \"{path_canon}\""), &import_token);
-            return Err(Some(path_canon));
-        }
-
         drop(borrowed_state);
 
-        let (is_loaded, doc_node) = core::future::poll_fn(|cx| {
+        let mut candidates =
+            std::iter::once(first_path.clone()).chain(include_candidates).peekable();
+        let (path, doc_node, not_found) = loop {
+            let path = candidates.next().unwrap();
+            if !import_stack.insert(path.clone()) {
+                state
+                    .borrow_mut()
+                    .diag
+                    .push_error(format!("Recursive import of \"{path}\""), &import_token);
+                return Err(Some(path));
+            }
+            let doc_node = match Self::claim_document(state, &path).await {
+                Claim::Loaded => return Ok(path),
+                Claim::Invalidated(doc_node, errors) => {
+                    for e in errors {
+                        state.borrow_mut().diag.push_internal_error(e);
+                    }
+                    Some(doc_node)
+                }
+                Claim::Claimed => match Self::read_import(state, &path).await {
+                    Ok(source) => syntax_nodes::Document::new(crate::parser::parse(
+                        source,
+                        Some(path.clone()),
+                        state.borrow_mut().diag,
+                    )),
+                    Err(err) if !resolved && is_not_found(&err) => {
+                        if candidates.peek().is_some() {
+                            import_stack.remove(&path);
+                            Self::release_document(state, &path);
+                            continue;
+                        }
+                        let import_kind =
+                            if file_to_import.starts_with('@') { "library" } else { "include" };
+                        state.borrow_mut().diag.push_error(
+                            format!(
+                                "Cannot find requested import \"{file_to_import}\" in the {import_kind} search path",
+                            ),
+                            &import_token,
+                        );
+                        break (path, None, true);
+                    }
+                    Err(err) => {
+                        state.borrow_mut().diag.push_error(
+                            format!("Error reading requested import \"{path}\": {err}"),
+                            &import_token,
+                        );
+                        None
+                    }
+                },
+            };
+            break (path, doc_node, false);
+        };
+
+        let ok = if let Some(doc_node) = doc_node {
+            Self::load_file_impl(state, &path, doc_node, path.is_builtin(), &import_stack).await;
+            state.borrow_mut().diag.all_loaded_files.insert(path.clone());
+            true
+        } else {
+            false
+        };
+
+        Self::release_document(state, &path);
+
+        if ok {
+            Ok(path)
+        } else if not_found {
+            Err(Some(first_path))
+        } else {
+            Err(Some(path))
+        }
+    }
+
+    /// Loads the project files that the library paths name, including those of nested libraries.
+    async fn load_library_projects<'a>(state: &'a RefCell<BorrowedTypeLoader<'a>>) {
+        loop {
+            let pending = {
+                let tl = &state.borrow().tl;
+                let nested =
+                    tl.library_projects.values().flatten().flat_map(|p| p.library_paths.values());
+                tl.compiler_config
+                    .library_paths
+                    .values()
+                    .chain(nested)
+                    .filter(|path| crate::project_file::is_project_file(path))
+                    .map(SourcePath::new)
+                    .filter(|path| !tl.library_projects.contains_key(path))
+                    .unique()
+                    .collect::<Vec<_>>()
+            };
+            if pending.is_empty() {
+                return;
+            }
+            let file_loader = state.borrow().tl.compiler_config.open_import_callback.clone();
+            for path in pending {
+                let project = crate::project_file::ProjectFile::load_with_file_loader_diagnostic(
+                    path.clone(),
+                    file_loader.as_ref(),
+                )
+                .await;
+                let project = project.map(|project| {
+                    let data = project.resolved_data();
+                    Rc::new(LibraryProject {
+                        source_path: project.source_path().clone(),
+                        root: project.source_path().parent(),
+                        main: project.main(),
+                        edition: project.edition(),
+                        include_paths: data.include_paths.unwrap_or_default(),
+                        library_paths: data.library_paths.unwrap_or_default(),
+                    })
+                });
+                state.borrow_mut().tl.library_projects.insert(path, project);
+            }
+        }
+    }
+
+    /// Records the project file of the library that `import` uses as a file of this build,
+    /// and reports it if it failed to load.
+    fn use_library_project(state: &RefCell<BorrowedTypeLoader<'_>>, import: &ImportedTypes) {
+        let state = &mut *state.borrow_mut();
+        let referencing_file = import.import_uri_token.source_file.path();
+        let Some((_, _, path)) = import
+            .file
+            .strip_prefix('@')
+            .and_then(|import| state.tl.library_import(Some(referencing_file), import))
+        else {
+            return;
+        };
+        let path = SourcePath::new(path);
+        match state.tl.library_projects.get(&path) {
+            Some(Ok(project)) => {
+                state.diag.all_loaded_files.insert(project.source_path.clone());
+            }
+            Some(Err(error)) => {
+                let source_path = Spanned::source_file(error).map_or(path, |f| f.path().clone());
+                if state.diag.all_loaded_files.insert(source_path) {
+                    state.diag.push_compiler_error(error.clone());
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// The library name, the file, and the library path of `import`, a path such as
+    /// `library/file.slint` without its `@`, in the project of `referencing_file`.
+    fn library_import<'s, 'i>(
+        &'s self,
+        referencing_file: Option<&SourcePath>,
+        import: &'i str,
+    ) -> Option<(&'i str, Option<&'i str>, &'s Path)> {
+        let (library, file) = import.split_once('/').map_or((import, None), |(l, f)| (l, Some(f)));
+        let path = self.project_settings(referencing_file).library_paths.get(library)?;
+        Some((library, file, path))
+    }
+
+    /// The loaded library project of the project file at `path`.
+    fn library_project(&self, path: &Path) -> Option<&LibraryProject> {
+        self.library_projects.get(&SourcePath::new(path))?.as_ref().ok().map(|p| &**p)
+    }
+
+    /// The error for `import`, a path such as `@library/file.slint`, when it names a library
+    /// with a project file but not the library's main file.
+    pub fn library_import_error(
+        &self,
+        referencing_file: Option<&SourcePath>,
+        import: &str,
+    ) -> Option<String> {
+        let (library, file, path) =
+            self.library_import(referencing_file, import.strip_prefix('@')?)?;
+        if !crate::project_file::is_project_file(path) {
+            return None;
+        }
+        if file.is_some() {
+            return Some(format!(
+                "Use what \"@{library}\" exports instead: \"{import}\" is private to a library with a project file"
+            ));
+        }
+        let project = self.library_project(path)?;
+        project.main.is_none().then(|| {
+            format!(
+                "The project file of the library \"@{library}\" has no 'main': add 'main' to {}",
+                project.source_path
+            )
+        })
+    }
+
+    /// The library project whose directory holds `file`, unless a nested project root of the
+    /// application or another library is closer to `file`.
+    fn library_project_of(&self, file: &SourcePath) -> Option<&LibraryProject> {
+        if self.library_projects.is_empty() {
+            return None;
+        }
+        let libraries = self.library_projects.values().flatten().map(|p| (&p.root, Some(&**p)));
+        let applications = self.compiler_config.project_roots.iter().map(|root| (root, None));
+        libraries
+            .chain(applications)
+            .filter(|(root, _)| is_within(root, file))
+            .max_by(|(a, a_project), (b, b_project)| {
+                if a == b {
+                    // An application root in the same directory is the library's own project file
+                    a_project.is_some().cmp(&b_project.is_some())
+                } else if is_within(a, b) {
+                    core::cmp::Ordering::Less
+                } else {
+                    core::cmp::Ordering::Greater
+                }
+            })
+            .and_then(|(_, project)| project)
+    }
+
+    /// The settings of the library project whose directory holds `file`,
+    /// or else of the compiler configuration.
+    fn project_settings(&self, file: Option<&SourcePath>) -> ProjectSettings<'_> {
+        match file.and_then(|file| self.library_project_of(file)) {
+            Some(project) => ProjectSettings {
+                edition: Some(project.edition),
+                include_paths: &project.include_paths,
+                library_paths: &project.library_paths,
+            },
+            None => ProjectSettings {
+                edition: self.compiler_config.edition,
+                include_paths: &self.compiler_config.include_paths,
+                library_paths: &self.compiler_config.library_paths,
+            },
+        }
+    }
+
+    /// Sets the edition of the file of `node` from the project that the file belongs to.
+    pub(crate) fn set_edition(&self, node: &syntax_nodes::Document) {
+        if let Some(edition) = self.project_edition(node.source_file.path()) {
+            node.source_file.set_edition(edition);
+        }
+    }
+
+    /// The edition of the project that the file at `path` belongs to.
+    pub fn project_edition(&self, path: &SourcePath) -> Option<crate::project_file::SlintEdition> {
+        self.project_settings(Some(path)).edition
+    }
+
+    /// Waits until no other task loads `path`, and then claims it unless it's loaded.
+    /// A `Claim::Invalidated` or `Claim::Claimed` result must be released with `release_document`.
+    async fn claim_document<'a>(
+        state: &'a RefCell<BorrowedTypeLoader<'a>>,
+        path: &SourcePath,
+    ) -> Claim {
+        core::future::poll_fn(|cx| {
             let mut state = state.borrow_mut();
             let all_documents = &mut state.tl.all_documents;
-            match all_documents.currently_loading.entry(path_canon.clone()) {
+            match all_documents.currently_loading.entry(path.clone()) {
                 std::collections::hash_map::Entry::Occupied(mut e) => {
                     let waker = cx.waker();
                     if !e.get().iter().any(|w| w.will_wake(waker)) {
@@ -1499,105 +1868,48 @@ impl TypeLoader {
                     core::task::Poll::Pending
                 }
                 std::collections::hash_map::Entry::Vacant(v) => {
-                    match all_documents.docs.get(&path_canon) {
+                    match all_documents.docs.get(path) {
                         Some((LoadedDocument::Document(_), _)) => {
-                            core::task::Poll::Ready((true, None))
+                            core::task::Poll::Ready(Claim::Loaded)
                         }
                         Some((LoadedDocument::Invalidated(doc), errors)) => {
                             v.insert(Default::default());
-                            core::task::Poll::Ready((false, Some((doc.clone(), errors.clone()))))
+                            core::task::Poll::Ready(Claim::Invalidated(doc.clone(), errors.clone()))
                         }
                         None => {
                             v.insert(Default::default());
-                            core::task::Poll::Ready((false, None))
+                            core::task::Poll::Ready(Claim::Claimed)
                         }
                     }
                 }
             }
         })
-        .await;
-        if is_loaded {
-            return Ok(path_canon);
+        .await
+    }
+
+    fn release_document(state: &RefCell<BorrowedTypeLoader<'_>>, path: &SourcePath) {
+        let wakers = state.borrow_mut().tl.all_documents.currently_loading.remove(path).unwrap();
+        for waker in wakers {
+            waker.wake();
         }
+    }
 
-        let doc_node = if let Some((doc_node, errors)) = doc_node {
-            for e in errors {
-                state.borrow_mut().diag.push_internal_error(e);
-            }
-            Some(doc_node)
-        } else {
-            let callback = state
-                .borrow()
-                .tl
-                .compiler_config
-                .open_import_callback
-                .clone()
-                .filter(|_| !path_canon.is_builtin());
-            let loaded = match callback {
-                Some(callback) => callback(path_canon.clone()).await,
-                None => None,
-            };
-            let source_code_result = loaded.unwrap_or_else(|| path_canon.read_to_string());
-            match source_code_result {
-                Ok(source) => syntax_nodes::Document::new(crate::parser::parse(
-                    source,
-                    Some(path_canon.clone()),
-                    state.borrow_mut().diag,
-                )),
-                Err(err)
-                    if !resolved
-                        && matches!(
-                            err.kind(),
-                            // A path that can't name a file (e.g. one with a character
-                            // Windows forbids) can't be found either, so report it the
-                            // same way rather than leaking the raw OS error.
-                            ErrorKind::NotFound
-                                | ErrorKind::NotADirectory
-                                | ErrorKind::InvalidFilename
-                        ) =>
-                {
-                    let import_kind =
-                        if file_to_import.starts_with('@') { "library" } else { "include" };
-                    state.borrow_mut().diag.push_error(
-                        format!(
-                            "Cannot find requested import \"{file_to_import}\" in the {import_kind} search path",
-                        ),
-                        &import_token,
-                    );
-                    None
-                }
-                Err(err) => {
-                    state.borrow_mut().diag.push_error(
-                        format!("Error reading requested import \"{path_canon}\": {err}"),
-                        &import_token,
-                    );
-                    None
-                }
-            }
+    async fn read_import<'a>(
+        state: &'a RefCell<BorrowedTypeLoader<'a>>,
+        path: &SourcePath,
+    ) -> std::io::Result<String> {
+        let callback = state
+            .borrow()
+            .tl
+            .compiler_config
+            .open_import_callback
+            .clone()
+            .filter(|_| !path.is_builtin());
+        let loaded = match callback {
+            Some(callback) => callback(path.clone()).await,
+            None => None,
         };
-
-        let ok = if let Some(doc_node) = doc_node {
-            Self::load_file_impl(
-                state,
-                &path_canon,
-                doc_node,
-                path_canon.is_builtin(),
-                &import_stack,
-            )
-            .await;
-            state.borrow_mut().diag.all_loaded_files.insert(path_canon.clone());
-            true
-        } else {
-            false
-        };
-
-        let wakers =
-            state.borrow_mut().tl.all_documents.currently_loading.remove(&path_canon).unwrap();
-        for x in wakers {
-            x.wake();
-        }
-
-        if ok { Ok(path_canon) } else { Err(Some(path_canon)) }
+        loaded.unwrap_or_else(|| path.read_to_string())
     }
 
     /// Load a file, and its dependency, running only the import passes.
@@ -1613,6 +1925,7 @@ impl TypeLoader {
         let doc_node: syntax_nodes::Document =
             crate::parser::parse(source_code, Some(path.clone()), diag).into();
         let state = RefCell::new(BorrowedTypeLoader { tl: self, diag });
+        Self::load_library_projects(&state).await;
         Self::load_file_impl(&state, path, doc_node, is_builtin, &Default::default()).await;
     }
 
@@ -1630,6 +1943,7 @@ impl TypeLoader {
             diag.push_internal_error(e.clone());
         }
         let state = RefCell::new(BorrowedTypeLoader { tl: self, diag });
+        Self::load_library_projects(&state).await;
         Self::load_file_impl(&state, path, doc_node, false, &Default::default()).await;
     }
 
@@ -1648,6 +1962,7 @@ impl TypeLoader {
             crate::parser::parse(source_code, Some(path.clone()), diag).into();
         let parse_errors = diag.iter().cloned().collect();
         let state = RefCell::new(BorrowedTypeLoader { tl: self, diag });
+        Self::load_library_projects(&state).await;
         let (path, mut doc) =
             Self::load_doc_no_pass(&state, path, doc_node, false, &Default::default()).await;
 
@@ -1715,8 +2030,14 @@ impl TypeLoader {
     ) -> (SourcePath, Document) {
         let dependency_registry =
             Rc::new(RefCell::new(TypeRegister::new(&state.borrow().tl.global_type_registry)));
-        dependency_registry.borrow_mut().expose_internal_types =
-            is_builtin || state.borrow().tl.compiler_config.enable_experimental;
+        {
+            let mut registry = dependency_registry.borrow_mut();
+            if is_builtin {
+                registry.experimental_features = crate::ExperimentalFeatures::all();
+            }
+            registry.expose_internal_types =
+                registry.experimental_features.contains(crate::ExperimentalFeature::InternalTypes);
+        }
         let (imports, reexports) = Self::load_dependencies_recursively_impl(
             state,
             &dependency_doc,
@@ -1725,6 +2046,7 @@ impl TypeLoader {
         )
         .await;
 
+        state.borrow().tl.set_edition(&dependency_doc);
         let ignore_missing_font_files =
             state.borrow().tl.compiler_config.resource_url_mapper.is_some();
         let symbol_counters = state.borrow().tl.symbol_counters.clone();
@@ -1807,22 +2129,50 @@ impl TypeLoader {
         }
     }
 
-    /// Lookup a library and filename and try to find the absolute filename based on the library path
-    fn find_file_in_library_path(&self, maybe_library_import: &str) -> Option<SourcePath> {
-        let (library, file) = maybe_library_import
-            .splitn(2, '/')
-            .collect_tuple()
-            .map(|(library, path)| (library, Some(path)))
-            .unwrap_or((maybe_library_import, None));
-        self.compiler_config.library_paths.get(library).and_then(|library_path| {
-            let library_path = SourcePath::new(library_path);
-            let path = match file {
-                // "@library/file.slint" -> "/path/to/library/" + "file.slint"
-                Some(file) => library_path.join(file)?,
-                // "@library" -> "/path/to/library/lib.slint"
-                None => library_path,
-            };
-            Some(crate::fileaccess::find_file(&path).unwrap_or(path))
+    /// Lookup a library and filename and try to find the absolute filename based on the library
+    /// paths of the project that `referencing_file` belongs to
+    fn find_file_in_library_path(
+        &self,
+        referencing_file: Option<&SourcePath>,
+        maybe_library_import: &str,
+    ) -> Option<SourcePath> {
+        let (_, file, library_path) =
+            self.library_import(referencing_file, maybe_library_import)?;
+        let is_project_file = crate::project_file::is_project_file(library_path);
+        let path = match file {
+            Some(_) if is_project_file => return None,
+            // "@library/file.slint" -> "/path/to/library/" + "file.slint"
+            Some(file) => SourcePath::new(library_path).join(file)?,
+            // "@library" -> the "main" of "/path/to/library/slint-project.json"
+            None if is_project_file => self.library_project(library_path)?.main.clone()?,
+            // "@library" -> "/path/to/library/lib.slint"
+            None => SourcePath::new(library_path),
+        };
+        Some(crate::fileaccess::find_file(&path).unwrap_or(path))
+    }
+
+    /// The import through which the application reaches `file`, such as `@library/file.slint`,
+    /// or `@library` for the main file of a library with a project file.
+    pub fn library_import_for(&self, file: &SourcePath) -> Option<String> {
+        let file_name = file.to_string();
+        self.compiler_config.library_paths.iter().find_map(|(name, path)| {
+            if crate::project_file::is_project_file(path) {
+                return self.library_project(path)?.is_main(file).then(|| format!("@{name}"));
+            }
+            let rest = file_name.strip_prefix(&SourcePath::new(path).to_string())?;
+            match rest.strip_prefix(['/', '\\']) {
+                Some(rest) => Some(format!("@{name}/{}", rest.replace('\\', "/"))),
+                None => rest.is_empty().then(|| format!("@{name}")),
+            }
+        })
+    }
+
+    /// Returns whether `file` is a file of a library with a project file, other than its main
+    /// file, which an application can't import through the library.
+    /// The files of a library whose project is also open as an application aren't private.
+    pub fn is_private_library_file(&self, file: &SourcePath) -> bool {
+        self.library_project_of(file).is_some_and(|project| {
+            !self.compiler_config.project_roots.contains(&project.root) && !project.is_main(file)
         })
     }
 
@@ -1833,18 +2183,35 @@ impl TypeLoader {
         referencing_file: Option<&SourcePath>,
         file_to_import: &str,
     ) -> Option<SourcePath> {
+        self.include_path_candidates(referencing_file, file_to_import)
+            .iter()
+            .find_map(crate::fileaccess::find_file)
+    }
+
+    fn include_path_candidates(
+        &self,
+        referencing_file: Option<&SourcePath>,
+        file_to_import: &str,
+    ) -> Vec<SourcePath> {
         let referencing_dir = referencing_file.map(SourcePath::parent);
-        let include_dirs = self.compiler_config.include_paths.iter().filter_map(|include_path| {
-            match (&referencing_dir, include_path.to_str()) {
+        let include_dirs = self.project_settings(referencing_file).include_paths.iter().filter_map(
+            |include_path| match (&referencing_dir, include_path.to_str()) {
                 (Some(dir), Some(include_path)) => dir.join(include_path),
                 _ => Some(SourcePath::new(include_path)),
-            }
-        });
+            },
+        );
         let builtin_style = (file_to_import == "std-widgets.slint"
             || (file_to_import == "style-base.slint" && referencing_file.is_none())
             || (file_to_import == "std-widgets-impl.slint" && referencing_file.is_none())
             || referencing_file.is_some_and(SourcePath::is_builtin))
         .then(|| SourcePath::Builtin(self.resolved_style.as_str().into()));
+        let is_enabled_widget_interfaces = file_to_import == "std-widget-interfaces.slint"
+            && self
+                .compiler_config
+                .experimental_features
+                .contains(crate::ExperimentalFeature::Interfaces);
+        let widget_interfaces =
+            is_enabled_widget_interfaces.then(|| SourcePath::Builtin("common".into()));
 
         // The directory of the current file is the first in the list of include directories.
         referencing_dir
@@ -1858,13 +2225,9 @@ impl TypeLoader {
             )
             .chain(include_dirs)
             .chain(builtin_style)
-            .chain(
-                (file_to_import == "std-widget-interfaces.slint"
-                    && self.compiler_config.enable_experimental)
-                    .then(|| SourcePath::Builtin("common".into())),
-            )
+            .chain(widget_interfaces)
             .filter_map(|dir| dir.join(file_to_import))
-            .find_map(|candidate| crate::fileaccess::find_file(&candidate))
+            .collect()
     }
 
     fn collect_dependencies<'a: 'b, 'b>(
@@ -1936,23 +2299,15 @@ impl TypeLoader {
 
     /// Returns all file paths whose on-disk changes can affect the current document graph.
     ///
-    /// This includes loaded documents and unresolved import targets that are kept in the
-    /// dependency graph so newly created files can invalidate their dependents.
+    /// This includes loaded documents, the resources they reference, and unresolved import
+    /// targets that are kept in the dependency graph so newly created files can invalidate
+    /// their dependents.
     pub fn all_files_to_watch(&self) -> HashSet<SourcePath> {
-        // Note: This only works if the full set of passes have run (e.g. in load_root_file, but not
-        // in load_file).
-        //
-        // TODO: the LSP will only run the import passes, which do not yet
-        // detect embedded file resources, so we won't know about them until we
-        // run the full pass pipeline (e.g. in the editor binary).
         fn resource_paths(document: &LoadedDocument) -> Vec<SourcePath> {
             match document {
-                LoadedDocument::Document(document) => document
-                    .embedded_file_resources
-                    .borrow()
-                    .iter()
-                    .flat_map(|resource| resource.path.clone())
-                    .collect(),
+                LoadedDocument::Document(document) => {
+                    document.referenced_file_resources.borrow().iter().cloned().collect()
+                }
                 LoadedDocument::Invalidated(_document) => vec![],
             }
         }
@@ -1964,6 +2319,7 @@ impl TypeLoader {
                 std::iter::once(path.clone()).chain(resource_paths(document))
             })
             .chain(self.all_documents.dependencies.keys().cloned())
+            .chain(self.library_projects.keys().cloned())
             .collect()
     }
 
@@ -2030,6 +2386,16 @@ fn get_native_style(all_loaded_files: &mut std::collections::BTreeSet<SourcePath
         return style;
     }
     i_slint_common::get_native_style(false, &std::env::var("TARGET").unwrap_or_default()).into()
+}
+
+fn is_not_found(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        // A path that can't name a file (e.g. one with a character
+        // Windows forbids) can't be found either, so report it the
+        // same way rather than leaking the raw OS error.
+        ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::InvalidFilename
+    )
 }
 
 /// For a .rs file, return the manifest directory
@@ -2185,7 +2551,7 @@ fn test_import_path_verbatim() {
         let requested_ = requested_.clone();
         Box::pin(async move {
             requested_.borrow_mut().push(path);
-            Some(Ok("export XX := Rectangle {} ".to_owned()))
+            Some(Ok("export component XX inherits Rectangle {} ".to_owned()))
         })
     }));
 
@@ -2237,7 +2603,7 @@ fn test_load_from_callback_ok() {
             assert_eq!(path.to_string().replace('\\', "/"), "../FooBar.slint");
             assert!(!ok_.get());
             ok_.set(true);
-            Some(Ok("export XX := Rectangle {} ".to_owned()))
+            Some(Ok("export component XX inherits Rectangle {} ".to_owned()))
         })
     }));
 
@@ -2246,7 +2612,7 @@ fn test_load_from_callback_ok() {
         r#"
 /* ... */
 import { XX } from "../Ab/.././FooBar.slint";
-X := XX {}
+component X inherits XX {}
 "#
         .into(),
         Some(SourcePath::new("HELLO")),
@@ -2310,6 +2676,137 @@ fn test_load_from_callback_with_url_base() {
         ["https://slint.dev/ui/widgets/a%20b.slint", "https://slint.dev/ui/y.slint"]
     );
     assert!(loader.get_document(&SourcePath::new("https://slint.dev/ui/y.slint")).is_some());
+}
+
+#[cfg(test)]
+fn load_url_imports_with_include_paths(
+    source: &str,
+    include_paths: &[&str],
+    files: &'static [(&'static str, &'static str)],
+) -> (BuildDiagnostics, Vec<String>) {
+    let requested = Rc::new(RefCell::new(Vec::new()));
+    let requested_ = requested.clone();
+
+    let mut compiler_config =
+        CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
+    compiler_config.style = Some("fluent".into());
+    compiler_config.include_paths = include_paths.iter().map(PathBuf::from).collect();
+    compiler_config.open_import_callback = Some(Rc::new(move |path| {
+        requested_.borrow_mut().push(path.to_string());
+        Box::pin(async move {
+            // Like a loader that fetches, so that parallel imports interleave.
+            let mut yielded = false;
+            core::future::poll_fn(|cx| {
+                if std::mem::replace(&mut yielded, true) {
+                    core::task::Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    core::task::Poll::Pending
+                }
+            })
+            .await;
+            Some(
+                files
+                    .iter()
+                    .find(|(url, _)| *url == path.to_string())
+                    .map(|(_, source)| source.to_string())
+                    .ok_or_else(|| ErrorKind::NotFound.into()),
+            )
+        })
+    }));
+
+    let mut build_diagnostics = BuildDiagnostics::default();
+    let doc_node: syntax_nodes::Document = crate::parser::parse(
+        source.into(),
+        Some(SourcePath::new("https://slint.dev/project/ui/main.slint")),
+        &mut build_diagnostics,
+    )
+    .into();
+    let mut loader = TypeLoader::new(compiler_config, &mut build_diagnostics);
+    let registry = Rc::new(RefCell::new(TypeRegister::new(&loader.global_type_registry)));
+    spin_on::spin_on(loader.load_dependencies_recursively(
+        &doc_node,
+        &mut build_diagnostics,
+        &registry,
+    ));
+    let requested = requested.borrow().clone();
+    (build_diagnostics, requested)
+}
+
+#[test]
+fn test_load_from_callback_searches_url_include_paths() {
+    let (diagnostics, requested) = load_url_imports_with_include_paths(
+        "import { Card } from \"card.slint\"; export component X { Card {} }",
+        &["https://slint.dev/project/empty", "../shared"],
+        &[("https://slint.dev/project/shared/card.slint", "export component Card {}")],
+    );
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.to_string_vec());
+    assert_eq!(
+        requested,
+        [
+            "https://slint.dev/project/ui/card.slint",
+            "https://slint.dev/project/empty/card.slint",
+            "https://slint.dev/project/shared/card.slint",
+        ]
+    );
+}
+
+#[test]
+fn test_load_from_callback_prefers_the_importing_directory() {
+    let (diagnostics, requested) = load_url_imports_with_include_paths(
+        "import { Card } from \"card.slint\"; export component X { Card {} }",
+        &["../shared"],
+        &[
+            ("https://slint.dev/project/ui/card.slint", "export component Card {}"),
+            ("https://slint.dev/project/shared/card.slint", "export component Other {}"),
+        ],
+    );
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.to_string_vec());
+    assert_eq!(requested, ["https://slint.dev/project/ui/card.slint"]);
+}
+
+#[test]
+fn test_load_from_callback_reads_a_file_found_in_the_include_paths_once() {
+    let (diagnostics, requested) = load_url_imports_with_include_paths(
+        "import { A } from \"a.slint\"; import { B } from \"b.slint\"; export component X { A {} B {} }",
+        &["../shared"],
+        &[
+            (
+                "https://slint.dev/project/ui/a.slint",
+                "import { Card } from \"card.slint\"; export component A { Card {} }",
+            ),
+            (
+                "https://slint.dev/project/ui/b.slint",
+                "import { Card } from \"card.slint\"; export component B { Card {} }",
+            ),
+            ("https://slint.dev/project/shared/card.slint", "export component Card {}"),
+        ],
+    );
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.to_string_vec());
+    assert_eq!(
+        requested.iter().filter(|path| path.ends_with("/shared/card.slint")).count(),
+        1,
+        "{requested:?}"
+    );
+}
+
+#[test]
+fn test_load_from_callback_reports_an_import_missing_from_url_include_paths() {
+    let (diagnostics, requested) = load_url_imports_with_include_paths(
+        "import { Card } from \"card.slint\"; export component X { Card {} }",
+        &["../shared"],
+        &[],
+    );
+    assert_eq!(
+        diagnostics.to_string_vec(),
+        [
+            "https://slint.dev/project/ui/main.slint:1: Cannot find requested import \"card.slint\" in the include search path"
+        ]
+    );
+    assert_eq!(
+        requested,
+        ["https://slint.dev/project/ui/card.slint", "https://slint.dev/project/shared/card.slint"]
+    );
 }
 
 #[test]
@@ -2432,17 +2929,64 @@ export component Main inherits Window {
 
 #[test]
 fn test_load_root_file_tracks_missing_resources() {
+    for embed_resources in
+        [crate::EmbedResourcesKind::Nothing, crate::EmbedResourcesKind::ListAllResources]
+    {
+        let mut compiler_config =
+            CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
+        compiler_config.style = Some("fluent".into());
+        compiler_config.embed_resources = embed_resources;
+        let mut build_diagnostics = BuildDiagnostics::default();
+        let main_path = SourcePath::new(std::env::temp_dir().join("main.slint"));
+        let resource_path = SourcePath::new(std::env::temp_dir().join("icon.svg"));
+
+        let mut loader = TypeLoader::new(compiler_config, &mut build_diagnostics);
+        let raw_loader = spin_on::spin_on(
+            loader.load_root_file(
+                &main_path,
+                r#"
+    export component Main inherits Window {
+        Image {
+            source: @image-url("icon.svg");
+        }
+    }
+    "#
+                .into(),
+                true,
+                &mut build_diagnostics,
+            ),
+        );
+
+        // The image is not embedded, so it doesn't cause an error
+        assert!(!build_diagnostics.has_errors());
+        assert!(
+            loader.all_files_to_watch().contains(&main_path),
+            "watch paths: {:?}",
+            loader.all_files_to_watch()
+        );
+        assert!(
+            loader.all_files_to_watch().contains(&resource_path),
+            "watch paths: {:?}",
+            loader.all_files_to_watch()
+        );
+        let raw_loader = raw_loader.unwrap();
+        assert!(raw_loader.all_files_to_watch().contains(&main_path));
+        assert!(raw_loader.all_files_to_watch().contains(&resource_path));
+    }
+}
+
+#[test]
+fn test_load_file_tracks_missing_resources() {
     let mut compiler_config =
         CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
     compiler_config.style = Some("fluent".into());
-    compiler_config.embed_resources = crate::EmbedResourcesKind::ListAllResources;
     let mut build_diagnostics = BuildDiagnostics::default();
     let main_path = SourcePath::new(std::env::temp_dir().join("main.slint"));
     let resource_path = SourcePath::new(std::env::temp_dir().join("icon.svg"));
 
     let mut loader = TypeLoader::new(compiler_config, &mut build_diagnostics);
     spin_on::spin_on(
-        loader.load_root_file(
+        loader.load_file(
             &main_path,
             r#"
 export component Main inherits Window {
@@ -2457,18 +3001,10 @@ export component Main inherits Window {
         ),
     );
 
-    // The image is not embedded, so it doesn't cause an error
-    assert!(!build_diagnostics.has_errors());
-    assert!(
-        loader.all_files_to_watch().contains(&main_path),
-        "watch paths: {:?}",
-        loader.all_files_to_watch()
-    );
-    assert!(
-        loader.all_files_to_watch().contains(&resource_path),
-        "watch paths: {:?}",
-        loader.all_files_to_watch()
-    );
+    assert!(!build_diagnostics.has_errors(), "{:?}", build_diagnostics.to_string_vec());
+    let watch_files = loader.all_files_to_watch();
+    assert!(watch_files.contains(&resource_path), "watch paths: {watch_files:?}");
+    assert!(loader.get_document(&main_path).unwrap().embedded_file_resources.borrow().is_empty());
 }
 
 #[test]
@@ -2490,12 +3026,35 @@ fn test_manual_import() {
 }
 
 #[test]
+fn component_container_requires_its_feature() {
+    let source = "export component Test { in property <component-factory> f; ComponentContainer { component-factory: f; } }";
+    let mut compiler_config =
+        CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
+    compiler_config.style = Some("fluent".into());
+    compiler_config.experimental_features = crate::ExperimentalFeatures::default();
+    let mut diag = BuildDiagnostics::default();
+    let node = crate::parser::parse(source.into(), None, &mut diag);
+    let (_, diag, _) = spin_on::spin_on(crate::compile_syntax_node(node, diag, compiler_config));
+    let errors = diag.iter().filter(|d| d.level() == crate::diagnostics::DiagnosticLevel::Error);
+    let messages = errors.map(|d| d.message().to_string()).collect::<Vec<_>>();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    for what in ["component-factory", "ComponentContainer"] {
+        let expected = format!("'{what}' is experimental. Add 'component-container'");
+        assert!(messages.iter().any(|m| m.starts_with(&expected)), "{messages:?}");
+    }
+}
+
+#[test]
 fn test_import_widget_interfaces() {
     for enable_experimental in [false, true] {
         let mut compiler_config =
             CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
         compiler_config.style = Some("fluent".into());
-        compiler_config.enable_experimental = enable_experimental;
+        compiler_config.experimental_features = if enable_experimental {
+            crate::ExperimentalFeature::Interfaces.into()
+        } else {
+            crate::ExperimentalFeatures::default()
+        };
         let mut build_diagnostics = BuildDiagnostics::default();
         let mut loader = TypeLoader::new(compiler_config, &mut build_diagnostics);
 
@@ -2684,6 +3243,142 @@ export component Test inherits Window { }
 }
 
 #[test]
+fn test_library_project_files() {
+    let cwd = std::env::current_dir().unwrap();
+    let files = HashMap::from([
+        (
+            SourcePath::new("/lib/slint-project.json"),
+            r#"{ "edition": "1.18", "main": "lib.slint" }"#,
+        ),
+        (SourcePath::new("/lib/lib.slint"), r#"export { Button } from "button.slint";"#),
+        (SourcePath::new("/lib/button.slint"), "export component Button { }"),
+        (
+            SourcePath::new(cwd.join("rel/slint-project.json")),
+            r#"{ "edition": "1.19", "main": "rel.slint" }"#,
+        ),
+        (SourcePath::new(cwd.join("rel/rel.slint")), "export component Rel { }"),
+    ]);
+    let mut compiler_config =
+        CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
+    compiler_config.style = Some("fluent".into());
+    compiler_config.edition = Some(crate::project_file::SlintEdition::V1_19);
+    // An example of the library, with a project file of its own in the library's directory,
+    // and the library's project file, as in an editor where both are open
+    compiler_config.project_roots = vec![SourcePath::new("/lib/example"), SourcePath::new("/lib")];
+    compiler_config.library_paths = HashMap::from([
+        ("lib".into(), PathBuf::from("/lib/slint-project.json")),
+        ("rel".into(), PathBuf::from("rel/slint-project.json")),
+    ]);
+    compiler_config.open_import_callback = Some(Rc::new(move |path| {
+        let source = files.get(&path).map(|source| Ok(source.to_string()));
+        Box::pin(async move { source })
+    }));
+    let mut without_project_file = compiler_config.clone();
+    without_project_file.project_roots.clear();
+
+    let main = SourcePath::new("/lib/example/main.slint");
+    let main_source = r#"
+import { Button } from "@lib";
+import { Rel } from "@rel";
+export component Main { Button { } Rel { } }
+"#;
+    let mut test_diags = crate::diagnostics::BuildDiagnostics::default();
+    let doc_node = crate::parser::parse(main_source.into(), Some(main.clone()), &mut test_diags);
+    let doc_node: syntax_nodes::Document = doc_node.into();
+    let mut build_diagnostics = BuildDiagnostics::default();
+    let mut loader = TypeLoader::new(compiler_config, &mut build_diagnostics);
+    let registry = Rc::new(RefCell::new(TypeRegister::new(&loader.global_type_registry)));
+    spin_on::spin_on(loader.load_dependencies_recursively(
+        &doc_node,
+        &mut build_diagnostics,
+        &registry,
+    ));
+    assert!(!build_diagnostics.has_errors(), "{:?}", build_diagnostics.to_string_vec());
+
+    assert_eq!(
+        loader.library_import_for(&SourcePath::new("/lib/lib.slint")).as_deref(),
+        Some("@lib")
+    );
+    assert_eq!(loader.library_import_for(&SourcePath::new("/lib/button.slint")), None);
+    // The library's own project is open, so its files aren't private
+    assert!(!loader.is_private_library_file(&SourcePath::new("/lib/button.slint")));
+
+    assert_eq!(
+        loader.project_settings(Some(&main)).edition,
+        Some(crate::project_file::SlintEdition::V1_19)
+    );
+    assert_eq!(
+        loader.project_settings(Some(&SourcePath::new("/lib/button.slint"))).edition,
+        Some((1, 18).into())
+    );
+
+    let relative_project_file = SourcePath::new(cwd.join("rel/slint-project.json"));
+    assert!(!loader.drop_document(&relative_project_file).unwrap().is_empty());
+    assert_eq!(loader.resolve_import_path(None, "@lib"), None);
+    assert_eq!(loader.resolve_import_path(None, "@rel"), None);
+
+    // Without a project file, the directory of the root file holds the application's files
+    let (build_diagnostics, loader) = spin_on::spin_on(crate::load_root_file(
+        &main,
+        main_source.into(),
+        BuildDiagnostics::default(),
+        without_project_file.clone(),
+    ));
+    assert!(!build_diagnostics.has_errors(), "{:?}", build_diagnostics.to_string_vec());
+    assert!(loader.is_private_library_file(&SourcePath::new("/lib/button.slint")));
+    assert!(!loader.is_private_library_file(&SourcePath::new("/lib/lib.slint")));
+    assert!(!loader.is_private_library_file(&main));
+
+    let mut build_diagnostics = BuildDiagnostics::default();
+    let doc_node = crate::parser::parse(main_source.into(), Some(main), &mut build_diagnostics);
+    let (_, build_diagnostics, _) = spin_on::spin_on(crate::compile_syntax_node(
+        doc_node,
+        build_diagnostics,
+        without_project_file,
+    ));
+    assert!(!build_diagnostics.has_errors(), "{:?}", build_diagnostics.to_string_vec());
+}
+
+#[test]
+fn test_library_project_file_without_main() {
+    let project_file = SourcePath::new("/lib/slint-project.json");
+    let mut compiler_config =
+        CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
+    compiler_config.style = Some("fluent".into());
+    compiler_config.library_paths =
+        HashMap::from([("lib".into(), PathBuf::from("/lib/slint-project.json"))]);
+    let project_file_ = project_file.clone();
+    compiler_config.open_import_callback = Some(Rc::new(move |path| {
+        let is_project_file = path == project_file_;
+        Box::pin(async move { is_project_file.then(|| Ok(r#"{ "edition": "1.19" }"#.to_owned())) })
+    }));
+
+    let mut test_diags = crate::diagnostics::BuildDiagnostics::default();
+    let doc_node = crate::parser::parse(
+        r#"import { A } from "@lib";"#.into(),
+        Some(SourcePath::new("/app/main.slint")),
+        &mut test_diags,
+    );
+    let doc_node: syntax_nodes::Document = doc_node.into();
+    let mut build_diagnostics = BuildDiagnostics::default();
+    let mut loader = TypeLoader::new(compiler_config.clone(), &mut build_diagnostics);
+    let registry = Rc::new(RefCell::new(TypeRegister::new(&loader.global_type_registry)));
+    spin_on::spin_on(loader.load_dependencies_recursively(
+        &doc_node,
+        &mut build_diagnostics,
+        &registry,
+    ));
+    assert!(build_diagnostics.has_errors());
+    // Adding 'main' to the project file must trigger a new build
+    assert!(build_diagnostics.all_loaded_files.contains(&project_file));
+    assert!(loader.is_private_library_file(&SourcePath::new("/lib/x.slint")));
+
+    compiler_config.library_paths.clear();
+    loader.set_compiler_config(compiler_config);
+    assert!(!loader.is_private_library_file(&SourcePath::new("/lib/x.slint")));
+}
+
+#[test]
 fn test_library_import_errors() {
     let test_source_path: PathBuf =
         [env!("CARGO_MANIFEST_DIR"), "tests", "typeloader", "library"].iter().collect();
@@ -2799,11 +3494,10 @@ fn test_snapshotting() {
 #[test]
 fn test_snapshotting_typed_slot_implementations() {
     let mut config = crate::CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
-    config.enable_experimental = true;
+    config.experimental_features = crate::ExperimentalFeatures::all();
     let mut type_loader = TypeLoader::new(config, &mut BuildDiagnostics::default());
     let library_path = SourcePath::new("/tmp/typed-slot-implementations.slint");
     let mut diag = BuildDiagnostics::default();
-    diag.enable_experimental = true;
     spin_on::spin_on(
         type_loader.load_file(
             &library_path,

@@ -39,6 +39,7 @@ pub mod context;
 pub mod cursor;
 pub mod data_transfer;
 pub mod date_time;
+pub mod debug_info;
 pub mod debug_log;
 #[doc(hidden)]
 pub mod font_collection;
@@ -53,6 +54,7 @@ pub mod layout;
 pub mod lengths;
 pub mod menus;
 pub mod model;
+pub mod once_box;
 pub mod partial_renderer;
 pub mod platform;
 pub mod properties;
@@ -104,7 +106,9 @@ pub use graphics::BorderRadius;
 #[doc(inline)]
 pub use data_transfer::DataTransfer;
 
-pub use context::{SlintContext, SlintContextWeak, with_existing_context, with_global_context};
+pub use context::{
+    MotionPreference, SlintContext, SlintContextWeak, with_existing_context, with_global_context,
+};
 
 #[cfg(not(slint_int_coord))]
 pub type Coord = f32;

@@ -6,11 +6,14 @@
 use lyon_path::geom::euclid::approxeq::ApproxEq;
 use std::sync::Arc;
 
+use crate::builtin_functions::BuiltinFunction;
 use crate::diagnostics::{BuildDiagnostics, DiagnosticLevel, Spanned};
+use crate::element_type::{ElementType, PropertyLookupMode};
 use crate::expression_tree::*;
+use crate::expression_types::{MinMaxOp, Orientation, Unit};
 use crate::langtype::Type;
-use crate::langtype::{ElementType, PropertyLookupMode};
 use crate::layout::*;
+use crate::native_class::PropertyVisibility;
 use crate::object_tree::*;
 use crate::typeloader::TypeLoader;
 use crate::typeregister::{TypeRegister, layout_info_type};
@@ -40,7 +43,7 @@ pub(crate) fn synthesize_layoutinfo_v_with_constraint_on(
         prop_name.clone(),
         PropertyDeclaration {
             property_type: function_ty,
-            visibility: crate::object_tree::PropertyVisibility::Private,
+            visibility: PropertyVisibility::Private,
             pure: Some(true),
             synthesized: true,
             ..Default::default()
@@ -543,7 +546,10 @@ fn lower_grid_layout(
                 layout_child.borrow_mut().base_type = type_register.empty_type();
                 collected_children.push(layout_child);
             } else {
-                component.optimized_elements.borrow_mut().push(layout_child);
+                component.optimized_elements.borrow_mut().push(OptimizedElement {
+                    element: layout_child,
+                    former_parent: Rc::downgrade(grid_layout_element),
+                });
             }
         } else {
             grid.add_element(
@@ -785,7 +791,8 @@ impl GridLayout {
                 let e = nr.element();
                 let mut nr = nr.clone();
                 if e.borrow().repeated.is_some()
-                    && let crate::langtype::ElementType::Component(c) = e.borrow().base_type.clone()
+                    && let crate::element_type::ElementType::Component(c) =
+                        e.borrow().base_type.clone()
                 {
                     nr = NamedReference::new(&c.root_element, nr.name().clone())
                 };
@@ -917,7 +924,7 @@ impl GridLayout {
                         let e = nr.element();
                         let mut nr = nr.clone();
                         if e.borrow().repeated.is_some()
-                            && let crate::langtype::ElementType::Component(c) =
+                            && let crate::element_type::ElementType::Component(c) =
                                 e.borrow().base_type.clone()
                         {
                             nr = NamedReference::new(&c.root_element, nr.name().clone())
@@ -1143,7 +1150,8 @@ impl GridLayout {
 /// runtime solver, and the layout info computation.
 ///
 /// Runs after the default_geometry pass so that every cell's layout info
-/// property exists.
+/// property exists, and after `synthesize_layoutinfo_v_with_constraint`,
+/// whose function needs the layout's padding to compute the width it gives its cell.
 pub fn optimize_single_cell_layouts(component: &Rc<Component>) {
     recurse_elem_including_sub_components(component, &(), &mut |elem, _| {
         // Collect first: the rewrite modifies the bindings.
@@ -1664,7 +1672,16 @@ fn lower_box_layout(
             }
         } else {
             let (pad_expr, size_expr) = stretch_bindings.as_ref().unwrap();
-            if let Some(pad_expr) = pad_expr {
+            if let Some(binding) =
+                actual_elem.borrow().binding(pad).filter(|binding| binding.has_binding())
+            {
+                if !fixed_ortho {
+                    diag.push_warning(
+                        format!("The layout stretches the '{ortho}' of this element, so '{pad}' can move it past the edge, consider setting its '{ortho}' too, or using the layout's 'padding' or 'cross-axis-alignment'"),
+                        &*binding,
+                    );
+                }
+            } else if let Some(pad_expr) = pad_expr {
                 actual_elem.borrow_mut().set_binding(pad.into(), pad_expr.clone().into());
             }
             if !fixed_ortho {
@@ -1946,9 +1963,14 @@ fn lower_dialog_layout(
                     &role_binding,
                 );
             }
+            if is_standard_button(&layout_child.borrow()) {
+                diag.push_warning(
+                    "'dialog-button-role' overrides the role that a 'StandardButton' gets from its 'kind': remove it, or use a 'Button' for a custom role".into(),
+                    &role_binding,
+                );
+            }
             true
-        } else if matches!(&layout_child.borrow().lookup_property("kind", PropertyLookupMode::ComponentLocal).property_type, Type::Enumeration(e) if e.name == "StandardButtonKind")
-        {
+        } else if is_standard_button(&layout_child.borrow()) {
             // layout_child is a StandardButton
             match layout_child.borrow().binding("kind") {
                 None => diag.push_error(
@@ -2013,6 +2035,7 @@ fn lower_dialog_layout(
                                         pure: None,
                                         shadowed_name: None,
                                         shadowable: false,
+                                        testable: false,
                                         moved_from: None,
                                         deprecated: None,
                                         synthesized: false,
@@ -2456,6 +2479,18 @@ fn check_number_literal_is_positive_integer(
         }
         _ => false,
     }
+}
+
+/// Whether lowering `parent` requires `name` to be set on its child `elem`,
+/// even to its default value: the `kind` of a StandardButton in a Dialog
+pub(crate) fn dialog_requires_binding(parent: &ElementRc, elem: &Element, name: &str) -> bool {
+    name == "kind"
+        && parent.borrow().builtin_type().is_some_and(|b| b.name == "Dialog")
+        && is_standard_button(elem)
+}
+
+fn is_standard_button(elem: &Element) -> bool {
+    matches!(&elem.lookup_property("kind", PropertyLookupMode::ComponentLocal).property_type, Type::Enumeration(e) if e.name == "StandardButtonKind")
 }
 
 fn recognized_layout_types() -> &'static [&'static str] {

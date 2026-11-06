@@ -54,6 +54,7 @@ use vtable::*;
 mod component_container;
 pub use self::component_container::*;
 mod flickable;
+pub(crate) use flickable::Dimension;
 pub use flickable::{AutoBool, Flickable};
 mod text;
 pub use text::*;
@@ -547,7 +548,7 @@ impl RenderBorderRectangle for BasicBorderRectangle {
         self.border_width()
     }
     fn border_radius(self: Pin<&Self>) -> LogicalBorderRadius {
-        LogicalBorderRadius::from_length(self.border_radius())
+        LogicalBorderRadius::from_length(self.border_radius()).max(Default::default())
     }
     fn border_color(self: Pin<&Self>) -> Brush {
         self.border_color()
@@ -681,6 +682,7 @@ impl RenderBorderRectangle for BorderRectangle {
             self.border_bottom_right_radius(),
             self.border_bottom_left_radius(),
         )
+        .max(Default::default())
     }
     fn border_color(self: Pin<&Self>) -> Brush {
         self.border_color()
@@ -837,6 +839,7 @@ impl Clip {
             self.border_bottom_right_radius(),
             self.border_bottom_left_radius(),
         )
+        .max(Default::default())
     }
 }
 
@@ -1242,6 +1245,9 @@ pub struct PropertyAnimation {
     pub easing: crate::animations::EasingCurve,
     #[rtti_field]
     pub enabled: bool,
+    /// Interpolation method for angle properties (which arc / direction to take)
+    #[rtti_field]
+    pub angle_interpolation: AngleInterpolation,
 }
 
 impl Default for PropertyAnimation {
@@ -1255,6 +1261,7 @@ impl Default for PropertyAnimation {
             direction: Default::default(),
             easing: Default::default(),
             enabled: true,
+            angle_interpolation: Default::default(),
         }
     }
 }
@@ -1454,7 +1461,6 @@ impl WindowItem {
         local_font_weight: i32,
         local_font_size: LogicalLength,
         local_letter_spacing: LogicalLength,
-        local_line_height_factor: f32,
         local_italic: bool,
     ) -> FontRequest {
         let Some(window_item_rc) = next_window_item(self_rc) else {
@@ -1494,12 +1500,6 @@ impl WindowItem {
                 }
             },
             letter_spacing: Some(local_letter_spacing),
-            // 1 is neutral and negative or non-finite values behave like 1, all mapping to
-            // None (the font's natural line height); 0 is a valid factor and collapses lines.
-            line_height_factor: (local_line_height_factor.is_finite()
-                && local_line_height_factor >= 0.0
-                && local_line_height_factor != 1.0)
-                .then_some(local_line_height_factor),
             italic: local_italic,
         }
     }
@@ -1543,36 +1543,6 @@ fn is_root_window_item(window_adapter: &Rc<dyn WindowAdapter>, self_rc: &ItemRc)
 impl ItemConsts for WindowItem {
     const cached_rendering_data_offset: const_field_offset::FieldOffset<Self, CachedRenderingData> =
         Self::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
-}
-
-#[cfg(feature = "ffi")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_windowitem_close(
-    window_item: Pin<&WindowItem>,
-    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
-    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
-    self_index: u32,
-) -> bool {
-    unsafe {
-        let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
-        let item_rc = ItemRc::new(self_component.clone(), self_index);
-        window_item.close(window_adapter, &item_rc)
-    }
-}
-
-#[cfg(feature = "ffi")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_windowitem_hide(
-    window_item: Pin<&WindowItem>,
-    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
-    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
-    self_index: u32,
-) {
-    unsafe {
-        let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
-        let item_rc = ItemRc::new(self_component.clone(), self_index);
-        window_item.hide(window_adapter, &item_rc);
-    }
 }
 
 declare_item_vtable! {
@@ -1749,7 +1719,7 @@ impl ContextMenu {
         }
     }
 
-    pub fn is_open(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, _: &ItemRc) -> bool {
+    pub fn is_open(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>) -> bool {
         self.popup_id.get().is_some_and(|id| {
             WindowInner::from_pub(window_adapter.window())
                 .active_popups()
@@ -1797,36 +1767,6 @@ declare_item_vtable! {
     fn slint_get_ContextMenuVTable() -> ContextMenuVTable for ContextMenu
 }
 
-#[cfg(feature = "ffi")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_contextmenu_close(
-    s: Pin<&ContextMenu>,
-    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
-    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
-    self_index: u32,
-) {
-    unsafe {
-        let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
-        let self_rc = ItemRc::new(self_component.clone(), self_index);
-        s.close(window_adapter, &self_rc);
-    }
-}
-
-#[cfg(feature = "ffi")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_contextmenu_is_open(
-    s: Pin<&ContextMenu>,
-    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
-    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
-    self_index: u32,
-) -> bool {
-    unsafe {
-        let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
-        let self_rc = ItemRc::new(self_component.clone(), self_index);
-        s.is_open(window_adapter, &self_rc)
-    }
-}
-
 /// The implementation of the `BoxShadow` element
 #[repr(C)]
 #[derive(FieldOffsets, Default, SlintElement)]
@@ -1857,6 +1797,7 @@ impl BoxShadow {
             self.border_bottom_right_radius(),
             self.border_bottom_left_radius(),
         )
+        .max(Default::default())
     }
 }
 
@@ -1957,10 +1898,12 @@ impl Item for BoxShadow {
             // Inset shadow paints inside the geometry; never extends outside.
             geometry
         } else {
-            let pad = self.blur() + LogicalLength::new(self.spread().get().max(0 as crate::Coord));
-            geometry
-                .outer_rect(euclid::SideOffsets2D::from_length_all_same(pad))
-                .translate(LogicalVector::from_lengths(self.offset_x(), self.offset_y()))
+            crate::graphics::boxshadow::drop_shadow_bounding_rect(
+                geometry,
+                LogicalVector::from_lengths(self.offset_x(), self.offset_y()),
+                self.blur(),
+                self.spread(),
+            )
         }
     }
 
@@ -1999,6 +1942,7 @@ impl BackdropBlur {
             self.border_bottom_right_radius(),
             self.border_bottom_left_radius(),
         )
+        .max(Default::default())
     }
 }
 
@@ -2436,16 +2380,4 @@ fn builtin_struct_field_defaults() {
     assert_eq!(hints.capitalization, CapitalizationMode::Sentences);
     assert!(hints.auto_correct);
     assert!(hints.auto_complete);
-}
-
-#[cfg(feature = "ffi")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_item_absolute_position(
-    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
-    self_index: u32,
-) -> crate::lengths::LogicalPoint {
-    let self_rc = ItemRc::new(self_component.clone(), self_index);
-    // Map the item's own geometry origin through the ancestor transforms so the result is the
-    // item's absolute position, not its parent's.
-    self_rc.map_to_window(self_rc.geometry().origin)
 }

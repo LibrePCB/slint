@@ -10,9 +10,9 @@ use crate::SlintContext;
 use crate::accessibility::{
     AccessibilityAction, AccessibleStringProperty, SupportedAccessibilityAction,
 };
-use crate::items::{AccessibleRole, ItemRef, ItemVTable};
+use crate::items::{AccessibleRole, ItemRef, ItemVTable, ScrollBehavior};
 use crate::layout::{LayoutInfo, Orientation};
-use crate::lengths::{ItemTransform, LogicalPoint, LogicalRect};
+use crate::lengths::{ItemTransform, LogicalPoint, LogicalRect, LogicalVector};
 use crate::slice::Slice;
 use crate::window::WindowAdapterRc;
 use alloc::vec::Vec;
@@ -143,6 +143,29 @@ pub struct ItemTreeVTable {
     pub item_element_infos: extern "C" fn(
         ::core::pin::Pin<VRef<ItemTreeVTable>>,
         item_index: u32,
+        result: &mut SharedString,
+    ) -> bool,
+
+    /// Writes the names and types of the given item's testable properties into `result`,
+    /// one `name:type` pair per line.
+    /// Returns false when the item tree carries no testable-property debug info
+    /// (built without `SLINT_EMIT_DEBUG_INFO`).
+    /// An empty `result` with a true return means the item declares no `@testable` property.
+    pub element_testable_properties: extern "C" fn(
+        ::core::pin::Pin<VRef<ItemTreeVTable>>,
+        item_index: u32,
+        result: &mut SharedString,
+    ) -> bool,
+
+    /// Writes the current value of the given item's testable property `property_name`
+    /// (UTF-8 encoded) into `result`, in the encoding of [`crate::debug_info`].
+    /// Returns false when the property does not exist,
+    /// its value has no debug encoding,
+    /// or the item tree carries no testable-property debug info.
+    pub element_testable_property_value: extern "C" fn(
+        ::core::pin::Pin<VRef<ItemTreeVTable>>,
+        item_index: u32,
+        property_name: Slice<u8>,
         result: &mut SharedString,
     ) -> bool,
 
@@ -638,6 +661,43 @@ impl ItemRc {
         })
     }
 
+    /// The `@testable` properties declared on this item's element and its base components,
+    /// as `(name, type)` pairs.
+    /// `None` when the item tree carries no testable-property debug info.
+    pub fn element_testable_properties(&self) -> Option<Vec<(SharedString, SharedString)>> {
+        let comp_ref_pin = vtable::VRc::borrow_pin(&self.item_tree);
+        let mut result = SharedString::new();
+        comp_ref_pin.as_ref().element_testable_properties(self.index, &mut result).then(|| {
+            result
+                .as_str()
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    let (name, ty) = line.split_once(':').unwrap_or((line, ""));
+                    (name.into(), ty.into())
+                })
+                .collect()
+        })
+    }
+
+    /// The current value of the testable property `name` on this item's element,
+    /// in the string encoding of [`crate::debug_info`].
+    /// `None` when the property does not exist,
+    /// its value has no debug encoding,
+    /// or the item tree carries no testable-property debug info.
+    pub fn element_testable_property_value(&self, name: &str) -> Option<SharedString> {
+        let comp_ref_pin = vtable::VRc::borrow_pin(&self.item_tree);
+        let mut result = SharedString::new();
+        comp_ref_pin
+            .as_ref()
+            .element_testable_property_value(
+                self.index,
+                Slice::from_slice(name.as_bytes()),
+                &mut result,
+            )
+            .then_some(result)
+    }
+
     pub fn element_layout_kind(&self, element_index: usize) -> Option<SharedString> {
         self.raw_element_infos().and_then(|infos| {
             let first_debug_entry =
@@ -730,6 +790,7 @@ impl ItemRc {
     /// Returns an absolute position of `p` in the `ancestor`'s coordinate system
     /// (does not add this item's x and y)
     /// Don't rely on any specific behavior if `self` isn't a descendant of `ancestor`.
+    #[cfg(test)]
     fn map_to_ancestor(&self, p: LogicalPoint, ancestor: &Self) -> LogicalPoint {
         self.map_to_item_tree_impl(p, |parent| parent == ancestor)
     }
@@ -1099,36 +1160,37 @@ impl ItemRc {
             .and_then(|child_transform| child_transform.inverse())
     }
 
-    pub(crate) fn try_scroll_into_visible(&self) {
-        let mut parent = self.parent_item(ParentItemTraversalMode::StopAtPopups);
-        while let Some(item_rc) = parent.as_ref() {
-            let item_ref = item_rc.borrow();
-            if let Some(flickable) = vtable::VRef::downcast_pin::<crate::items::Flickable>(item_ref)
+    /// Scrolls every `Flickable` ancestor up to the nearest popup by the smallest amount that brings `self` into view.
+    /// Does nothing if no such ancestor is a `Flickable`.
+    pub fn try_scroll_into_visible(&self, scroll_behavior: ScrollBehavior) {
+        self.try_scroll_rect_into_visible(self.geometry(), scroll_behavior);
+    }
+
+    /// Like [`Self::try_scroll_into_visible`], but brings only `geo` into view.
+    /// `geo` is relative to the parent item, like [`Self::geometry`].
+    pub(crate) fn try_scroll_rect_into_visible(
+        &self,
+        geo: LogicalRect,
+        scroll_behavior: ScrollBehavior,
+    ) {
+        let supports_transformations = self
+            .window_adapter()
+            .is_none_or(|adapter| adapter.renderer().supports_transformations());
+        let mut points = [geo.min(), geo.max()];
+        let mut current = self.clone();
+        while let Some(parent) = current.parent_item(ParentItemTraversalMode::StopAtPopups) {
+            if let Some(flickable) =
+                vtable::VRef::downcast_pin::<crate::items::Flickable>(parent.borrow())
             {
-                let geo = self.geometry();
-
-                flickable.reveal_points(
-                    item_rc,
-                    &[
-                        self.map_to_ancestor(
-                            LogicalPoint::new(
-                                geo.origin.x - flickable.content_x().0,
-                                geo.origin.y - flickable.content_y().0,
-                            ),
-                            item_rc,
-                        ),
-                        self.map_to_ancestor(
-                            LogicalPoint::new(
-                                geo.max_x() - flickable.content_x().0,
-                                geo.max_y() - flickable.content_y().0,
-                            ),
-                            item_rc,
-                        ),
-                    ],
-                );
+                let offset =
+                    LogicalVector::from_lengths(flickable.content_x(), flickable.content_y());
+                let content_points = points.map(|p| p - offset);
+                let target = flickable.reveal_points(&parent, &content_points, scroll_behavior);
+                points = content_points.map(|p| p + target);
             }
-
-            parent = item_rc.parent_item(ParentItemTraversalMode::StopAtPopups);
+            let step = parent.step_transform(supports_transformations);
+            points = points.map(|p| step.transform_point(p.cast()).cast());
+            current = parent;
         }
     }
 }
@@ -1903,6 +1965,19 @@ mod tests {
         }
 
         fn item_element_infos(self: Pin<&Self>, _: u32, _: &mut SharedString) -> bool {
+            false
+        }
+
+        fn element_testable_properties(self: Pin<&Self>, _: u32, _: &mut SharedString) -> bool {
+            false
+        }
+
+        fn element_testable_property_value(
+            self: Pin<&Self>,
+            _: u32,
+            _: Slice<u8>,
+            _: &mut SharedString,
+        ) -> bool {
             false
         }
 
@@ -2877,6 +2952,23 @@ mod tests {
             false
         }
 
+        fn element_testable_properties(
+            self: Pin<&Self>,
+            _index: u32,
+            _result: &mut SharedString,
+        ) -> bool {
+            false
+        }
+
+        fn element_testable_property_value(
+            self: Pin<&Self>,
+            _index: u32,
+            _property_name: Slice<u8>,
+            _result: &mut SharedString,
+        ) -> bool {
+            false
+        }
+
         fn ensure_instantiated(self: Pin<&Self>) -> bool {
             false
         }
@@ -3342,8 +3434,8 @@ mod tests {
     impl crate::renderer::RendererSealed for Renderer {
         fn char_size(
             &self,
-            _text_item: Pin<&dyn crate::item_rendering::HasFont>,
-            _item_rc: &crate::item_tree::ItemRc,
+            _font_request: crate::graphics::FontRequest,
+            _line_height_factor: Option<f32>,
             _ch: char,
         ) -> LogicalSize {
             LogicalSize::new(5., 10.)

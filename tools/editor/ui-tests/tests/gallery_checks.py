@@ -173,12 +173,12 @@ def test_gallery_picker_cancel_and_commit(gallery_binary, editor_environment):
             window, "Hex color", role=slint_testing.AccessibleRole.TextInput
         ).accessible_value = "#ff0000"
         press_key(window, keys.Escape)
-        expect(query(window, "Close Custom")).to_be_hidden()
+        expect(query(window, "Close Fill")).to_be_hidden()
         expect(open_picker()).to_have_value(original)
         element(
             window, "Hex color", role=slint_testing.AccessibleRole.TextInput
         ).accessible_value = "#00ff00"
-        element(window, "Close Custom").invoke_accessible_default_action()
+        element(window, "Close Fill").invoke_accessible_default_action()
         assert open_picker().accessible_value == "00FF00"
 
 
@@ -276,9 +276,10 @@ def test_gallery_image_alignment_selection_and_reset(
         ).accessible_checked
         element(window, "Bottom right", role=slint_testing.AccessibleRole.Text)
         element(window, "Reset example").invoke_accessible_default_action()
-        assert element(
-            window, "Align image center", role=slint_testing.AccessibleRole.Button
-        ).accessible_checked
+        expect.poll(
+            lambda: center.accessible_checked,
+            message="center image alignment after reset",
+        ).to_equal(True)
 
 
 def test_gallery_properties_edit_component_values(gallery_binary, editor_environment):

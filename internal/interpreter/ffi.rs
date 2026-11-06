@@ -4,18 +4,16 @@
 // cSpell: ignore stru
 
 use super::*;
+use crate::prelude::*;
+use Rc;
 use core::ptr::NonNull;
-use i_slint_core::data_transfer::ffi::{PathValueType, path_from_units};
+use i_slint_core::data_transfer::ffi::{PathValueType, path_from_units, path_to_units};
 use i_slint_core::model::{Model, ModelError, ModelNotify, ModelRc, SharedVectorModel};
 use i_slint_core::slice::Slice;
 use i_slint_core::window::WindowAdapter;
-use smol_str::SmolStr;
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::rc::Rc;
 use vtable::VRef;
-
-use crate::instance::Instance;
 
 /// Wrap a raw `&Instance` from the C side into a `ComponentInstanceInner`
 /// that exposes the name-based helpers. The underlying `VRc` is upgraded
@@ -607,7 +605,7 @@ pub unsafe extern "C" fn slint_interpreter_component_instance_component_definiti
     component_definition_ptr: *mut ComponentDefinitionOpaque,
 ) {
     let comp = wrap_instance(inst);
-    let definition = ComponentDefinition { inner: std::rc::Rc::new(comp.definition()) };
+    let definition = ComponentDefinition { inner: Rc::new(comp.definition()) };
     unsafe { std::ptr::write(component_definition_ptr as *mut ComponentDefinition, definition) };
 }
 
@@ -746,6 +744,8 @@ pub enum DiagnosticLevel {
     Error,
     /// The diagnostic belongs to a warning.
     Warning,
+    /// The diagnostic is a suggestion that doesn't affect the compilation.
+    Info,
     /// The diagnostic is a note
     Note,
 }
@@ -830,6 +830,69 @@ pub unsafe extern "C" fn slint_interpreter_component_compiler_set_translation_do
         .set_translation_domain(String::from_utf8_lossy(&translation_domain).into_owned())
 }
 
+/// Result of a file loader callback.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileLoaderResult {
+    /// The file was not found; the compiler should try its normal resolution.
+    NotFound = 0,
+    /// The file was found; its contents are in the `out` parameter.
+    Found = 1,
+    /// An error occurred; the error message is in the `out` parameter.
+    Error = 2,
+}
+
+struct FileLoaderUserData {
+    user_data: *mut c_void,
+    drop_user_data: Option<extern "C" fn(*mut c_void)>,
+    callback: extern "C" fn(
+        user_data: *mut c_void,
+        path: Slice<PathValueType>,
+        out: *mut SharedString,
+    ) -> FileLoaderResult,
+}
+
+impl Drop for FileLoaderUserData {
+    fn drop(&mut self) {
+        if let Some(x) = self.drop_user_data {
+            x(self.user_data)
+        }
+    }
+}
+
+/// Set a custom file loader for the compiler.
+/// The callback is invoked with path components and should return the file contents.
+/// Return values: `FileLoaderResult::NotFound` (compiler tries normal resolution),
+/// `FileLoaderResult::Found` (content written to `out`),
+/// or `FileLoaderResult::Error` (error message written to `out`).
+/// The user_data pointer is passed to the callback and cleaned up by drop_user_data when the compiler is dropped.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_interpreter_component_compiler_set_file_loader(
+    compiler: &mut ComponentCompilerOpaque,
+    callback: extern "C" fn(
+        user_data: *mut c_void,
+        path: Slice<PathValueType>,
+        out: *mut SharedString,
+    ) -> FileLoaderResult,
+    user_data: *mut c_void,
+    drop_user_data: Option<extern "C" fn(*mut c_void)>,
+) {
+    let ud = FileLoaderUserData { user_data, drop_user_data, callback };
+    compiler.as_component_compiler_mut().set_file_loader(move |path| {
+        let path_units = path_to_units(path);
+        let path_slice = Slice::from_slice(&path_units);
+        let mut result = SharedString::default();
+        let status = (ud.callback)(ud.user_data, path_slice, &mut result);
+        Box::pin(async move {
+            match status {
+                FileLoaderResult::NotFound => None,
+                FileLoaderResult::Found => Some(Ok(result.to_string())),
+                FileLoaderResult::Error => Some(Err(std::io::Error::other(result.to_string()))),
+            }
+        })
+    });
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_interpreter_component_compiler_get_style(
     compiler: &ComponentCompilerOpaque,
@@ -863,12 +926,16 @@ pub unsafe extern "C" fn slint_interpreter_component_compiler_get_diagnostics(
         let (line, column) = diagnostic.line_column();
         Diagnostic {
             message: diagnostic.message().into(),
-            source_file: diagnostic.source_path().unwrap_or_default().into(),
+            source_file: i_slint_compiler::diagnostics::Spanned::source_file(diagnostic)
+                .map(|file| file.path().to_string())
+                .unwrap_or_default()
+                .into(),
             line,
             column,
             level: match diagnostic.level() {
                 i_slint_compiler::diagnostics::DiagnosticLevel::Error => DiagnosticLevel::Error,
                 i_slint_compiler::diagnostics::DiagnosticLevel::Warning => DiagnosticLevel::Warning,
+                i_slint_compiler::diagnostics::DiagnosticLevel::Info => DiagnosticLevel::Info,
                 i_slint_compiler::diagnostics::DiagnosticLevel::Note => DiagnosticLevel::Note,
                 _ => DiagnosticLevel::Warning,
             },
@@ -1093,6 +1160,8 @@ pub unsafe extern "C" fn slint_interpreter_component_definition_global_functions
 
 #[cfg(test)]
 mod tests {
+    use crate::prelude::*;
+
     #[test]
     fn no_strong_reference_leak_per_ffi_call() {
         i_slint_backend_testing::init_no_event_loop();
@@ -1105,7 +1174,7 @@ mod tests {
         assert!(!result.has_errors(), "{:?}", result.diagnostics().collect::<Vec<_>>());
         let instance = result.component("Test").unwrap().create().unwrap();
         let vrc = &instance.inner.0;
-        let before = vtable::VRc::strong_count(vrc);
+        let before = VRc::strong_count(vrc);
         for _ in 0..3 {
             let val = super::slint_interpreter_component_instance_get_property(
                 vrc,
@@ -1114,6 +1183,6 @@ mod tests {
             assert!(!val.is_null());
             drop(unsafe { Box::from_raw(val) });
         }
-        assert_eq!(vtable::VRc::strong_count(vrc), before);
+        assert_eq!(VRc::strong_count(vrc), before);
     }
 }

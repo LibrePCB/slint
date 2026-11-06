@@ -5,8 +5,9 @@
 //! Make sure that the top level element of the component is always a Window
 
 use crate::diagnostics::BuildDiagnostics;
+use crate::element_type::ElementType;
 use crate::expression_tree::{BindingExpression, Expression};
-use crate::langtype::{ElementType, Type};
+use crate::langtype::Type;
 use crate::namedreference::NamedReference;
 use crate::object_tree::{Component, Element};
 use crate::typeregister::TypeRegister;
@@ -44,6 +45,7 @@ pub fn ensure_window(
         base_type: std::mem::replace(&mut win_elem_mut.base_type, window_type),
         bindings: Default::default(),
         change_callbacks: Default::default(),
+        moved_property_declarations: Default::default(),
         is_component_placeholder: false,
         property_analysis: Default::default(),
         children: std::mem::take(&mut win_elem_mut.children),
@@ -63,6 +65,7 @@ pub fn ensure_window(
         layout_info_prop: Default::default(),
         layout_info_v_with_constraint: Default::default(),
         layout_info_h_at_own_height: Default::default(),
+        implicit_layout_info_prop: Default::default(),
         height_is_literal: Default::default(),
         default_fill_parent: Default::default(),
         accessibility_props: Default::default(),
@@ -78,6 +81,8 @@ pub fn ensure_window(
         inline_depth: 0,
         is_legacy_syntax: false,
         slot_target: None,
+        slot_default: None,
+        empty_slot_assignments: Vec::new(),
         typed_slot_interface: None,
         forwarded_slots: Vec::new(),
     };

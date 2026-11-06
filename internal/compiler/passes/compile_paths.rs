@@ -10,8 +10,10 @@
 //! with path embedding only as part of the property assignment.
 
 use crate::diagnostics::BuildDiagnostics;
+use crate::element_type::{BuiltinElement, ElementType};
 use crate::expression_tree::*;
-use crate::langtype::{BuiltinElement, BuiltinStruct, ElementType, Type};
+use crate::expression_types::Unit;
+use crate::langtype::{BuiltinStruct, Type};
 use crate::object_tree::*;
 use smol_str::SmolStr;
 use std::rc::Rc;
@@ -100,7 +102,12 @@ pub fn compile_paths(
                             }
                         }
                         path_data.push(PathElement { element_type, bindings });
-                        enclosing_component.optimized_elements.borrow_mut().push(child);
+                        enclosing_component.optimized_elements.borrow_mut().push(
+                            OptimizedElement {
+                                element: child,
+                                former_parent: Rc::downgrade(elem_),
+                            },
+                        );
                     }
                 } else {
                     elem.children.push(child);
@@ -174,7 +181,7 @@ fn declares_path_elements(elem: &Element, path_type: &BuiltinElement) -> bool {
 }
 
 /// The path element type of `child` when it is a `MoveTo`, `LineTo`, ... element
-fn path_element_type<'a>(
+pub(crate) fn path_element_type<'a>(
     child: &ElementRc,
     path_type: &'a BuiltinElement,
 ) -> Option<&'a Arc<BuiltinElement>> {

@@ -467,6 +467,24 @@ impl InternalKeyboardModifierState {
         Some(self)
     }
 
+    /// Clears the modifiers that aren't in `held`, and keeps AltGr,
+    /// which platforms don't report among the held modifiers.
+    pub(crate) fn release_not_held(mut self, held: KeyboardModifiers) -> Self {
+        if !held.alt {
+            (self.left_alt, self.right_alt) = (false, false);
+        }
+        if !held.control {
+            (self.left_control, self.right_control) = (false, false);
+        }
+        if !held.meta {
+            (self.left_meta, self.right_meta) = (false, false);
+        }
+        if !held.shift {
+            (self.left_shift, self.right_shift) = (false, false);
+        }
+        self
+    }
+
     pub fn shift(&self) -> bool {
         self.right_shift || self.left_shift
     }
@@ -1154,8 +1172,10 @@ impl InternalKeyEvent {
     /// If a shortcut was pressed, this function returns `Some(StandardShortcut)`.
     /// Otherwise it returns None.
     pub fn shortcut(&self) -> Option<StandardShortcut> {
+        // Compared in lower case, like `Keys::matches`, so that Caps Lock doesn't matter
+        let text = self.key_event.text.to_lowercase();
         if self.key_event.modifiers.control && !self.key_event.modifiers.shift {
-            match self.key_event.text.as_str() {
+            match text.as_str() {
                 #[cfg(not(target_arch = "wasm32"))]
                 "c" => Some(StandardShortcut::Copy),
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1173,9 +1193,9 @@ impl InternalKeyEvent {
                 _ => None,
             }
         } else if self.key_event.modifiers.control && self.key_event.modifiers.shift {
-            match self.key_event.text.as_str() {
+            match text.as_str() {
                 #[cfg(not(target_os = "windows"))]
-                "z" | "Z" => Some(StandardShortcut::Redo),
+                "z" => Some(StandardShortcut::Redo),
                 _ => None,
             }
         } else {
@@ -1344,6 +1364,9 @@ pub enum FocusEvent {
     FocusOut(FocusReason),
 }
 
+/// The default delay according to <https://en.wikipedia.org/wiki/Double-click#Speed_and_timing>
+pub const DEFAULT_CLICK_INTERVAL: core::time::Duration = core::time::Duration::from_millis(500);
+
 /// This state is used to count the clicks separated by [`crate::platform::Platform::click_interval`]
 #[derive(Default)]
 pub struct ClickState {
@@ -1377,10 +1400,10 @@ impl ClickState {
     /// Takes the context rather than just the interval: the timestamps it compares have to
     /// come from the same clock, which only the context can name.
     pub fn check_repeat(&self, mouse_event: MouseEvent, ctx: &crate::SlintContext) -> MouseEvent {
-        let click_interval = ctx.platform().click_interval();
         match mouse_event {
             MouseEvent::Pressed { position, button, touch_finger_id, event_time, .. } => {
                 let instant_now = crate::animations::Instant::now(ctx);
+                let click_interval = ctx.platform().click_interval();
 
                 if let Some(click_count_time_stamp) = self.click_count_time_stamp.get() {
                     if instant_now - click_count_time_stamp < click_interval
@@ -1434,13 +1457,12 @@ pub(crate) struct DragData {
 /// See "Delayed Event Handling" in `docs/development/input-event-system.md`.
 struct DelayedPress {
     /// Replays `event_for_children` when it fires; dropping it cancels the replay.
-    _timer: crate::timers::Timer,
+    /// `None` once it fired without a claim, leaving only the replay on release.
+    _timer: Option<crate::timers::Timer>,
     /// The press in the delaying item's local frame, replayed to its children when `timer` fires.
     event_for_children: MouseEvent,
-    /// The press in `root`'s frame, replayed from `root` on release.
+    /// The press in the root item's frame, replayed from the root on release.
     original_event: MouseEvent,
-    /// The item the press was dispatched from: the window's root item or a popup's.
-    root: ItemWeak,
 }
 
 /// The state which a window should hold for the mouse input
@@ -1785,8 +1807,8 @@ pub fn process_mouse_input(
         &mut result,
         mouse_input_state.top_item().as_ref(),
         None,
-        &root,
         mouse_event,
+        &[],
     );
     let accepted = r.has_aborted();
     if matches!(mouse_event, MouseEvent::DragMove { .. }) {
@@ -1854,11 +1876,10 @@ pub(crate) fn process_delayed_event(
     mut mouse_input_state: MouseInputState,
 ) -> MouseInputState {
     // the take bellow will also destroy the Timer
-    let (event, original_event) = match mouse_input_state.delayed.take() {
-        Some(DelayedPress { event_for_children, original_event, .. }) => {
-            (event_for_children, original_event)
-        }
-        None => return mouse_input_state,
+    let Some(DelayedPress { event_for_children: event, original_event, .. }) =
+        mouse_input_state.delayed.take()
+    else {
+        return mouse_input_state;
     };
 
     let top_item = match mouse_input_state.top_item() {
@@ -1882,16 +1903,20 @@ pub(crate) fn process_delayed_event(
                 &mut mouse_input_state,
                 Some(last_top_item),
                 Some(false),
-                &top_item,
                 &original_event,
+                &[],
             )
         };
     vtable::new_vref!(let mut actual_visitor : VRefMut<crate::item_tree::ItemVisitorVTable> for crate::item_tree::ItemVisitor = &mut actual_visitor);
-    vtable::VRc::borrow_pin(top_item.item_tree()).as_ref().visit_children_item(
+    let r = vtable::VRc::borrow_pin(top_item.item_tree()).as_ref().visit_children_item(
         top_item.index() as isize,
         crate::item_tree::TraversalOrder::FrontToBack,
         actual_visitor,
     );
+    if !r.has_aborted() {
+        mouse_input_state.delayed =
+            Some(DelayedPress { _timer: None, event_for_children: event, original_event });
+    }
     mouse_input_state.send_delayed_exit_events(window_adapter);
     mouse_input_state
 }
@@ -1919,7 +1944,10 @@ pub(crate) fn resolve_delayed_event_on_release(
         return mouse_input_state;
     }
 
-    let Some(DelayedPress { original_event, root, .. }) = mouse_input_state.delayed.take() else {
+    let Some(DelayedPress { original_event, .. }) = mouse_input_state.delayed.take() else {
+        return mouse_input_state;
+    };
+    let Some(((root, _), replay_path)) = mouse_input_state.item_stack.split_first() else {
         return mouse_input_state;
     };
     let Some(root) = root.upgrade() else {
@@ -1939,13 +1967,13 @@ pub(crate) fn resolve_delayed_event_on_release(
 
     let r = send_mouse_event_to_item(
         &original_event,
-        root.clone(),
+        root,
         window_adapter,
         &mut result,
         last_top_item.as_ref(),
         Some(true),
-        &root,
         &original_event,
+        replay_path,
     );
 
     if !r.has_aborted() {
@@ -1969,8 +1997,8 @@ fn send_mouse_event_to_item(
     result: &mut MouseInputState,
     last_top_item: Option<&ItemRc>,
     replaying: Option<bool>,
-    root: &ItemRc,
     original_event: &MouseEvent,
+    replay_path: &[(ItemWeak, InputEventFilterResult)],
 ) -> VisitChildrenResult {
     let item = item_rc.borrow();
     let geom = item_rc.geometry();
@@ -2019,10 +2047,9 @@ fn send_mouse_event_to_item(
                 },
             );
             result.delayed = Some(DelayedPress {
-                _timer: timer,
+                _timer: Some(timer),
                 event_for_children: event_for_children.clone(),
                 original_event: original_event.clone(),
-                root: root.downgrade(),
             });
             result
                 .item_stack
@@ -2039,15 +2066,21 @@ fn send_mouse_event_to_item(
     if forward_to_children {
         let mut actual_visitor =
             |component: &ItemTreeRc, index: u32, _: Pin<ItemRef>| -> VisitChildrenResult {
+                let child = ItemRc::new(component.clone(), index);
+                let child_path = match replay_path.split_first() {
+                    None => &[][..],
+                    Some(((next, _), rest)) if *next == child.downgrade() => rest,
+                    Some(_) => return VisitChildrenResult::CONTINUE,
+                };
                 send_mouse_event_to_item(
                     &event_for_children,
-                    ItemRc::new(component.clone(), index),
+                    child,
                     window_adapter,
                     result,
                     last_top_item,
                     replaying,
-                    root,
                     original_event,
+                    child_path,
                 )
             };
         vtable::new_vref!(let mut actual_visitor : VRefMut<crate::item_tree::ItemVisitorVTable> for crate::item_tree::ItemVisitor = &mut actual_visitor);

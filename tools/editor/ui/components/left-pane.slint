@@ -40,7 +40,6 @@ component NewSlintFileButton inherits Rectangle {
 
     touch := TouchArea {
         enabled: root.enabled;
-        mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
     }
 
@@ -78,7 +77,6 @@ component FilesUnavailableNotice inherits Rectangle {
                 border-radius: Metrics.radius-small;
                 border-width: Metrics.focus-width;
                 border-color: root.style.muted-icon;
-                background: transparent;
             }
         }
 
@@ -88,11 +86,11 @@ component FilesUnavailableNotice inherits Rectangle {
             alignment: center;
 
             BodyLabel {
-                text: "No files available";
+                text: @tr("No files available");
             }
 
             MutedLabel {
-                text: "Open a project file to browse siblings.";
+                text: @tr("Open a project file to browse siblings.");
                 wrap: word-wrap;
             }
         }
@@ -137,9 +135,9 @@ export component LeftPane inherits Rectangle {
     }
 
     width: Style.panes.left-width;
-    background: Colors.surface;
+    background: Style.panel-background;
     accessible-role: AccessibleRole.navigation;
-    accessible-label: "Project and elements";
+    accessible-label: @tr("Project and elements");
 
     EdgeDivider {
         x: parent.width - self.width;
@@ -147,19 +145,18 @@ export component LeftPane inherits Rectangle {
 
     VerticalLayout {
         height: 100%;
-        spacing: 0px;
 
         HorizontalLayout {
             height: Style.panes.heading-height;
             padding-top: Metrics.space-medium;
-            padding-left: Metrics.space-medium;
-            padding-right: Metrics.space-medium;
+            padding-left: Style.sidebar-spacing.padding;
+            padding-right: Style.sidebar-spacing.padding;
             spacing: Metrics.space-medium;
             cross-axis-alignment: center;
 
             if root.can-collapse: SidebarToggleButton {
                 accessible-role: AccessibleRole.button;
-                accessible-label: "Collapse sidebars";
+                accessible-label: @tr("Collapse sidebars");
                 clicked => {
                     root.panes-collapsed();
                 }
@@ -171,21 +168,21 @@ export component LeftPane inherits Rectangle {
                 alignment: center;
 
                 BodyLabel {
-                    text: "Project";
+                    text: @tr("Project");
                     font-size: Typography.action.size;
                 }
 
                 MutedLabel {
-                    text: "Files and elements";
+                    text: @tr("Files and elements");
                 }
             }
         }
 
         VerticalLayout {
-            padding: Metrics.space-medium;
+            padding: Style.sidebar-spacing.padding;
             padding-bottom: 0px;
             SectionTitle {
-                label: "FILES";
+                label: @tr("FILES");
 
                 NewSlintFileButton {
                     x: parent.width - self.width;
@@ -201,10 +198,10 @@ export component LeftPane inherits Rectangle {
                 vertical-stretch: 1;
 
                 FileTreeView {
-                    x: 0px;
-                    width: parent.width + Metrics.space-medium;
+                    x: Style.sidebar-spacing.list-inset - Style.sidebar-spacing.padding;
+                    width: parent.width - 2 * self.x + Style.sidebar-spacing.list-inset;
                     height: parent.height;
-                    rename-right-extension: Metrics.space-medium;
+                    rename-right-extension: Style.sidebar-spacing.list-inset;
                 }
             }
         }
@@ -224,7 +221,7 @@ export component LeftPane inherits Rectangle {
         x: 0px;
         y: elements-divider-slot.absolute-position.y - root.absolute-position.y;
         width: root.width;
-        resize-label: "Elements pane resize";
+        resize-label: @tr("Elements pane resize");
         value: root.elements-height;
         value-maximum: max(Style.panes.minimum, root.height - Style.panes.files-minimum);
         drag-started => {

@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use i_slint_core::api::PhysicalSize;
-use i_slint_core::graphics::{
-    FontRequest,
-    euclid::{Point2D, Size2D},
-};
+use i_slint_core::graphics::euclid::{Point2D, Size2D};
 use i_slint_core::item_rendering::HasFont;
 use i_slint_core::lengths::{LogicalLength, LogicalPoint, LogicalRect, LogicalSize};
 use i_slint_core::platform::PlatformError;
@@ -143,9 +140,9 @@ fn is_fixed_test_font(family: &Option<SharedString>) -> bool {
     family.as_ref().is_some_and(|f| f == FIXED_TEST_FONT)
 }
 
-fn fixed_test_font_line_height(font_request: &FontRequest, pixel_size: f32) -> f32 {
+fn fixed_test_font_line_height(line_height_factor: Option<f32>, pixel_size: f32) -> f32 {
     // The test font's natural line height is exactly the pixel size (ascent 0.7 + descent 0.3).
-    font_request.line_height_for_natural_height(pixel_size).unwrap_or(pixel_size)
+    pixel_size * line_height_factor.unwrap_or(1.0)
 }
 
 #[derive(Default)]
@@ -225,6 +222,7 @@ impl i_slint_core::platform::Platform for TestingBackend {
             simulate_native_drag: Cell::new(false),
             native_drag: Default::default(),
             window_move_requests: Default::default(),
+            parent: None,
             #[cfg(supports_headless)]
             renderer_name: self.renderer_name.clone(),
             #[cfg(supports_headless)]
@@ -332,6 +330,7 @@ pub struct TestingWindow {
     /// so the receive-side helpers can build the drop they deliver to a target window.
     native_drag: RefCell<Option<(i_slint_core::data_transfer::DataTransfer, AllowedDragActions)>>,
     window_move_requests: Cell<usize>,
+    parent: Option<Weak<dyn WindowAdapter>>,
     /// Remembered for child popups, so they pick the same rasterizer.
     #[cfg(supports_headless)]
     renderer_name: Option<SharedString>,
@@ -440,6 +439,10 @@ impl TestingWindow {
 }
 
 impl WindowAdapterInternal for TestingWindow {
+    fn get_parent(&self) -> Option<Rc<dyn WindowAdapter>> {
+        self.parent.as_ref()?.upgrade()
+    }
+
     fn input_method_request(&self, request: i_slint_core::window::InputMethodRequest) {
         self.ime_requests.borrow_mut().push(request)
     }
@@ -456,8 +459,12 @@ impl WindowAdapterInternal for TestingWindow {
         self.window_move_requests.set(self.window_move_requests.get() + 1);
     }
 
-    fn set_mouse_cursor(&self, cursor: i_slint_core::cursor::MouseCursorInner) {
+    fn set_mouse_cursor(
+        &self,
+        cursor: i_slint_core::cursor::MouseCursorInner,
+    ) -> i_slint_core::cursor::MouseCursorHandling {
         self.mouse_cursor.replace(cursor);
+        i_slint_core::cursor::MouseCursorHandling::Platform
     }
 
     fn register_item_tree(&self, item_tree: i_slint_core::item_tree::ItemTreeRefPin) {
@@ -499,6 +506,7 @@ impl WindowAdapterInternal for TestingWindow {
                 simulate_native_drag: self.simulate_native_drag.clone(),
                 native_drag: Default::default(),
                 window_move_requests: Default::default(),
+                parent: Some(Rc::downgrade(&WindowInner::from_pub(&self.window).window_adapter())),
                 #[cfg(supports_headless)]
                 renderer_name: self.renderer_name.clone(),
                 #[cfg(supports_headless)]
@@ -572,8 +580,8 @@ impl RendererSealed for TestingWindow {
                 .take(max_lines)
                 .fold((0, 0), |(len, count), line| (len.max(line.len()), count + 1));
             let width = max_line_len as f32 * pixel_size;
-            let height =
-                num_lines.max(1) as f32 * fixed_test_font_line_height(&font_request, pixel_size);
+            let height = num_lines.max(1) as f32
+                * fixed_test_font_line_height(text_item.line_height_factor(), pixel_size);
             LogicalSize::new(width, height)
         } else {
             sharedparley::text_size(self, text_item, item_rc, max_width, text_wrap, None)
@@ -612,28 +620,33 @@ impl RendererSealed for TestingWindow {
     fn text_line_height(
         &self,
         font_request: i_slint_core::graphics::FontRequest,
+        line_height_factor: Option<f32>,
     ) -> Option<LogicalLength> {
         let pixel_size = font_request.pixel_size.map_or(10., |s| s.get());
-        is_fixed_test_font(&font_request.family)
-            .then(|| LogicalLength::new(fixed_test_font_line_height(&font_request, pixel_size)))
+        is_fixed_test_font(&font_request.family).then(|| {
+            LogicalLength::new(fixed_test_font_line_height(line_height_factor, pixel_size))
+        })
     }
 
     fn char_size(
         &self,
-        text_item: Pin<&dyn i_slint_core::item_rendering::HasFont>,
-        item_rc: &i_slint_core::item_tree::ItemRc,
+        font_request: i_slint_core::graphics::FontRequest,
+        line_height_factor: Option<f32>,
         ch: char,
     ) -> LogicalSize {
-        let font_request = text_item.font_request(item_rc);
         if is_fixed_test_font(&font_request.family) {
             let pixel_size = font_request.pixel_size.map_or(10., |s| s.get());
-            LogicalSize::new(pixel_size, fixed_test_font_line_height(&font_request, pixel_size))
+            LogicalSize::new(
+                pixel_size,
+                fixed_test_font_line_height(line_height_factor, pixel_size),
+            )
         } else {
             let Some(ctx) = self.slint_context() else {
                 return LogicalSize::default();
             };
             let mut font_ctx = ctx.font_context().borrow_mut();
-            sharedparley::char_size(&mut font_ctx, text_item, item_rc, ch).unwrap_or_default()
+            sharedparley::char_size(&mut font_ctx, &font_request, line_height_factor, ch)
+                .unwrap_or_default()
         }
     }
 
@@ -669,7 +682,10 @@ impl RendererSealed for TestingWindow {
         if is_fixed_test_font(&font_request.family) {
             // The fixed test font never wraps, so the affinity is always next-character.
             let pixel_size = font_request.pixel_size.map_or(10., |s| s.get());
-            let line_height = fixed_test_font_line_height(&font_request, pixel_size);
+            let line_height = fixed_test_font_line_height(
+                i_slint_core::item_rendering::RenderString::line_height_factor(text_input),
+                pixel_size,
+            );
             let text = text_input.text();
             if pos.y < 0. {
                 return (0, TextCursorAffinity::NextCharacter);
@@ -696,7 +712,10 @@ impl RendererSealed for TestingWindow {
         let font_request = text_input.font_request(item_rc);
         if is_fixed_test_font(&font_request.family) {
             let pixel_size = font_request.pixel_size.map_or(10., |s| s.get());
-            let line_height = fixed_test_font_line_height(&font_request, pixel_size);
+            let line_height = fixed_test_font_line_height(
+                i_slint_core::item_rendering::RenderString::line_height_factor(text_input),
+                pixel_size,
+            );
             let text = text_input.text();
             let line = text[..byte_offset].chars().filter(|c| *c == '\n').count();
             let column = text[..byte_offset].split('\n').nth(line).unwrap_or("").len();

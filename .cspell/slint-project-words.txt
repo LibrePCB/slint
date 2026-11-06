@@ -6,6 +6,7 @@ actionchip
 addrs
 adipiscing
 Adressliste
+Adwaita
 aiohttp
 alignas
 alignof
@@ -18,6 +19,7 @@ Amoled
 analogclock
 androideabi
 anyrender
+apng
 Appbar
 appicon
 appiconset
@@ -31,6 +33,7 @@ armeabi
 armhf
 arrayvec
 artboard
+ashpd
 assetcatalog
 astrolib
 astrowind
@@ -53,6 +56,7 @@ BGRA
 BGRX
 bindgen
 bindtextdomain
+bitmapfont
 blit
 blogic
 blogica
@@ -105,6 +109,7 @@ coldict
 colorspace
 colour
 colprop
+copysign
 commodo
 compdef
 compilerlib
@@ -139,6 +144,7 @@ datatypes
 datepickerpopup
 Datelike
 DBUILD
+dbus
 DCACHE
 DCMAKE
 DDEFAULT
@@ -354,6 +360,7 @@ libavformat
 libavutil
 LIBC
 LIBCLANG
+libdlmclient
 libdrm
 libegl
 libfile
@@ -393,6 +400,7 @@ lipo
 Literata
 Llff
 llms
+llvmpipe
 Lmaterial
 LOADADDR
 LOWORD
@@ -416,6 +424,7 @@ MCUX
 mdbook
 memsize
 menuconfig
+menuitemrole
 Meteo
 millihertz
 mimxrt
@@ -544,9 +553,11 @@ radiobuttontile
 Raleway
 Randriana
 rasterizer
+rasterizers
 rasterizes
 rasterizing
 RBUTTONUP
+readback
 recompiles
 rects
 redoable
@@ -587,8 +598,10 @@ sdkmanager
 seatd
 segmentedbutton
 segmenteditem
+semihosting
 Segoe
 serde
+serialport
 setattr
 SETFL
 Shaderiv
@@ -643,6 +656,7 @@ structval
 strvalue
 styledprop
 styledtext
+styledtextitem
 styledtextprop
 styledval
 stylemetrics
@@ -669,6 +683,8 @@ targetstruct
 Tdefmt
 tempor
 termcolor
+testdata
+texel
 texels
 texteditor
 textinput
@@ -695,6 +711,7 @@ toucharea
 toupper
 trunc
 tungstenite
+Twemoji
 typedoc
 typeregister
 Tzimabazafi
@@ -716,6 +733,7 @@ unpark
 unparseable
 unpic
 Unpremul
+unpremultiplies
 unpremultiply
 unsendable
 usbc
@@ -733,6 +751,7 @@ verticalbox
 verticallayout
 VGWGPU
 viewports
+virt
 vlayout
 vref
 vscodeversion
@@ -763,7 +782,9 @@ WNDCLASS
 wordlike
 WQXGA
 writeback
+wrappable
 WRONLY
+Wtautological
 xbuild
 xcarchive
 xcassets

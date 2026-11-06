@@ -10,9 +10,11 @@ use crate::editor_preview::editing::import_edit::{create_import_edit_impl, find_
 use crate::editor_preview::{self, DocumentCache};
 use crate::util::{lookup_current_element_type, text_size_to_lsp_position, with_lookup_ctx};
 
+use i_slint_compiler::ExperimentalFeature;
 use i_slint_compiler::diagnostics::Spanned;
+use i_slint_compiler::element_type::{ElementType, PropertyLookupMode};
 use i_slint_compiler::expression_tree::{Callable, Expression};
-use i_slint_compiler::langtype::{ElementType, PropertyLookupMode, Type};
+use i_slint_compiler::langtype::Type;
 use i_slint_compiler::lookup::{LookupCtx, LookupObject, LookupResult, LookupResultCallable};
 use i_slint_compiler::object_tree::ElementRc;
 use i_slint_compiler::parser::{
@@ -83,11 +85,12 @@ pub(crate) fn completion_at(
         .and_then(|caps| caps.snippet_support)
         .unwrap_or(false);
 
-    let enable_experimental =
-        document_cache.compiler_configuration().compiler_config.enable_experimental;
+    let experimental_features =
+        document_cache.compiler_configuration().compiler_config.experimental_features;
+    let match_enabled = experimental_features.contains(ExperimentalFeature::Match);
+    let interfaces_enabled = experimental_features.contains(ExperimentalFeature::Interfaces);
 
-    if enable_experimental
-        && let Some(match_element) = match_element::case_value_position(&token, offset)
+    if match_enabled && let Some(match_element) = match_element::case_value_position(&token, offset)
     {
         return match_element::case_value_completions(document_cache, &match_element, offset);
     } else if token.kind() == SyntaxKind::StringLiteral {
@@ -101,7 +104,7 @@ pub(crate) fn completion_at(
             });
             if node.kind() == SyntaxKind::ImportSpecifier && !token.text().contains('/') {
                 let mut files = vec!["std-widgets.slint"];
-                if enable_experimental {
+                if interfaces_enabled {
                     files.push("std-widget-interfaces.slint");
                 }
                 result.get_or_insert_with(Vec::new).extend(files.into_iter().map(|file| {
@@ -112,6 +115,8 @@ pub(crate) fn completion_at(
             }
             return result;
         }
+    } else if is_empty_element_type_position(&token, offset) {
+        return Some(element_type_completions(&token, document_cache, snippet_support));
     } else if let Some(element) = syntax_nodes::Element::new(node.clone()) {
         if token.kind() == SyntaxKind::At
             || (token.kind() == SyntaxKind::Identifier
@@ -181,7 +186,7 @@ pub(crate) fn completion_at(
                 );
             }
 
-            if !is_global && !is_interface && enable_experimental {
+            if !is_global && !is_interface && match_enabled {
                 r.push(
                     CompletionItem::new_simple("match".into(), String::new())
                         .with_kind(CompletionItemKind::KEYWORD)
@@ -192,7 +197,7 @@ pub(crate) fn completion_at(
                 );
             }
 
-            if is_root_element && !is_global && !is_interface && enable_experimental {
+            if is_root_element && !is_global && !is_interface && interfaces_enabled {
                 r.push(
                     CompletionItem::new_simple("implement".to_string(), String::new())
                         .with_kind(CompletionItemKind::KEYWORD)
@@ -237,7 +242,7 @@ pub(crate) fn completion_at(
             resolve_expression_scope(ctx, document_cache, snippet_support)
         })?;
     } else if let Some(implement_statement) = syntax_nodes::ImplementStatement::new(node.clone()) {
-        if !enable_experimental {
+        if !interfaces_enabled {
             return None;
         }
         if let Some(double_arrow) = implement_statement.child_token(SyntaxKind::DoubleArrow)
@@ -334,7 +339,7 @@ pub(crate) fn completion_at(
             SyntaxKind::Element => {
                 let element = q.parent()?;
                 if is_interface_root_element(&element) {
-                    if !enable_experimental {
+                    if !interfaces_enabled {
                         return None;
                     }
 
@@ -350,42 +355,14 @@ pub(crate) fn completion_at(
                         &token,
                         document_cache,
                         snippet_support,
+                        None,
                     );
                 }
 
-                // auto-complete the components
-                let global_tr = document_cache.global_type_registry();
-                let tr = q
-                    .source_file()
-                    .and_then(|sf| document_cache.get_document_for_source_file(sf))
-                    .map(|doc| &doc.local_registry)
-                    .unwrap_or(&global_tr);
-
-                let mut result = tr
-                    .all_elements()
-                    .into_iter()
-                    .filter_map(|(k, t)| {
-                        match t {
-                            ElementType::Component(c) if !c.is_global() && !c.is_interface() => (),
-                            ElementType::Builtin(b) if !b.is_internal && !b.is_global => (),
-                            _ => return None,
-                        };
-                        let mut c = CompletionItem::new_simple(k.to_string(), "element".into());
-                        c.kind = Some(CompletionItemKind::CLASS);
-                        Some(c)
-                    })
-                    .collect::<Vec<_>>();
-
-                drop(global_tr);
-
-                if snippet_support {
-                    add_components_to_import(&token, document_cache, &mut result);
-                }
-
-                return Some(result);
+                return Some(element_type_completions(&token, document_cache, snippet_support));
             }
             SyntaxKind::ImplementStatement => {
-                if !enable_experimental {
+                if !interfaces_enabled {
                     return None;
                 }
                 return resolve_implement_interface_name_scope(
@@ -393,6 +370,7 @@ pub(crate) fn completion_at(
                     &token,
                     document_cache,
                     snippet_support,
+                    implement_statement_completion_suffix(&q.parent()?).as_deref(),
                 );
             }
             SyntaxKind::Type => {
@@ -465,7 +443,7 @@ pub(crate) fn completion_at(
                 .with_insert_text(ins_tex, snippet_support)
         })
         .collect();
-        if enable_experimental {
+        if interfaces_enabled {
             r.extend(
                 [
                     ("interface", "interface ${1:Interface} {\n    $0\n}"),
@@ -515,10 +493,37 @@ pub(crate) fn completion_at(
         return Some(r);
     } else if node.kind() == SyntaxKind::PropertyAnimation {
         let global_tr = document_cache.global_type_registry();
+        let doc = node.source_file().and_then(|sf| document_cache.get_document_for_source_file(sf));
+        let tr = doc.map(|d| &d.local_registry).unwrap_or(&global_tr);
+
+        // Hide `angle-interpolation` if we can prove every animated property is not an angle.
+        let exclude_angle_interpolation = lookup_current_element_type(node.clone(), tr)
+            .is_some_and(|element_type| {
+                let mut any_resolved = false;
+                let mut all_non_angle = true;
+                for qn in node.children().filter_map(syntax_nodes::QualifiedName::new) {
+                    let Some(prop_name) = i_slint_compiler::parser::identifier_text(&qn) else {
+                        continue;
+                    };
+                    let lookup = element_type
+                        .lookup_property(prop_name.as_str(), PropertyLookupMode::ComponentLocal);
+                    if !lookup.property_type.is_property_type() {
+                        continue;
+                    }
+                    any_resolved = true;
+                    if matches!(lookup.property_type, Type::Angle) {
+                        all_non_angle = false;
+                        break;
+                    }
+                }
+                any_resolved && all_non_angle
+            });
+
         let r = global_tr
             .property_animation_type_for_property(Type::Float32)
             .property_list()
             .into_iter()
+            .filter(|(k, _)| !(exclude_angle_interpolation && k.as_str() == "angle-interpolation"))
             .map(|(k, t)| {
                 let mut c = CompletionItem::new_simple(k.to_string(), t.to_string());
                 c.kind = Some(CompletionItemKind::PROPERTY);
@@ -536,7 +541,7 @@ pub(crate) fn completion_at(
             return properties_for_changed_callbacks(parent, document_cache);
         }
         if parent.kind() == SyntaxKind::ImplementStatement {
-            if !enable_experimental {
+            if !interfaces_enabled {
                 return None;
             }
             return resolve_implement_target_scope(node);
@@ -674,6 +679,75 @@ fn properties_for_changed_callbacks(
             Some(c)
         }));
     Some(result.collect())
+}
+
+/// The elements that can be instantiated at `token`
+fn element_type_completions(
+    token: &SyntaxToken,
+    document_cache: &DocumentCache,
+    snippet_support: bool,
+) -> Vec<CompletionItem> {
+    let global_tr = document_cache.global_type_registry();
+    let tr = token
+        .source_file()
+        .and_then(|sf| document_cache.get_document_for_source_file(sf))
+        .map(|doc| &doc.local_registry)
+        .unwrap_or(&global_tr);
+    let mut result = tr
+        .all_elements()
+        .into_iter()
+        .filter_map(|(k, t)| {
+            match t {
+                ElementType::Component(c) if !c.is_global() && !c.is_interface() => (),
+                ElementType::Builtin(b) if !b.is_internal && !b.is_global => (),
+                _ => return None,
+            };
+            let mut c = CompletionItem::new_simple(k.to_string(), "element".into());
+            c.kind = Some(CompletionItemKind::CLASS);
+            Some(c)
+        })
+        .collect::<Vec<_>>();
+
+    drop(global_tr);
+
+    if snippet_support {
+        add_components_to_import(token, document_cache, &mut result);
+    }
+    result
+}
+
+/// Whether nothing is typed yet at `offset` where an element type goes: after `id :=`, or after
+/// the `:` of an `if`, a `for`, or a `match` case. What follows then doesn't parse as that element.
+fn is_empty_element_type_position(token: &SyntaxToken, offset: TextSize) -> bool {
+    let is_trivia =
+        |t: &SyntaxToken| matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Comment);
+    let skip_trivia = |mut token: Option<SyntaxToken>| {
+        while let Some(t) = token.as_ref().filter(|t| is_trivia(t)) {
+            token = t.prev_token();
+        }
+        token
+    };
+    let previous = if is_trivia(token) {
+        skip_trivia(Some(token.clone()))
+    } else if token.text_range().end() == offset {
+        Some(token.clone())
+    } else {
+        None
+    };
+    let Some(previous) = previous else { return false };
+    match previous.kind() {
+        SyntaxKind::ColonEqual => {
+            matches!(previous.parent().kind(), SyntaxKind::SubElement | SyntaxKind::Binding)
+        }
+        SyntaxKind::Colon => matches!(
+            previous.parent().kind(),
+            SyntaxKind::ConditionalElement
+                | SyntaxKind::RepeatedElement
+                | SyntaxKind::MatchCase
+                | SyntaxKind::WildcardMatchCase
+        ),
+        _ => false,
+    }
 }
 
 /// Try to return the completion items for the location inside an element.
@@ -1158,11 +1232,20 @@ fn enclosing_declaration_name(node: &SyntaxNode) -> Option<SmolStr> {
     identifier_text(&component.child_node(SyntaxKind::DeclaredIdentifier)?)
 }
 
+fn implement_statement_completion_suffix(statement: &SyntaxNode) -> Option<String> {
+    if statement.child_token(SyntaxKind::DoubleArrow).is_some() {
+        return None;
+    }
+    let semicolon = if statement.child_token(SyntaxKind::Semicolon).is_some() { "" } else { ";" };
+    Some(format!(" <=> ${{1:self}}{semicolon}"))
+}
+
 fn resolve_implement_interface_name_scope(
     node: &SyntaxNode,
     token: &SyntaxToken,
     document_cache: &editor_preview::DocumentCache,
     snippet_support: bool,
+    completion_suffix: Option<&str>,
 ) -> Option<Vec<CompletionItem>> {
     let global_type_register = document_cache.global_type_registry();
     let type_register = node
@@ -1183,7 +1266,12 @@ fn resolve_implement_interface_name_scope(
                 let mut completion =
                     CompletionItem::new_simple(key.to_string(), "interface".into());
                 completion.kind = Some(CompletionItemKind::INTERFACE);
-                completion
+                match completion_suffix {
+                    Some(suffix) => {
+                        completion.with_insert_text(format!("{key}{suffix}"), snippet_support)
+                    }
+                    None => completion,
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -1191,7 +1279,7 @@ fn resolve_implement_interface_name_scope(
     drop(global_type_register);
 
     if snippet_support {
-        add_interfaces_to_import(token, document_cache, &mut result);
+        add_interfaces_to_import(token, document_cache, completion_suffix, &mut result);
     }
 
     Some(result)
@@ -1232,6 +1320,7 @@ fn collect_child_ids(element: &syntax_nodes::Element, result: &mut Vec<Completio
 fn add_interfaces_to_import(
     token: &SyntaxToken,
     document_cache: &editor_preview::DocumentCache,
+    completion_suffix: Option<&str>,
     result: &mut Vec<CompletionItem>,
 ) {
     let available_types = normalized_labels(result);
@@ -1246,7 +1335,10 @@ fn add_interfaces_to_import(
         &mut |exported_name, file, the_import| {
             result.push(CompletionItem {
                 label: format!("{exported_name} (import from \"{file}\")"),
-                insert_text: Some(exported_name.to_string()),
+                insert_text: Some(format!(
+                    "{exported_name}{}",
+                    completion_suffix.unwrap_or_default()
+                )),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 filter_text: Some(exported_name.to_string()),
                 kind: Some(CompletionItemKind::INTERFACE),
@@ -1451,7 +1543,7 @@ fn macro_completions(token: SyntaxToken, snippet_support: bool) -> Option<Vec<Co
                 ("markdown(..)", "markdown(\"$1\")"),
                 ("image-url(..)", "image-url(\"$1\")"),
                 ("linear-gradient(..)", "linear-gradient($1)"),
-                ("radial-gradient(..)", "radial-gradient(circle, $1)"),
+                ("radial-gradient(..)", "radial-gradient(${1|circle,ellipse|}, $2)"),
                 ("conic-gradient(..)", "conic-gradient($1)"),
             ]
             .into_iter()
@@ -1492,6 +1584,7 @@ fn at_keys_completions(ctx: &mut LookupCtx) -> Vec<CompletionItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::language::test::CURSOR_EMOJI;
     use lsp_types::Position;
 
     /// Given a source text containing the unicode emoji `🔺`, the emoji will be removed and then an autocompletion request will be done as if the cursor was there
@@ -1504,7 +1597,6 @@ mod tests {
     }
 
     fn get_completions_impl(file: &str, enable_experimental: bool) -> Option<Vec<CompletionItem>> {
-        const CURSOR_EMOJI: char = '🔺';
         let offset = (file.find(CURSOR_EMOJI).unwrap() as u32).into();
         let source = file.replace(CURSOR_EMOJI, "");
         let (mut dc, uri, _) = if enable_experimental {
@@ -1669,6 +1761,49 @@ mod tests {
             assert!(!res.iter().any(|ci| ci.label == "NativeStyleMetrics"));
             assert!(!res.iter().any(|ci| ci.label == "SlintInternal"));
             assert!(!res.iter().any(|ci| ci.label == "init"));
+        }
+    }
+
+    #[test]
+    fn element_type_position() {
+        // #106
+        for source in [
+            "component Foo { Rectangle { foo := Rect🔺 } }",
+            "component Foo { Rectangle { foo := Rect🔺\n width: 5px; } }",
+            "component Foo { Rectangle { foo := Rect🔺",
+            "component Foo { Rectangle { foo := 🔺 } }",
+            "component Foo { Rectangle { foo :=🔺 } }",
+            "component Foo { Rectangle { foo := 🔺",
+            "component Foo { foo := 🔺 }",
+            "component Foo { Rectangle { foo := 🔺 width: 42px } }",
+            "component Foo { Rectangle { foo := 🔺 property <int> foo;  } }",
+            "component Foo { Rectangle { foo := 🔺 bar := Rectangle {}  } }",
+            "component Foo { Rectangle { foo := 🔺 Text {} } }",
+            "component Foo { Rectangle { foo := 🔺 changed width => {} } }",
+            "component Foo { Rectangle { foo := 🔺 @children } }",
+            "component Foo { Rectangle { foo := 🔺 // comment\n } }",
+            "component Foo { Rectangle { if true : 🔺 } }",
+            "component Foo { Rectangle { if true : 🔺 width: 4px; } }",
+            "component Foo { Rectangle { for x in 3 : 🔺 width: 4px; } }",
+        ] {
+            let res = get_completions(source).unwrap_or_default();
+            assert!(res.iter().any(|ci| ci.label == "Rectangle"), "{source}");
+            assert!(!res.iter().any(|ci| ci.label == "width"), "{source}");
+        }
+        for source in [
+            "component Foo { property <int> v; Rectangle { match v { 1: 🔺 } } }",
+            "component Foo { property <int> v; Rectangle { match v { _: 🔺 width: 4px; } } }",
+        ] {
+            let res = get_completions_experimental(source).unwrap_or_default();
+            assert!(res.iter().any(|ci| ci.label == "Rectangle"), "{source}");
+        }
+        let res = get_completions("component Foo { foo := Text { te🔺 } }").unwrap();
+        assert!(res.iter().any(|ci| ci.label == "text"));
+        for source in
+            ["component Foo { Rectangle { width: 🔺 } }", "component Foo { init => { x := 🔺 } }"]
+        {
+            let res = get_completions(source).unwrap_or_default();
+            assert!(!res.iter().any(|ci| ci.label == "Rectangle"), "{source}");
         }
     }
 
@@ -2355,6 +2490,24 @@ mod tests {
         res.iter().find(|ci| ci.label == "direction").unwrap();
         res.iter().find(|ci| ci.label == "iteration-count").unwrap();
         res.iter().find(|ci| ci.label == "easing").unwrap();
+        // angle-interpolation should not be suggested for a non-angle property
+        assert!(!res.iter().any(|ci| ci.label == "angle-interpolation"));
+    }
+
+    #[test]
+    fn animation_completion_angle() {
+        let source = r#"
+            component Foo {
+                Rectangle {
+                    animate transform-rotation {
+                        🔺
+                    }
+                }
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "duration").unwrap();
+        res.iter().find(|ci| ci.label == "angle-interpolation").unwrap();
     }
 
     #[test]
@@ -2410,6 +2563,26 @@ mod tests {
             ..Default::default()
         }]);
         assert_completions_found(expected, &res);
+    }
+
+    #[test]
+    fn animation_interpolation_completion() {
+        let source = r#"
+            component Foo {
+                Text {
+                    width: 20px;
+                    animate width {
+                        angle-interpolation: 🔺;
+                    }
+                }
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "linear").unwrap();
+        res.iter().find(|ci| ci.label == "shorter").unwrap();
+        res.iter().find(|ci| ci.label == "longer").unwrap();
+        res.iter().find(|ci| ci.label == "increasing").unwrap();
+        res.iter().find(|ci| ci.label == "decreasing").unwrap();
     }
 
     #[test]
@@ -2767,7 +2940,6 @@ mod tests {
     ) -> Option<Vec<CompletionItem>> {
         use i_slint_compiler::diagnostics::BuildDiagnostics;
 
-        const CURSOR_EMOJI: char = '🔺';
         let main_content = main_file_with_cursor.replace(CURSOR_EMOJI, "");
         let cursor_offset = (main_file_with_cursor.find(CURSOR_EMOJI).unwrap() as u32).into();
 
@@ -2805,11 +2977,11 @@ mod tests {
     }
 
     #[test]
-    fn project_entry_import_graph_supplies_completion_suggestions() {
+    fn project_main_import_graph_supplies_completion_suggestions() {
         let directory = tempfile::TempDir::new().unwrap();
         std::fs::write(
             directory.path().join(i_slint_compiler::project_file::FILE_NAME),
-            r#"{ "entry": "entry.slint" }"#,
+            r#"{ "edition": "1.19", "main": "entry.slint" }"#,
         )
         .unwrap();
         std::fs::write(directory.path().join("entry.slint"), r#"import { EntryWidget } from "widgets.slint"; export component Entry inherits EntryWidget {}"#).unwrap();
@@ -2824,9 +2996,11 @@ mod tests {
         let cursor_offset = (source.find("Entry }").unwrap() + "Entry".len()) as u32;
         let document_url =
             lsp_types::Url::from_file_path(directory.path().join("editing.slint")).unwrap();
-        let mut session = editor_preview::EditorSession::new(
+        let mut session = editor_preview::EditorSession::with_previews(
             crate::language::test::empty_document_cache(),
-            editor_preview::LspToPreviews::with_one(editor_preview::DummyLspToPreview::default()),
+            vec![editor_preview::LspToPreviews::with_one(
+                editor_preview::DummyLspToPreview::default(),
+            )],
         );
         spin_on::spin_on(session.open_document(source.into(), document_url.clone(), Some(1)))
             .unwrap();
@@ -2963,7 +3137,37 @@ export component TestWindow inherits Window {
         let completion =
             results.iter().find(|completion| completion.label == "MyInterface").unwrap();
         assert_eq!(completion.kind, Some(CompletionItemKind::INTERFACE));
+        assert_eq!(completion.insert_text.as_deref(), Some("MyInterface <=> ${1:self};"));
+        assert_eq!(completion.insert_text_format, Some(InsertTextFormat::SNIPPET));
         assert!(!results.iter().any(|completion| completion.label == "NotAnInterface"));
+    }
+
+    #[test]
+    fn implement_interface_name_completes_existing_statement() {
+        let source = r#"
+            interface MyInterface { property <int> x; }
+            component Foo {
+                implement My🔺Interface <=> self;
+            }
+        "#;
+        let results = get_completions_experimental(source).unwrap();
+        let completion =
+            results.iter().find(|completion| completion.label == "MyInterface").unwrap();
+        assert_eq!(completion.insert_text, None);
+    }
+
+    #[test]
+    fn implement_interface_name_keeps_existing_semicolon() {
+        let source = r#"
+            interface MyInterface { property <int> x; }
+            component Foo {
+                implement My🔺;
+            }
+        "#;
+        let results = get_completions_experimental(source).unwrap();
+        let completion =
+            results.iter().find(|completion| completion.label == "MyInterface").unwrap();
+        assert_eq!(completion.insert_text.as_deref(), Some("MyInterface <=> ${1:self}"));
     }
 
     #[test]
@@ -3124,7 +3328,7 @@ export component TestWindow inherits Window {
         assert_completion_found(
             &CompletionItem {
                 label: "MyInterface (import from \"types.slint\")".into(),
-                insert_text: Some("MyInterface".into()),
+                insert_text: Some("MyInterface <=> ${1:self};".into()),
                 filter_text: Some("MyInterface".into()),
                 additional_text_edits: Some(vec![TextEdit {
                     range: Range::new(Position::new(0, 0), Position::new(0, 0)),
@@ -3143,7 +3347,7 @@ export component TestWindow inherits Window {
         assert_completion_found(
             &CompletionItem {
                 label: "ButtonInterface (import from \"std-widget-interfaces.slint\")".into(),
-                insert_text: Some("ButtonInterface".into()),
+                insert_text: Some("ButtonInterface <=> ${1:self};".into()),
                 filter_text: Some("ButtonInterface".into()),
                 kind: Some(CompletionItemKind::INTERFACE),
                 detail: Some("(import from \"std-widget-interfaces.slint\")".into()),

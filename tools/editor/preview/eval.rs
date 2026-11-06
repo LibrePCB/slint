@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use smol_str::SmolStr;
 
-use i_slint_compiler::{expression_tree, langtype};
+use i_slint_compiler::{builtin_functions, expression_tree, expression_types, langtype};
 use slint::Model;
 use slint_interpreter::{Value, ValueType};
 
@@ -204,29 +204,29 @@ fn eval_expression(
             local_context.local_variables.get(name).cloned().unwrap_or_default()
         }
         Expression::EasingCurve(curve) => Value::EasingCurve(match curve {
-            expression_tree::EasingCurve::Linear => i_slint_core::animations::EasingCurve::Linear,
-            expression_tree::EasingCurve::EaseInElastic => {
+            expression_types::EasingCurve::Linear => i_slint_core::animations::EasingCurve::Linear,
+            expression_types::EasingCurve::EaseInElastic => {
                 i_slint_core::animations::EasingCurve::EaseInElastic
             }
-            expression_tree::EasingCurve::EaseOutElastic => {
+            expression_types::EasingCurve::EaseOutElastic => {
                 i_slint_core::animations::EasingCurve::EaseOutElastic
             }
-            expression_tree::EasingCurve::EaseInOutElastic => {
+            expression_types::EasingCurve::EaseInOutElastic => {
                 i_slint_core::animations::EasingCurve::EaseInOutElastic
             }
-            expression_tree::EasingCurve::EaseInBounce => {
+            expression_types::EasingCurve::EaseInBounce => {
                 i_slint_core::animations::EasingCurve::EaseInBounce
             }
-            expression_tree::EasingCurve::EaseOutBounce => {
+            expression_types::EasingCurve::EaseOutBounce => {
                 i_slint_core::animations::EasingCurve::EaseOutBounce
             }
-            expression_tree::EasingCurve::EaseInOutBounce => {
+            expression_types::EasingCurve::EaseInOutBounce => {
                 i_slint_core::animations::EasingCurve::EaseInOutBounce
             }
-            expression_tree::EasingCurve::CubicBezier(a, b, c, d) => {
+            expression_types::EasingCurve::CubicBezier(a, b, c, d) => {
                 i_slint_core::animations::EasingCurve::CubicBezier([*a, *b, *c, *d])
             }
-            expression_tree::EasingCurve::Spring(a) => {
+            expression_types::EasingCurve::Spring(a) => {
                 i_slint_core::animations::EasingCurve::Spring(*a)
             }
         }),
@@ -247,29 +247,24 @@ fn eval_expression(
                 ),
             ))
         }
-        Expression::RadialGradient { stops, center, radius } => {
-            let mut gradient = i_slint_core::graphics::RadialGradientBrush::new_circle(
-                stops.iter().map(|(color, stop)| {
+        Expression::RadialGradient { stops, center, shape } => {
+            let stops = stops
+                .iter()
+                .map(|(color, stop)| {
                     let color =
                         eval_expression(color, local_context, None).try_into().unwrap_or_default();
                     let position =
                         eval_expression(stop, local_context, None).try_into().unwrap_or_default();
                     i_slint_core::graphics::GradientStop { color, position }
-                }),
-            );
-            if let Some((cx, cy)) = center {
-                let cx: f32 =
-                    eval_expression(cx, local_context, None).try_into().unwrap_or_default();
-                let cy: f32 =
-                    eval_expression(cy, local_context, None).try_into().unwrap_or_default();
-                gradient = gradient.with_center(cx, cy);
-            }
-            if let Some(radius) = radius {
-                let r: f32 =
-                    eval_expression(radius, local_context, None).try_into().unwrap_or_default();
-                gradient = gradient.with_radius(r);
-            }
-            Value::Brush(slint::Brush::RadialGradient(gradient))
+                })
+                .collect::<Vec<_>>();
+            let mut number = |e: &Expression| -> f32 {
+                eval_expression(e, local_context, None).try_into().unwrap_or_default()
+            };
+            let center = center.as_ref().map(|(cx, cy)| (number(cx), number(cy)));
+            Value::Brush(slint::Brush::RadialGradient(slint_interpreter::radial_gradient_brush(
+                shape, number, center, stops,
+            )))
         }
         Expression::ConicGradient { from_angle, stops, center } => {
             let mut gradient = i_slint_core::graphics::ConicGradientBrush::new(
@@ -310,8 +305,8 @@ fn eval_expression(
                 return local_context.return_value.clone().unwrap_or_default();
             };
             match op {
-                expression_tree::MinMaxOp::Min => Value::Number(lhs.min(rhs)),
-                expression_tree::MinMaxOp::Max => Value::Number(lhs.max(rhs)),
+                expression_types::MinMaxOp::Min => Value::Number(lhs.min(rhs)),
+                expression_types::MinMaxOp::Max => Value::Number(lhs.max(rhs)),
             }
         }
         _ => Value::Void,
@@ -339,17 +334,17 @@ pub fn fully_eval_expression_tree_expression(
 }
 
 fn handle_builtin_function(
-    f: &expression_tree::BuiltinFunction,
+    f: &builtin_functions::BuiltinFunction,
     arguments: &[expression_tree::Expression],
     local_context: &mut EvalLocalContext,
 ) -> slint_interpreter::Value {
-    use i_slint_compiler::expression_tree::BuiltinFunction;
+    use i_slint_compiler::builtin_functions::BuiltinFunction;
 
-    if f.is_pure() {
+    if f.is_pure() && f.runtime_function().is_some() {
         let context = f.runtime_function_takes_context().then(|| local_context.context()).flatten();
-        let args = arguments.iter().map(|a| eval_expression(a, local_context, None));
+        let args = arguments.iter().map(|a| eval_expression(a, local_context, None)).collect();
         if let Some(value) =
-            slint_interpreter::call_runtime_builtin_function(f, context.as_ref(), args)
+            slint_interpreter::call_runtime_builtin_function(f, context.as_ref(), None, args)
         {
             return value;
         }

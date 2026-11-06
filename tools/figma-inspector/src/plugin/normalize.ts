@@ -1291,7 +1291,7 @@ async function captureNodeStrict(
     if (node.type === "TEXT") {
         const textNode = node;
         const rasterText =
-            context.target === "export" || context.nativeTextOnly
+            context.target === "export"
                 ? false
                 : textRequiresRasterPreview(textNode, mixedValue);
         if (typeof rasterText !== "boolean") return rasterText;
@@ -1805,7 +1805,6 @@ async function normalizeValidatedSource(
     const result = await normalizeRoot(root, {
         assets,
         target,
-        nativeTextOnly: source.flattened,
         metrics: zeroCaptureMetrics(),
         mixedValue: SOURCE_MIXED,
         exportSvgNode: svg,

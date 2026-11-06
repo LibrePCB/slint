@@ -4,9 +4,12 @@
 use crate::editor_preview::{self, Result};
 use crate::util;
 use i_slint_compiler::diagnostics::Spanned;
-use i_slint_compiler::expression_tree::{Expression, TwoWayBinding, Unit};
-use i_slint_compiler::langtype::{ElementType, PropertyLookupMode, Type};
-use i_slint_compiler::object_tree::{Element, ElementRc, PropertyDeclaration, PropertyVisibility};
+use i_slint_compiler::element_type::{ElementType, PropertyLookupMode};
+use i_slint_compiler::expression_tree::{Expression, TwoWayBinding};
+use i_slint_compiler::expression_types::Unit;
+use i_slint_compiler::langtype::Type;
+use i_slint_compiler::native_class::PropertyVisibility;
+use i_slint_compiler::object_tree::{Element, ElementRc, PropertyDeclaration};
 use i_slint_compiler::parser::{
     SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, syntax_nodes,
 };
@@ -320,6 +323,7 @@ pub enum LayoutKind {
     HorizontalBox,
     VerticalBox,
     GridLayout,
+    FlexboxLayout,
 }
 
 fn insert_property_definitions(
@@ -366,7 +370,7 @@ fn insert_property_definitions(
             ElementType::Builtin(b) => b
                 .properties
                 .get(prop)
-                .and_then(|p| p.default_value.expr(element))
+                .and_then(|p| Expression::from_builtin_default(&p.default_value, Some(element)))
                 .unwrap_or_default(),
             _ => Expression::Invalid,
         }
@@ -451,7 +455,10 @@ pub(super) fn get_properties(
                         visibility: t.property_visibility,
                         declared_at: None,
                         defined_at: None,
-                        default_value: t.default_value.expr(&current_element),
+                        default_value: Expression::from_builtin_default(
+                            &t.default_value,
+                            Some(&current_element),
+                        ),
                         group: b.name.clone(),
                         group_priority: depth,
                     })
@@ -515,7 +522,10 @@ pub(super) fn get_properties(
                         .chain(std::iter::once((transform_origin.0, transform_origin.1.into()))),
                 ));
 
-                if matches!(b.name.as_str(), "GridLayout" | "HorizontalLayout" | "VerticalLayout") {
+                if matches!(
+                    b.name.as_str(),
+                    "GridLayout" | "HorizontalLayout" | "VerticalLayout" | "FlexboxLayout"
+                ) {
                     // Add the padding that is otherwise filtered out
                     result.extend(get_reserved_properties(
                         &b.name,
@@ -544,7 +554,9 @@ pub(super) fn get_properties(
                 LayoutKind::None => true,
                 LayoutKind::HorizontalBox => p.name.as_str() != "x",
                 LayoutKind::VerticalBox => p.name.as_str() != "y",
-                LayoutKind::GridLayout => !["x", "y"].contains(&p.name.as_str()),
+                LayoutKind::GridLayout | LayoutKind::FlexboxLayout => {
+                    !["x", "y"].contains(&p.name.as_str())
+                }
             })
             .map(|mut p| {
                 match p.name.as_str() {
@@ -1683,6 +1695,9 @@ component MainWindow inherits Window {
                 slider2 := Slider { value: 0.5; }
                 Rectangle {}
             }
+            lay4 := FlexboxLayout {
+                Rectangle {}
+            }
         }
     }
 }
@@ -1712,6 +1727,16 @@ component MainWindow inherits Window {
 
         let (l, c) =
             source.line_column(source.source().unwrap().find("lay3 :=").unwrap(), dc.format);
+        let (_, result) = properties_at_position_in_cache(l as u32, c as u32, &dc, &url).unwrap();
+        let property = find_property(&result, "padding").unwrap();
+        assert_eq!(property.ty, Type::LogicalLength);
+        let property = find_property(&result, "padding-left").unwrap();
+        assert_eq!(property.ty, Type::LogicalLength);
+        let property = find_property(&result, "padding-top").unwrap();
+        assert_eq!(property.ty, Type::LogicalLength);
+
+        let (l, c) =
+            source.line_column(source.source().unwrap().find("lay4 :=").unwrap(), dc.format);
         let (_, result) = properties_at_position_in_cache(l as u32, c as u32, &dc, &url).unwrap();
         let property = find_property(&result, "padding").unwrap();
         assert_eq!(property.ty, Type::LogicalLength);

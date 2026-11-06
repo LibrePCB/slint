@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 import { EditorGrid } from "editor-grid.slint";
+import { FloatingSurface } from "floating-surface.slint";
 import { Style, PaintStyle, Metrics, Typography, Colors, NineSliceStyle, ImageTabsStyle, ImageFieldStyle, ImageSyntaxStyle, ButtonStyle, ImageDetailsStyle, ImageAssetEditorStyle } from "../style.slint";
 // cspell:ignore nesw
 
@@ -80,7 +81,6 @@ component ImageEditorTab inherits Rectangle {
     }
 
     touch := TouchArea {
-        mouse-cursor: pointer;
         clicked => {
             tab-focus.focus();
             root.clicked();
@@ -163,7 +163,7 @@ component FloatingSyntaxField inherits Rectangle {
 
 component FloatingCopyButton inherits Rectangle {
     in property <ButtonStyle> style: Style.copy-button;
-    in property <string> label: "Copy";
+    in property <string> label: @tr("Copy");
     callback clicked;
     private property <PaintStyle> paint: touch.pressed ? root.style.appearance.pressed
         : touch.has-hover || copy-focus.has-focus ? root.style.appearance.hover : root.style.appearance.normal;
@@ -200,7 +200,6 @@ component FloatingCopyButton inherits Rectangle {
     }
 
     touch := TouchArea {
-        mouse-cursor: pointer;
         clicked => {
             copy-focus.focus();
             root.clicked();
@@ -208,7 +207,7 @@ component FloatingCopyButton inherits Rectangle {
     }
 }
 
-component FloatingImageDetailsPanel inherits Rectangle {
+component FloatingImageDetailsPanel inherits FloatingSurface {
     in property <ImageDetailsStyle> style: Style.image-details;
     in property <string> file;
     in property <string> format;
@@ -219,18 +218,15 @@ component FloatingImageDetailsPanel inherits Rectangle {
 
     border-radius: root.style.radius;
     border-width: Metrics.border-width;
-    border-color: root.style.border;
-    background: root.style.background;
-    drop-shadow-blur: root.style.shadow.blur;
-    drop-shadow-offset-y: root.style.shadow.offset-y;
-    drop-shadow-color: root.style.shadow.color;
+    border-color: Style.floating-surface.border;
+    background: Style.floating-surface.background;
 
     VerticalLayout {
         padding: root.style.padding;
         spacing: root.style.gap;
 
         Text {
-            text: "Image";
+            text: @tr("Image");
             color: root.style.field.foreground;
             font-size: root.style.heading.size;
             font-weight: root.style.heading.weight;
@@ -239,7 +235,7 @@ component FloatingImageDetailsPanel inherits Rectangle {
         FloatingReadOnlyField {
                 style: root.style.field;
             width: parent.width - 2 * root.style.padding;
-            prefix: "File";
+            prefix: @tr("File");
             value: root.file;
             wide: true;
         }
@@ -251,7 +247,7 @@ component FloatingImageDetailsPanel inherits Rectangle {
             FloatingReadOnlyField {
                 style: root.style.field;
                 horizontal-stretch: 1;
-                prefix: "Fmt";
+                prefix: @tr("Format abbreviation" => "Fmt");
                 value: root.format;
             }
         }
@@ -263,14 +259,14 @@ component FloatingImageDetailsPanel inherits Rectangle {
             FloatingReadOnlyField {
                 style: root.style.field;
                 horizontal-stretch: 1;
-                prefix: "W";
+                prefix: @tr("Width abbreviation" => "W");
                 value: root.image-width;
             }
 
             FloatingReadOnlyField {
                 style: root.style.field;
                 horizontal-stretch: 1;
-                prefix: "H";
+                prefix: @tr("Height abbreviation" => "H");
                 value: root.image-height;
             }
         }
@@ -303,7 +299,7 @@ export component ImageAssetEditor inherits Rectangle {
     horizontal-stretch: 1;
     background: root.style.canvas.background;
     accessible-role: AccessibleRole.main;
-    accessible-label: "Image asset editor";
+    accessible-label: @tr("Image asset editor");
     accessible-description: Api.selected-image-asset.relative-path;
 
     private property <ImageAssetEditorMode> mode: ImageAssetEditorMode.preview;
@@ -462,7 +458,7 @@ export component ImageAssetEditor inherits Rectangle {
 
             ImageEditorTab {
                 style: root.style.tabs;
-                label: "Preview";
+                label: @tr("Preview");
                 selected: root.mode == ImageAssetEditorMode.preview;
                 clicked => {
                     root.mode = ImageAssetEditorMode.preview;
@@ -471,7 +467,7 @@ export component ImageAssetEditor inherits Rectangle {
 
             ImageEditorTab {
                 style: root.style.tabs;
-                label: "9 Slice";
+                label: @tr("9 Slice");
                 selected: root.mode == ImageAssetEditorMode.nine-slice;
                 clicked => {
                     root.mode = ImageAssetEditorMode.nine-slice;
@@ -492,7 +488,7 @@ export component ImageAssetEditor inherits Rectangle {
             padding: Metrics.space-large;
             spacing: Metrics.space-compact;
             Text {
-                text: "Image could not be loaded";
+                text: @tr("Image could not be loaded");
                 color: Colors.foreground;
                 font-size: Typography.action.size;
                 font-weight: FontWeight.bold;
@@ -636,28 +632,28 @@ export component ImageAssetEditor inherits Rectangle {
 
         GuideHandle {
             style: root.style.nine-slice;
-            label: "L";
+            label: @tr("Left abbreviation" => "L");
             label-x: root.left-display - self.width / 2;
             label-y: parent.height + root.style.nine-slice.label-gap;
         }
 
         GuideHandle {
             style: root.style.nine-slice;
-            label: "R";
+            label: @tr("Right abbreviation" => "R");
             label-x: parent.width - root.right-display - self.width / 2;
             label-y: parent.height + root.style.nine-slice.label-gap;
         }
 
         GuideHandle {
             style: root.style.nine-slice;
-            label: "T";
+            label: @tr("Top abbreviation" => "T");
             label-x: parent.width + root.style.nine-slice.label-gap;
             label-y: root.top-display - self.height / 2;
         }
 
         GuideHandle {
             style: root.style.nine-slice;
-            label: "B";
+            label: @tr("Bottom abbreviation" => "B");
             label-x: parent.width + root.style.nine-slice.label-gap;
             label-y: parent.height - root.bottom-display - self.height / 2;
         }
@@ -711,25 +707,22 @@ export component ImageAssetEditor inherits Rectangle {
         }
     }
 
-    if root.has-image() && root.mode == ImageAssetEditorMode.nine-slice: Rectangle {
+    if root.has-image() && root.mode == ImageAssetEditorMode.nine-slice: FloatingSurface {
         x: root.rail-x;
         y: root.tab-bar-height;
         width: root.rail-width;
         height: root.preview-panel-height;
         border-radius: Metrics.radius-large;
         border-width: Metrics.border-width;
-        border-color: root.style.preview.border;
-        background: root.style.preview.background;
-        drop-shadow-blur: root.style.preview.shadow.blur;
-        drop-shadow-offset-y: root.style.preview.shadow.offset-y;
-        drop-shadow-color: root.style.preview.shadow.color;
+        border-color: Style.floating-surface.border;
+        background: Style.floating-surface.background;
 
         Text {
             x: Metrics.space-medium;
             y: root.style.preview.heading-top;
             width: parent.width - 2 * Metrics.space-medium;
             height: root.style.preview.heading-height;
-            text: "Preview";
+            text: @tr("Preview");
             color: Colors.muted;
             font-size: Typography.caption.size;
             font-weight: FontWeight.bold;

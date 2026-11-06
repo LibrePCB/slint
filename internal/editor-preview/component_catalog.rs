@@ -5,7 +5,7 @@
 
 use crate::{DocumentCache, editing::PropertyChange};
 #[cfg(feature = "preview-engine")]
-use i_slint_compiler::langtype::ElementType;
+use i_slint_compiler::element_type::ElementType;
 use i_slint_compiler::parser::TextSize;
 use lsp_types::CompletionItemKind;
 
@@ -116,12 +116,24 @@ impl TypeInformation {
 
 #[cfg(feature = "preview-engine")]
 fn builtin_component_info(name: &str) -> ComponentInformation {
-    let is_layout = matches!(name, "GridLayout" | "HorizontalLayout" | "VerticalLayout");
-    let is_interactive =
-        matches!(name, "Flickable" | "FocusScope" | "SwipeGestureHandler" | "TouchArea");
+    let is_layout =
+        matches!(name, "GridLayout" | "HorizontalLayout" | "VerticalLayout" | "FlexboxLayout");
+    let is_interactive = matches!(
+        name,
+        "Flickable"
+            | "FocusScope"
+            | "SwipeGestureHandler"
+            | "TouchArea"
+            | "DragArea"
+            | "DropArea"
+            | "ScaleRotateGestureHandler"
+            | "WindowMoveArea"
+            | "TextInput"
+    );
 
     let default_properties = match name {
         "Text" | "TextInput" => vec![PropertyChange::new("text", format!("\"{name}\""))],
+        "StyledText" => vec![PropertyChange::new("text", "@markdown(\"Text\")".to_string())],
         "Image" => vec![PropertyChange::new("source", "@image-url(\"EDIT_ME.png\")".to_string())],
         _ => Vec::new(),
     };
@@ -156,7 +168,8 @@ fn builtin_component_info(name: &str) -> ComponentInformation {
     }
 }
 
-fn std_widgets_info(name: &str, is_global: bool) -> ComponentInformation {
+/// Describe a standard widget or global without loading its implementation.
+pub fn std_widgets_info(name: &str, is_global: bool) -> ComponentInformation {
     let is_layout = matches!(name, "GridBox" | "HorizontalBox" | "VerticalBox");
 
     let default_properties = match name {
@@ -265,23 +278,19 @@ pub fn builtin_components(document_cache: &DocumentCache, result: &mut Vec<Compo
     }));
 }
 
-fn libraryize_url(document_cache: &DocumentCache, mut url: lsp_types::Url) -> lsp_types::Url {
-    use i_slint_compiler::source_path::SourcePath;
-    let url_path = SourcePath::from_url(&url).to_string();
-    let library_path =
-        document_cache.compiler_configuration().compiler_config.library_paths.iter().find_map(
-            |(name, path)| {
-                let rest = url_path.strip_prefix(&SourcePath::new(path).to_string())?;
-                match rest.strip_prefix(['/', '\\']) {
-                    Some(rest) => Some(format!("/@{name}/{}", rest.replace('\\', "/"))),
-                    None => rest.is_empty().then(|| format!("/@{name}")),
-                }
-            },
-        );
-    if let Some(library_path) = library_path {
-        url.set_path(&library_path);
+/// `url` with the library import that reaches it as its path, or `None` for a file that
+/// only its own library can import.
+fn libraryize_url(
+    document_cache: &DocumentCache,
+    mut url: lsp_types::Url,
+) -> Option<lsp_types::Url> {
+    let file = i_slint_compiler::source_path::SourcePath::from_url(&url);
+    if let Some(import) = document_cache.library_import_for(&file) {
+        url.set_path(&format!("/{import}"));
+    } else if document_cache.is_private_library_file(&file) {
+        return None;
     }
-    url
+    Some(url)
 }
 
 /// Fill the result with all exported components that matches the given filter.
@@ -293,8 +302,11 @@ pub fn all_exported_components(
     filter: &mut dyn FnMut(&ComponentInformation) -> bool,
     result: &mut Vec<ComponentInformation>,
 ) {
-    let enable_experimental =
-        document_cache.compiler_configuration().compiler_config.enable_experimental;
+    let interfaces_enabled = document_cache
+        .compiler_configuration()
+        .compiler_config
+        .experimental_features
+        .contains(i_slint_compiler::ExperimentalFeature::Interfaces);
 
     for url in document_cache.all_urls() {
         let Some(doc) = document_cache.get_document(&url) else { continue };
@@ -302,8 +314,7 @@ pub fn all_exported_components(
         let is_std_widget = is_builtin && url.path().ends_with("/std-widgets.slint");
         let is_std_widget_interfaces =
             is_builtin && url.path().ends_with("/std-widget-interfaces.slint");
-
-        let url = libraryize_url(document_cache, url);
+        let Some(url) = libraryize_url(document_cache, url) else { continue };
 
         for (exported_name, ty) in &*doc.exports {
             let Some(c) = ty.as_ref().left() else {
@@ -316,7 +327,7 @@ pub fn all_exported_components(
                 && exported_name.as_str() != "PopupWindow"
             {
                 Some(std_widgets_info(exported_name.as_str(), c.is_global()))
-            } else if is_std_widget_interfaces && enable_experimental {
+            } else if is_std_widget_interfaces && interfaces_enabled {
                 Some(std_widget_interfaces_info(exported_name.as_str()))
             } else if !is_builtin {
                 let offset =
@@ -375,7 +386,7 @@ pub fn all_exported_types(
             continue;
         }
 
-        let url = libraryize_url(document_cache, url);
+        let Some(url) = libraryize_url(document_cache, url) else { continue };
 
         for (exported_name, ty) in &*doc.exports {
             // Only process struct/enum exports (Either::Right); components are Either::Left
@@ -406,8 +417,9 @@ pub fn file_local_components(
     url: &lsp_types::Url,
     result: &mut Vec<ComponentInformation>,
 ) {
-    let library_url = libraryize_url(document_cache, url.clone());
-    if library_url.path() != url.path() {
+    if libraryize_url(document_cache, url.clone())
+        .is_none_or(|library_url| library_url.path() != url.path())
+    {
         return;
     }
     let Some(doc) = document_cache.get_document(url) else {
@@ -446,9 +458,22 @@ mod tests {
         assert!(result.iter().all(|ci| ci.is_exported));
         assert!(result.iter().all(|ci| ci.is_builtin));
         assert!(result.iter().all(|ci| !ci.is_global));
-        assert!(
-            result.iter().any(|ci| &ci.name == "TouchArea" && ci.is_interactive && !ci.is_layout)
-        );
+        for name in [
+            "TouchArea",
+            "Flickable",
+            "FocusScope",
+            "SwipeGestureHandler",
+            "DragArea",
+            "DropArea",
+            "ScaleRotateGestureHandler",
+            "WindowMoveArea",
+            "TextInput",
+        ] {
+            assert!(
+                result.iter().any(|ci| ci.name == name && ci.is_interactive && !ci.is_layout),
+                "{name} must be interactive"
+            );
+        }
         assert!(
             result
                 .iter()

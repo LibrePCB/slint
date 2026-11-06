@@ -14,6 +14,13 @@ FIELDS = {
     "radius": "Corner radius",
 }
 
+FLOATING_FIELDS = {
+    "Shadow color",
+    "Shadow color opacity",
+    "Shadow blur",
+    "Shadow blur value",
+}
+
 
 def slider_position(
     window: slint_testing.Window, label: str, progress: float
@@ -26,9 +33,12 @@ def slider_track_position(
     slider: slint_testing.Element, progress: float
 ) -> slint_testing.LogicalPosition:
     track = element(slider, id="InspectorSlider::track")
+    thumb = element(slider, id="InspectorSlider::thumb")
     rect = track.absolute_rect
+    inset = thumb.size.width / 2
     return slint_testing.LogicalPosition(
-        x=rect.x + rect.width * progress, y=rect.y + rect.height / 2
+        x=rect.x + inset + (rect.width - 2 * inset) * progress,
+        y=rect.y + rect.height / 2,
     )
 
 
@@ -36,10 +46,17 @@ def inspector_field(
     window: slint_testing.Window,
     label: str,
     role: slint_testing.AccessibleRole | None = None,
+    *,
+    shadow: str | None = None,
 ) -> slint_testing.Element:
     pane = element(
         window, "Inspector and outline", role=slint_testing.AccessibleRole.Complementary
     )
+    floating = label in FLOATING_FIELDS
+    if floating:
+        fields = elements(window, label, role=role)
+        if len(fields) == 1 and (shadow is None or elements(window, f"Close {shadow}")):
+            return element(window, label, role=role)
     pane_rect = pane.absolute_rect
     position = slint_testing.LogicalPosition(
         x=pane_rect.x + pane_rect.width / 2,
@@ -55,12 +72,31 @@ def inspector_field(
             )
         fields = elements(pane, label, role=role)
         if len(fields) == 1 and (
-            pane.absolute_position.y
-            <= fields[0].absolute_position.y
-            <= fields[0].absolute_position.y + fields[0].size.height
+            pane.absolute_position.y <= fields[0].absolute_position.y
+            and fields[0].absolute_position.y + fields[0].size.height
             <= divider.absolute_position.y
         ):
             return element(pane, label, role=role)
+        if floating:
+            controls = [
+                control
+                for name in ((shadow,) if shadow else ("Drop shadow", "Inner shadow"))
+                for control in elements(
+                    pane, name, role=slint_testing.AccessibleRole.Button
+                )
+                if control.accessible_enabled
+            ]
+            if len(controls) > 1:
+                raise ValueError("Choose a shadow when both shadow effects are enabled")
+            if len(controls) == 1 and (
+                pane.absolute_position.y <= controls[0].absolute_position.y
+                and controls[0].absolute_position.y + controls[0].size.height
+                <= divider.absolute_position.y
+            ):
+                controls[0].invoke_accessible_default_action()
+                return element(
+                    element(window, id="InspectorShadowPicker::panel"), label, role=role
+                )
     return element(window, label, role=role)
 
 
@@ -81,3 +117,18 @@ def wait_for_field(
     timeout: float = 5,
 ) -> None:
     expect(inspector_field(window, label, role)).to_have_value(value, timeout=timeout)
+
+
+def upward_combo_popup_position(
+    window: slint_testing.Window,
+    combo: slint_testing.Element,
+    option: slint_testing.Element,
+) -> slint_testing.LogicalPosition:
+    # The testing API reports popup descendants in popup coordinates.
+    popup = element(window, id="InspectorComboBox::popup-surface")
+    anchor = combo.absolute_rect
+    row = option.absolute_rect
+    return slint_testing.LogicalPosition(
+        x=anchor.x + row.x + row.width / 2,
+        y=anchor.y + anchor.height - popup.size.height + row.y + row.height / 2,
+    )

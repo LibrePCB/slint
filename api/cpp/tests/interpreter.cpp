@@ -310,6 +310,34 @@ SCENARIO("Component Compiler")
         compiler.set_translation_domain("cpptests");
     }
 
+    SECTION("configure file loader")
+    {
+        compiler.set_file_loader(
+                [](const std::filesystem::path &path) -> std::optional<std::string> {
+                    if (path.generic_string() == "/loader/foo.slint") {
+                        return "export component Foo {}";
+                    } else if (path.generic_string() == "/loader/error.slint") {
+                        throw std::runtime_error("This will fail");
+                    }
+                    return std::nullopt;
+                });
+
+        auto result = compiler.build_from_source(
+                R"(
+                import { Foo } from "/loader/foo.slint";
+                export component Dummy {}
+            )",
+                "loader_test_1.slint");
+        REQUIRE(result.has_value());
+        auto result2 = compiler.build_from_source(
+                R"(
+                import { Foo } from "/loader/error.slint";
+                export component Dummy {}
+            )",
+                "loader_test_2.slint");
+        REQUIRE_FALSE(result2.has_value());
+    }
+
     SECTION("Compile failure from source")
     {
         auto result = compiler.build_from_source("Syntax Error!!", "");
@@ -377,26 +405,6 @@ SCENARIO("Component Compiler")
     SECTION("Compile from path")
     {
         auto result = compiler.build_from_path(SOURCE_DIR "/test.slint");
-        REQUIRE(result.has_value());
-    }
-
-    SECTION("The project file provides the style")
-    {
-        // A style name the compiler rejects shows which style it actually used.
-        auto result = compiler.build_from_path(SOURCE_DIR "/project-file-interpreter/main.slint");
-        REQUIRE_FALSE(result.has_value());
-
-        auto diags = compiler.diagnostics();
-        REQUIRE(std::any_of(diags.begin(), diags.end(), [](const auto &diagnostic) {
-            return std::string_view(diagnostic.message).find("no-such-style")
-                    != std::string_view::npos;
-        }));
-    }
-
-    SECTION("An explicit style wins over the project file")
-    {
-        compiler.set_style("fluent");
-        auto result = compiler.build_from_path(SOURCE_DIR "/project-file-interpreter/main.slint");
         REQUIRE(result.has_value());
     }
 }

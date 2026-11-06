@@ -29,7 +29,7 @@ The MCP server is controlled by two layers:
 
 1. **Cargo feature `mcp`** — Compiles the MCP server code. Defined in `internal/backends/testing/Cargo.toml`, forwarded through `internal/backends/selector/Cargo.toml`, and exposed as the public `slint/mcp` feature.
 
-2. **Environment variable `SLINT_MCP_PORT`** — Controls whether the server actually starts at runtime. If not set, `mcp_server::init()` returns immediately with no overhead.
+2. **Environment variables** — `SLINT_MCP_PORT` controls whether the server actually starts at runtime. If not set, `mcp_server::init()` returns immediately with no overhead. `SLINT_MCP_HOST` sets the bind address and defaults to `127.0.0.1`.
 
 ### Enabling for a Slint Application
 
@@ -77,6 +77,24 @@ Root element handles for tracked windows are never evicted.
 
 When a handle is resolved via `IntrospectionState::element()`, the returned `ElementHandle` is checked with `is_valid()`. If the underlying UI element has been destroyed (e.g. the component was removed), the stale handle is cleaned up and an error is returned.
 
+### Testable Properties
+
+`element_properties()` fills `testableProperties` from `ElementHandle::testable_properties()`
+and `testable_property_value()`.
+They read the compiler-emitted per-element property table
+through `ItemTreeVTable::element_testable_properties` and `element_testable_property_value`
+(see `SubComponent::testable_properties` in the compiler's LLR).
+Values cross the vtable as strings in the `i_slint_core::debug_info` encoding;
+`mcp_server.rs::convert_testable_property_values` retypes them into JSON booleans and
+numbers for both `get_element_properties` and `get_element_tree`.
+The table exists only when the application was compiled with debug info.
+An item tree whose generator doesn't implement the entries reports "unsupported",
+which surfaces as a `note` instead of an empty list.
+Only properties declared with the experimental
+[`@testable` attribute](../astro/src/content/docs/guide/experimental/testable.mdx) are in the table,
+whatever their visibility.
+The compiler keeps them and their bindings alive, so the listing never depends on the optimizer.
+
 ## MCP Transport (`mcp_server.rs`)
 
 ### Protocol
@@ -100,9 +118,9 @@ The HTTP server is built directly on `async-net` (async TCP) and `httparse` (HTT
 
 ### Security
 
-- **Localhost only**: the server binds to `127.0.0.1`, not `0.0.0.0`.
-- **Origin validation**: cross-origin requests from non-localhost origins are rejected with 403.
-- **No authentication**: since the server is localhost-only and intended for development/testing, there is no auth mechanism.
+- **Bind address**: the server binds to `127.0.0.1` by default. Set `SLINT_MCP_HOST` to bind another address, such as `0.0.0.0`, when clients connect from outside the machine.
+- **Origin validation**: cross-origin requests from non-localhost origins are rejected with 403. This restricts browser clients to the same machine; non-browser clients send no `Origin` header and are unaffected.
+- **No authentication**: the server is intended for development and testing, so there is no auth mechanism.
 
 ### Tool Dispatch
 

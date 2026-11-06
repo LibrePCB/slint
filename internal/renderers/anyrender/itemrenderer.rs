@@ -9,7 +9,7 @@ use i_slint_core::graphics::ResolvedBrush;
 #[cfg(any(feature = "image-pixel-format-rgb565", feature = "image-pixel-format-gray8"))]
 use i_slint_core::graphics::Rgba8Pixel;
 use i_slint_core::graphics::euclid;
-use i_slint_core::graphics::{Image, ImageCacheKey, SharedImageBuffer, SharedPixelBuffer};
+use i_slint_core::graphics::{Image, ImageCacheKey, IntSize, SharedImageBuffer, SharedPixelBuffer};
 use i_slint_core::item_rendering::{
     BorderRectLayout, CachedRenderingData, ItemCache, ItemRenderer, RenderBorderRectangle,
     RenderImage, RenderRectangle, RenderText,
@@ -53,6 +53,7 @@ pub struct AnyrenderItemRenderer<'a, S: PaintScene> {
     image_cache: &'a std::cell::RefCell<crate::ImageConversionCache>,
     item_image_cache: &'a ItemCache<Option<crate::SharedImageData>>,
     text_layout_cache: &'a sharedparley::TextLayoutCache,
+    texture_importer: Option<&'a dyn crate::TextureImporter>,
     state_stack: Vec<RenderState>,
     current_state: RenderState,
 }
@@ -100,6 +101,7 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
             image_cache,
             item_image_cache,
             text_layout_cache,
+            texture_importer: None,
             state_stack: vec![],
             current_state: RenderState {
                 clip_rect: LogicalRect::from_size(
@@ -110,6 +112,15 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
                 alpha: 1.,
             },
         }
+    }
+
+    /// Draw images that wrap a GPU texture through `texture_importer`.
+    pub fn with_texture_importer(
+        mut self,
+        texture_importer: Option<&'a dyn crate::TextureImporter>,
+    ) -> Self {
+        self.texture_importer = texture_importer;
+        self
     }
 }
 
@@ -213,20 +224,44 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
         let resolve_image_fit =
             || if tiling != Default::default() { ImageFit::Preserve } else { image.image_fit() };
 
+        let transform_scale = {
+            let [a, b, c, d, _, _] = self.current_state.transform.as_coeffs();
+            i_slint_core::graphics::transform_max_scale(a as f32, b as f32, c as f32, d as f32)
+        };
+
         // The per-item cache tracks the properties read in the closure
         // (source, image-fit, target size) and invalidates on change; the
         // shared conversion cache deduplicates across items. The fit has to
         // be resolved inside the closure to be tracked: SVGs rasterize at
         // the fitted size.
-        let image_data = self.item_image_cache.get_or_update_cache_entry(item_rc, || {
-            load_image(
-                image.source(),
-                &|| image.target_size(),
-                resolve_image_fit(),
-                self.scale_factor,
-                self.image_cache,
-            )
-        });
+        let image_data = self.item_image_cache.get_or_update_cache_entry_unless(
+            item_rc,
+            || {
+                load_image(
+                    image.source(),
+                    &|| image.target_size(),
+                    resolve_image_fit(),
+                    self.scale_factor,
+                    transform_scale,
+                    self.image_cache,
+                    self.texture_importer,
+                )
+            },
+            // An SVG magnified more than when it was cached is rasterized again (#10903).
+            |cached| {
+                cached.as_ref().is_some_and(|cached| {
+                    i_slint_core::graphics::svg_needs_rasterizing_again(
+                        IntSize::new(cached.width, cached.height),
+                        &image.source(),
+                        resolve_image_fit(),
+                        image.target_size(),
+                        self.scale_factor,
+                        Default::default(),
+                        transform_scale,
+                    )
+                })
+            },
+        );
         let Some(image_data) = image_data else {
             return;
         };
@@ -317,6 +352,17 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
                     == (0, 0, image_data.width, image_data.height)
                 {
                     Some(image_data.clone())
+                } else if let Some(tile) = self.texture_importer.and_then(|importer| {
+                    let texture = match image_inner {
+                        ImageInner::NineSlice(nine) => nine.image(),
+                        _ => source.clone(),
+                    };
+                    importer.import_texture(
+                        &texture,
+                        Some(euclid::rect(crop_x, crop_y, crop_w, crop_h)),
+                    )
+                }) {
+                    Some(tile)
                 } else {
                     self.image_cache.borrow_mut().get_or_insert(
                         ImageCacheKey::new(image_inner),
@@ -528,13 +574,7 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
         let blur = (box_shadow.blur() * sf).get().max(0.) as f64;
         let phys_size = size * sf;
 
-        // anyrender's box shadow takes one uniform corner radius,
-        // so approximate per-corner radii with their average
-        // until vello grows support for non-uniform ones (linebender/vello#1245).
         let radius = box_shadow.logical_border_radius() * sf;
-        let base_radius =
-            (radius.top_left + radius.top_right + radius.bottom_right + radius.bottom_left) as f64
-                / 4.;
 
         if box_shadow.inset() {
             self.draw_inset_shadow(
@@ -542,14 +582,15 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
                 kurbo::Vec2::new(offset.x as f64, offset.y as f64),
                 spread,
                 blur,
-                base_radius,
+                radius,
+                radius.spread(-spread as f32),
                 to_kurbo_size(phys_size),
             );
             return;
         }
 
         let Some(options) =
-            i_slint_core::graphics::boxshadowcache::BoxShadowOptions::new(item_rc, box_shadow, sf)
+            i_slint_core::graphics::boxshadow::BoxShadowOptions::new(item_rc, box_shadow, sf)
         else {
             return;
         };
@@ -557,11 +598,7 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
             return;
         }
         if let Some(radius) = options.opaque_source_radius() {
-            let radius =
-                (radius.top_left + radius.top_right + radius.bottom_right + radius.bottom_left)
-                    as f64
-                    / 4.
-                    + spread;
+            let radius = radius.spread(spread as f32);
             let rect = kurbo::Rect::new(
                 offset.x as f64 - spread,
                 offset.y as f64 - spread,
@@ -574,14 +611,14 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
                     self.current_state.transform,
                     peniko::BrushRef::Solid(to_peniko_color(color)),
                     None,
-                    &RectShape::uniform(rect, radius),
+                    &RectShape::new(rect, radius),
                 );
             } else {
                 self.scene.draw_box_shadow(
                     self.current_state.transform,
                     rect,
                     to_peniko_color(color),
-                    radius,
+                    blurred_shadow_radius(radius),
                     blur / 2.,
                 );
             }
@@ -741,7 +778,9 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
             &|| LogicalSize::from_untyped(image.size().cast()),
             ImageFit::Fill,
             self.scale_factor,
+            1.,
             self.image_cache,
+            self.texture_importer,
         ) else {
             return;
         };
@@ -912,14 +951,15 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
         offset: kurbo::Vec2,
         spread: f64,
         blur: f64,
-        base_radius: f64,
+        radius: PhysicalBorderRadius,
+        interior_radius: PhysicalBorderRadius,
         size: kurbo::Size,
     ) {
         let border_rect = kurbo::Rect::new(0., 0., size.width, size.height);
         if border_rect.is_zero_area() {
             return;
         }
-        let border_shape = RectShape::uniform(border_rect, base_radius);
+        let border_shape = RectShape::new(border_rect, radius);
 
         // The shadow must not paint outside the item.
         self.scene.push_clip_layer(
@@ -942,7 +982,6 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
             offset.y + size.height - spread,
         );
         if interior.width() > 0. && interior.height() > 0. {
-            let interior_radius = (base_radius - spread).max(0.);
             // Bounded to the border box, which the outer clip enforces anyway:
             // destructive compose modes mustn't use an unbounded layer,
             // see the `UNCLIPPED` constant at the top of this file.
@@ -964,14 +1003,14 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
                     self.current_state.transform,
                     peniko::BrushRef::Solid(opaque),
                     None,
-                    &RectShape::uniform(interior, interior_radius),
+                    &RectShape::new(interior, interior_radius),
                 );
             } else {
                 self.scene.draw_box_shadow(
                     self.current_state.transform,
                     interior,
                     opaque,
-                    interior_radius,
+                    blurred_shadow_radius(interior_radius),
                     blur / 2.,
                 );
             }
@@ -1093,13 +1132,20 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
                     peniko::Gradient::new_radial(kurbo::Point::new(0., 0.), 1.0);
                 peniko_gradient.stops = to_peniko_stops(&gradient.stops);
 
-                // A unit circle at the origin, scaled to the radius and moved
-                // to the center, so the color stops span [0, radius].
+                // A unit circle at the origin, scaled to the radii and moved to the center,
+                // so the color stops span [0, radius] on each axis.
                 (
                     peniko_gradient.into(),
-                    Some(kurbo::Affine::scale(gradient.radius.get() as f64).then_translate(
-                        kurbo::Vec2::new(gradient.center.x as f64, gradient.center.y as f64),
-                    )),
+                    Some(
+                        kurbo::Affine::scale_non_uniform(
+                            gradient.radius_x.get() as f64,
+                            gradient.radius_y.get() as f64,
+                        )
+                        .then_translate(kurbo::Vec2::new(
+                            gradient.center.x as f64,
+                            gradient.center.y as f64,
+                        )),
+                    ),
                 )
             }
             ResolvedBrush::ConicGradient(gradient) => {
@@ -1150,19 +1196,13 @@ fn to_kurbo_size(size: PhysicalSize) -> kurbo::Size {
 }
 
 fn phys_rect_shape(rect: PhysicalRect, radius: PhysicalBorderRadius) -> RectShape {
-    let rect = to_kurbo_rect(rect);
-    if radius.is_zero() {
-        return RectShape::Sharp(rect);
-    }
-    RectShape::Rounded(kurbo::RoundedRect::from_rect(
-        rect,
-        kurbo::RoundedRectRadii::new(
-            radius.top_left as f64,
-            radius.top_right as f64,
-            radius.bottom_right as f64,
-            radius.bottom_left as f64,
-        ),
-    ))
+    RectShape::new(to_kurbo_rect(rect), radius)
+}
+
+/// The average of `radius`, since anyrender's blurred box shadow takes a single radius
+/// (linebender/vello#1245).
+fn blurred_shadow_radius(radius: PhysicalBorderRadius) -> f64 {
+    (radius.top_left + radius.top_right + radius.bottom_right + radius.bottom_left) as f64 / 4.
 }
 
 /// A rectangle that may have rounded corners, staying a plain
@@ -1181,7 +1221,22 @@ enum RectShape {
 }
 
 impl RectShape {
-    /// Like [`phys_rect_shape`] but for a single radius shared by all four
+    fn new(rect: kurbo::Rect, radius: PhysicalBorderRadius) -> Self {
+        if radius.is_zero() {
+            return Self::Sharp(rect);
+        }
+        Self::Rounded(kurbo::RoundedRect::from_rect(
+            rect,
+            kurbo::RoundedRectRadii::new(
+                radius.top_left as f64,
+                radius.top_right as f64,
+                radius.bottom_right as f64,
+                radius.bottom_left as f64,
+            ),
+        ))
+    }
+
+    /// Like [`Self::new`] but for a single radius shared by all four
     /// corners, already in device pixels.
     fn uniform(rect: kurbo::Rect, radius: f64) -> Self {
         if radius > 0. {
@@ -1284,12 +1339,16 @@ pub(crate) fn to_peniko_color(color: Color) -> peniko::Color {
     peniko::Color::from_rgba8(color.red, color.green, color.blue, color.alpha)
 }
 
+/// `transform_scale` is how much the current transform magnifies the image,
+/// see [`i_slint_core::graphics::transformed_scalable_render_size`].
 fn load_image(
     image: Image,
     target_size_fn: &dyn Fn() -> LogicalSize,
     image_fit: ImageFit,
     scale_factor: ScaleFactor,
+    transform_scale: f32,
     image_cache: &std::cell::RefCell<crate::ImageConversionCache>,
+    texture_importer: Option<&dyn crate::TextureImporter>,
 ) -> Option<crate::SharedImageData> {
     use crate::imagecache::ImageVariant;
 
@@ -1303,12 +1362,13 @@ fn load_image(
         ),
         ImageInner::Svg(svg) => {
             // Query target_width/height here again to ensure that changes will invalidate the item rendering cache.
-            let render_size = i_slint_core::graphics::scalable_render_size(
+            let render_size = i_slint_core::graphics::transformed_scalable_render_size(
                 svg.size(),
                 image_fit,
-                target_size_fn() * scale_factor,
+                target_size_fn(),
                 scale_factor,
                 Default::default(),
+                transform_scale,
             )?;
             image_cache.borrow_mut().get_or_insert(
                 ImageCacheKey::new(image_inner),
@@ -1316,11 +1376,7 @@ fn load_image(
                 || {
                     let pixels = match svg.render(Some(render_size)).ok()? {
                         SharedImageBuffer::RGBA8Premultiplied(pixels) => pixels,
-                        SharedImageBuffer::RGB8(_) | SharedImageBuffer::RGBA8(_) => unreachable!(),
-                        #[cfg(feature = "image-pixel-format-rgb565")]
-                        SharedImageBuffer::RGB565(_) => unreachable!(),
-                        #[cfg(feature = "image-pixel-format-gray8")]
-                        SharedImageBuffer::Gray8(_) => unreachable!(),
+                        _ => unreachable!(),
                     };
 
                     let width = pixels.width();
@@ -1349,14 +1405,31 @@ fn load_image(
         // Backend storage is only produced by other renderers in the same
         // process; their data is not usable here.
         ImageInner::BackendStorage(..) => None,
-        ImageInner::NineSlice(n) => {
-            load_image(n.image(), target_size_fn, ImageFit::Preserve, scale_factor, image_cache)
-        }
-        // Remaining variants hold live GPU resources (borrowed GL textures,
-        // wgpu textures behind the unstable-wgpu-* features) that this
-        // backend-agnostic renderer cannot import.
+        ImageInner::NineSlice(n) => load_image(
+            n.image(),
+            target_size_fn,
+            ImageFit::Preserve,
+            scale_factor,
+            transform_scale,
+            image_cache,
+            texture_importer,
+        ),
+        ImageInner::AnimatedImage(animated) => load_image(
+            animated.first_frame(),
+            target_size_fn,
+            image_fit,
+            scale_factor,
+            transform_scale,
+            image_cache,
+            texture_importer,
+        ),
+        // The interpreter's owned textures convert to pixels. The other remaining variants
+        // hold live GPU resources. Borrowed GL textures can't be drawn.
         #[allow(unreachable_patterns)]
-        _ => None,
+        _ => match image_inner.render_to_buffer(None) {
+            Some(buffer) => image_buffer_to_peniko_image(&buffer).map(std::rc::Rc::new),
+            None => texture_importer?.import_texture(&image, None),
+        },
     }
 }
 
@@ -1464,6 +1537,7 @@ fn image_buffer_to_peniko_image(buffer: &SharedImageBuffer) -> Option<peniko::Im
             peniko::ImageFormat::Rgba8,
             peniko::ImageAlphaType::Alpha,
         ),
+        _ => return None,
     };
 
     Some(peniko::ImageData {

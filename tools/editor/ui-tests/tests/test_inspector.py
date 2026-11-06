@@ -14,17 +14,22 @@ from inspector_interactions import (
     edit_field,
     inspector_field,
     slider_position,
+    upward_combo_popup_position,
     wait_for_field,
 )
 from slint_testing import keys
-from source_snapshot import SourceSnapshot, replace_once
+from source_snapshot import SourceSnapshot, replace_once, wait_for_source_change
+from ui_assertions import expect
 from ui_driver import (
     element,
     elements,
     first_window,
     launch_editor,
+    outline_rows,
+    press_key,
     press_keys,
     press_shortcut,
+    query,
     screenshot,
     select_outline_row,
     wait_until,
@@ -35,6 +40,9 @@ ELEMENT_ROWS = {
     "Rectangle": "inspect-rectangle",
     "Text": "inspect-text",
     "Image": "inspect-image",
+    "StyledText": "inspect-styled-text",
+    "Button": "inspect-button",
+    "CheckBox": "inspect-checkbox",
 }
 
 
@@ -48,35 +56,25 @@ def open_combo_and_accept(
     label: str,
     expected_options: tuple[str, ...],
     value: str,
+    *,
+    selected_label: str | None = None,
 ) -> None:
     combo = inspector_field(window, label, slint_testing.AccessibleRole.Combobox)
     combo.invoke_accessible_expand_action()
 
-    def menu_labels() -> tuple[str, ...] | None:
-        # Linux uses list-item rows in a custom popup; macOS and Windows use MenuItem.
-        items = (
-            window.root_element.query_descendants()
-            .match_type_name("MenuItem")
-            .find_all()
-        ) + (
-            window.root_element.query_descendants()
-            .match_id("InspectorComboBox::options-content")
-            .match_descendants()
-            .match_accessible_role(slint_testing.AccessibleRole.ListItem)
-            .find_all()
-        )
-        labels = tuple(
-            text.accessible_label
-            for item in items
-            for text in item.query_descendants()
-            .match_accessible_role(slint_testing.AccessibleRole.Text)
-            .find_all()
-            if text.accessible_label and text.accessible_label != "✓"
-        )
-        return labels if labels == expected_options else None
-
-    wait_until(menu_labels)
-    combo.accessible_value = value
+    options = element(window, id="InspectorComboBox::options-content")
+    press_key(window, keys.Home)
+    for option_label in expected_options:
+        expect(
+            query(options, option_label, role=slint_testing.AccessibleRole.ListItem)
+        ).to_be_visible()
+        press_key(window, keys.DownArrow)
+    press_key(window, keys.Home)
+    for _ in range(expected_options.index(selected_label or value)):
+        press_key(window, keys.DownArrow)
+    element(
+        options, selected_label or value, role=slint_testing.AccessibleRole.ListItem
+    ).single_click(slint_testing.PointerEventButton.Left)
 
 
 def assert_rendered_element(window: slint_testing.Window, element_id: str) -> None:
@@ -420,11 +418,13 @@ def test_literal_color_field_separates_rgb_and_opacity(
         rgb.invoke_accessible_default_action()
         rgb_focused = screenshot(window)
         assert rgb_focused.getpixel(left_edge) != rendered.getpixel(left_edge)
-        assert rgb_focused.getpixel(divider) != rendered.getpixel(divider)
+        assert rgb_focused.getpixel(right_edge) != rendered.getpixel(right_edge)
+        assert rgb_focused.getpixel(divider) == rendered.getpixel(divider)
 
         opacity.invoke_accessible_default_action()
         opacity_focused = screenshot(window)
-        assert opacity_focused.getpixel(divider) != rendered.getpixel(divider)
+        assert opacity_focused.getpixel(left_edge) != rendered.getpixel(left_edge)
+        assert opacity_focused.getpixel(divider) == rendered.getpixel(divider)
         assert opacity_focused.getpixel(right_edge) != rendered.getpixel(right_edge)
 
 
@@ -542,7 +542,7 @@ def test_color_field_opacity_writes_exact_source(
         )
         suffixes = (
             opacity_field.query_descendants()
-            .match_id("InspectorTextFieldBase::fixed-suffix")
+            .match_id("EditorInput::fixed-suffix")
             .find_all()
         )
         assert len(suffixes) == 1
@@ -774,20 +774,20 @@ def test_shared_color_fields_expose_opacity_editor(
             "Shadow color opacity",
             slint_testing.AccessibleRole.TextInput,
         )
-        shadow_angle = inspector_field(
+        shadow_blur = inspector_field(
             window,
-            "Shadow angle",
+            "Shadow blur",
             slint_testing.AccessibleRole.Slider,
         )
         assert (
             shadow_opacity.absolute_position.x
             + shadow_opacity.size.width
             - shadow_color.absolute_position.x
-            > 190
+            > 150
         )
         assert (
             shadow_color.absolute_position.y + shadow_color.size.height
-            <= shadow_angle.absolute_position.y
+            <= shadow_blur.absolute_position.y
         )
 
         select_element(window, "Text")
@@ -831,6 +831,42 @@ def test_each_image_fit_value_writes_exact_source(
                 starting_source,
                 f"        image-fit: {initial};".encode(),
                 f"        image-fit: {fit};".encode(),
+            ),
+            relative_path=INSPECTOR_SOURCE,
+        )
+        assert_rendered_element(window, "InspectorCases::inspect-image")
+
+
+@pytest.mark.parametrize(
+    ("initial", "rendering"), (("smooth", "pixelated"), ("pixelated", "smooth"))
+)
+def test_each_image_rendering_value_writes_exact_source(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+    initial: str,
+    rendering: str,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    starting_source = replace_once(
+        source_file.read_bytes(),
+        b"        image-fit: contain;",
+        f"        image-fit: contain;\n        image-rendering: {initial};".encode(),
+    )
+    source_file.write_bytes(starting_source)
+    snapshot = SourceSnapshot.capture(fixture_project)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "Image")
+        edit_field(
+            window, "Image rendering", rendering, slint_testing.AccessibleRole.Combobox
+        )
+        snapshot.wait_for_exact(
+            replace_once(
+                starting_source,
+                f"        image-rendering: {initial};".encode(),
+                f"        image-rendering: {rendering};".encode(),
             ),
             relative_path=INSPECTOR_SOURCE,
         )
@@ -1013,6 +1049,7 @@ def test_each_font_weight_writes_exact_source(
                     "Black",
                 ),
                 weight,
+                selected_label="Bold",
             )
         else:
             edit_field(
@@ -1029,13 +1066,253 @@ def test_each_font_weight_writes_exact_source(
         element(window, "Inspector text", role=slint_testing.AccessibleRole.Text)
 
 
+def test_font_italic_switch_writes_exact_source(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+
+    def italic_switch() -> slint_testing.Element:
+        return inspector_field(window, "Italic", slint_testing.AccessibleRole.Switch)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        wait_for_source(source_file, baseline)
+        window = first_window(editor)
+        select_element(window, "Text")
+        expect(italic_switch()).to_be_checked(False)
+
+        italic_switch().invoke_accessible_default_action()
+        italic = wait_for_source_change(source_file, baseline)
+        assert italic == replace_once(
+            baseline,
+            b'        font-family: "Inter";',
+            b'        font-family: "Inter";\n        font-italic: true;',
+        )
+        expect(italic_switch()).to_be_checked()
+
+        italic_switch().invoke_accessible_default_action()
+        upright = wait_for_source_change(source_file, italic)
+        assert upright == replace_once(
+            italic, b"        font-italic: true;", b"        font-italic: false;"
+        )
+        expect(italic_switch()).to_be_checked(False)
+
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(italic, INSPECTOR_SOURCE)
+        expect(italic_switch()).to_be_checked()
+
+
+def test_rectangle_clip_switch_writes_exact_source(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+
+    def clip_switch() -> slint_testing.Element:
+        return inspector_field(window, "Clip", slint_testing.AccessibleRole.Switch)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        wait_for_source(source_file, baseline)
+        window = first_window(editor)
+        select_element(window, "Rectangle")
+        expect(clip_switch()).to_be_checked(False)
+
+        clip_switch().invoke_accessible_default_action()
+        clipped = wait_for_source_change(source_file, baseline)
+        assert clipped == replace_once(
+            baseline,
+            b"        drop-shadow-offset-y: 8px;",
+            b"        drop-shadow-offset-y: 8px;\n        clip: true;",
+        )
+        expect(clip_switch()).to_be_checked()
+
+        clip_switch().invoke_accessible_default_action()
+        unclipped = wait_for_source_change(source_file, clipped)
+        assert unclipped == replace_once(
+            clipped, b"        clip: true;", b"        clip: false;"
+        )
+        expect(clip_switch()).to_be_checked(False)
+
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(clipped, INSPECTOR_SOURCE)
+        expect(clip_switch()).to_be_checked()
+
+
+@pytest.mark.parametrize("wrap", ("no-wrap", "word-wrap", "char-wrap"))
+def test_each_text_wrap_writes_exact_source(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+    wrap: str,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    initial = "word-wrap" if wrap == "no-wrap" else "no-wrap"
+    starting_source = replace_once(
+        baseline,
+        b"        font-size: 20px;",
+        f"        font-size: 20px;\n        wrap: {initial};".encode(),
+    )
+    source_file.write_bytes(starting_source)
+    snapshot = SourceSnapshot.capture(fixture_project)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "Text")
+        if wrap == "char-wrap":
+            open_combo_and_accept(
+                window,
+                "Text Wrap",
+                ("No wrap", "Word wrap", "Character wrap"),
+                wrap,
+                selected_label="Character wrap",
+            )
+        else:
+            edit_field(window, "Text Wrap", wrap, slint_testing.AccessibleRole.Combobox)
+        snapshot.wait_for_exact(
+            replace_once(
+                starting_source,
+                f"        wrap: {initial};".encode(),
+                f"        wrap: {wrap};".encode(),
+            ),
+            relative_path=INSPECTOR_SOURCE,
+        )
+        element(window, "Inspector text", role=slint_testing.AccessibleRole.Text)
+
+
+ORIENTATION_ROWS = {
+    "Slider": "inspect-slider",
+    "RadioGroup": "inspect-radio-group",
+    "TabWidget": "inspect-tab-widget",
+}
+ORIENTATION_DEFAULTS = {
+    "Slider": "Horizontal",
+    "RadioGroup": "Vertical",
+    "TabWidget": "Horizontal",
+}
+
+
+def with_orientation_widgets(
+    baseline: bytes, kind: str, orientation: str | None = None
+) -> bytes:
+    bindings = {name: b"" for name in ORIENTATION_ROWS}
+    if orientation:
+        bindings[kind] = f"\n        orientation: {orientation};".encode()
+    source = replace_once(
+        baseline,
+        b"export component InspectorCases",
+        b'import { RadioGroup, Slider, TabWidget } from "std-widgets.slint";\n\n'
+        b"export component InspectorCases",
+    )
+    widgets = (
+        b"\n    inspect-slider := Slider {\n"
+        b"        x: 32px;\n        y: 336px;\n        width: 160px;\n        height: 32px;"
+        + bindings["Slider"]
+        + b"\n    }\n\n"
+        b"    inspect-radio-group := RadioGroup {\n"
+        b"        x: 224px;\n        y: 336px;"
+        + bindings["RadioGroup"]
+        + b'\n        RadioButton { text: "One"; }'
+        b'\n        RadioButton { text: "Two"; }'
+        b"\n    }\n\n"
+        b"    inspect-tab-widget := TabWidget {\n"
+        b"        x: 400px;\n        y: 336px;\n        width: 200px;\n        height: 120px;"
+        + bindings["TabWidget"]
+        + b'\n        Tab { title: "First"; }'
+        b'\n        Tab { title: "Second"; }'
+        b"\n    }\n"
+    )
+    assert source.endswith(b"\n}\n")
+    return source[:-2] + widgets + b"}\n"
+
+
+def select_orientation_widget(window: slint_testing.Window, kind: str) -> None:
+    select_outline_row(window, ORIENTATION_ROWS[kind])
+    element(window, f"Selected {kind}", role=slint_testing.AccessibleRole.Region)
+
+
+@pytest.mark.parametrize("kind", tuple(ORIENTATION_ROWS))
+def test_orientation_shows_widget_default(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+    kind: str,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    source_file.write_bytes(with_orientation_widgets(source_file.read_bytes(), kind))
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_orientation_widget(window, kind)
+        wait_for_field(
+            window,
+            "Orientation",
+            ORIENTATION_DEFAULTS[kind],
+            slint_testing.AccessibleRole.Combobox,
+        )
+
+
+@pytest.mark.parametrize("orientation", ("horizontal", "vertical"))
+@pytest.mark.parametrize("kind", tuple(ORIENTATION_ROWS))
+def test_each_orientation_writes_exact_source(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+    kind: str,
+    orientation: str,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    initial = "vertical" if orientation == "horizontal" else "horizontal"
+    starting_source = with_orientation_widgets(source_file.read_bytes(), kind, initial)
+    source_file.write_bytes(starting_source)
+    snapshot = SourceSnapshot.capture(fixture_project)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_orientation_widget(window, kind)
+        wait_for_field(
+            window,
+            "Orientation",
+            initial.capitalize(),
+            slint_testing.AccessibleRole.Combobox,
+        )
+        open_combo_and_accept(
+            window,
+            "Orientation",
+            ("Horizontal", "Vertical"),
+            orientation,
+            selected_label=orientation.capitalize(),
+        )
+        snapshot.wait_for_exact(
+            replace_once(
+                starting_source,
+                f"        orientation: {initial};".encode(),
+                f"        orientation: {orientation};".encode(),
+            ),
+            relative_path=INSPECTOR_SOURCE,
+        )
+        wait_for_field(
+            window,
+            "Orientation",
+            orientation.capitalize(),
+            slint_testing.AccessibleRole.Combobox,
+        )
+
+
 @pytest.mark.parametrize(
     ("case", "value", "expected"),
     [
         ("numeric", "24", "24px"),
+        ("fractional", "24.5", "24.5px"),
         ("expression", "20px * 1.5", "20px * 1.5"),
     ],
-    ids=("numeric", "expression"),
+    ids=("numeric", "fractional", "expression"),
 )
 def test_numeric_and_expression_font_sizes_write_exact_source(
     editor_binary: Path,
@@ -1065,10 +1342,153 @@ def test_numeric_and_expression_font_sizes_write_exact_source(
         element(window, "Inspector text", role=slint_testing.AccessibleRole.Text)
 
 
+@pytest.mark.parametrize("initial", ["literal", "draft", "expression"])
+def test_font_size_stepper_uses_current_value_and_undo(
+    editor_binary, editor_environment, fixture_project, initial
+):
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    original = b"        font-size: 20px;"
+    if initial == "expression":
+        expression = b"        font-size: 20px * 1.5;"
+        baseline = replace_once(baseline, original, expression)
+        source_file.write_bytes(baseline)
+        original = expression
+    snapshot = SourceSnapshot.capture(fixture_project)
+    expected_size = 21 if initial == "literal" else 31
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "Text")
+        field = inspector_field(
+            window, "Font size", slint_testing.AccessibleRole.TextInput
+        )
+        section = element(window, id="InspectorTypographySection::root")
+        element(section, "Size", role=slint_testing.AccessibleRole.Text)
+        element(section, "Weight", role=slint_testing.AccessibleRole.Text)
+        if initial == "draft":
+            field.single_click(slint_testing.PointerEventButton.Left)
+            press_keys(window, "30")
+            snapshot.assert_unchanged()
+        inspector_field(
+            window, "Increase Font size", slint_testing.AccessibleRole.Button
+        ).single_click(slint_testing.PointerEventButton.Left)
+        expected = replace_once(
+            baseline, original, f"        font-size: {expected_size}px;".encode()
+        )
+        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+        wait_for_field(
+            window,
+            "Font size",
+            str(expected_size),
+            slint_testing.AccessibleRole.TextInput,
+        )
+        press_shortcut(window, keys.Escape)
+        select_element(window, "Text")
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
+
+
+@pytest.mark.parametrize(
+    ("initial", "key", "shift", "expected_size"),
+    [
+        (20, keys.UpArrow, False, 21),
+        (20, keys.DownArrow, True, 10),
+        (1, keys.DownArrow, False, 1),
+    ],
+)
+def test_font_size_keyboard_steps_and_minimum(
+    editor_binary,
+    editor_environment,
+    fixture_project,
+    initial,
+    key,
+    shift,
+    expected_size,
+):
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes().replace(
+        b"font-size: 20px;", f"font-size: {initial}px;".encode()
+    )
+    source_file.write_bytes(baseline)
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "Text")
+        inspector_field(
+            window, "Font size", slint_testing.AccessibleRole.TextInput
+        ).single_click(slint_testing.PointerEventButton.Left)
+        press_shortcut(window, *([keys.Shift, key] if shift else [key]))
+        expected = baseline.replace(
+            f"font-size: {initial}px;".encode(),
+            f"font-size: {expected_size}px;".encode(),
+        )
+        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+        wait_for_field(
+            window,
+            "Font size",
+            str(expected_size),
+            slint_testing.AccessibleRole.TextInput,
+        )
+
+
+@pytest.mark.parametrize("outcome", ["commit", "escape", "selection", "source"])
+def test_font_size_scrubs_with_transient_preview(
+    editor_binary, editor_environment, fixture_project, outcome
+):
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "Text")
+        scrubber = inspector_field(
+            window, "Font size scrubber", slint_testing.AccessibleRole.Slider
+        )
+        start = element_center(scrubber)
+        end = slint_testing.LogicalPosition(x=start.x + 12, y=start.y)
+        button = slint_testing.PointerEventButton.Left
+        window.dispatch_event(slint_testing.PointerMoveEvent(start))
+        window.dispatch_event(slint_testing.PointerPressEvent(start, button))
+        window.dispatch_event(slint_testing.PointerMoveEvent(end))
+        wait_for_field(
+            window, "Font size", "32", slint_testing.AccessibleRole.TextInput
+        )
+        snapshot.assert_unchanged()
+        if outcome == "escape":
+            press_keys(window, keys.Escape)
+        elif outcome == "selection":
+            select_element(window, "Rectangle")
+        elif outcome == "source":
+            source_file.write_bytes(baseline + b"\n// External edit\n")
+            snapshot.wait_for_applied(
+                baseline + b"\n// External edit\n", INSPECTOR_SOURCE
+            )
+        window.dispatch_event(slint_testing.PointerReleaseEvent(end, button))
+        if outcome == "commit":
+            expected = replace_once(
+                baseline, b"        font-size: 20px;", b"        font-size: 32px;"
+            )
+            snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+            press_shortcut(window, keys.Control, "z")
+            snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
+        elif outcome != "source":
+            snapshot.assert_unchanged()
+            if outcome == "escape":
+                wait_for_field(
+                    window, "Font size", "20", slint_testing.AccessibleRole.TextInput
+                )
+
+
 @pytest.mark.parametrize(
     ("case", "value", "expected_line", "rendered"),
     [
-        ("literal", '"Literal content"', '"Literal content"', "Literal content"),
+        ("literal", "Literal content", '"Literal content"', "Literal content"),
+        (
+            "escaped",
+            'A "quote" and a \\ path',
+            '"A \\"quote\\" and a \\\\ path"',
+            'A "quote" and a \\ path',
+        ),
         (
             "expression",
             '"Expression " + "content"',
@@ -1076,7 +1496,7 @@ def test_numeric_and_expression_font_sizes_write_exact_source(
             "Expression content",
         ),
     ],
-    ids=("literal", "expression"),
+    ids=("literal", "escaped", "expression"),
 )
 def test_text_content_writes_exact_source(
     editor_binary: Path,
@@ -1090,6 +1510,12 @@ def test_text_content_writes_exact_source(
     assert case
     source_file = fixture_project / INSPECTOR_SOURCE
     baseline = source_file.read_bytes()
+    original = b'        text: "Inspector text";'
+    if case == "expression":
+        original_expression = b'        text: "Inspector " + "text";'
+        baseline = replace_once(baseline, original, original_expression)
+        source_file.write_bytes(baseline)
+        original = original_expression
     snapshot = SourceSnapshot.capture(fixture_project)
 
     with launch_editor(editor_binary, editor_environment, source_file) as editor:
@@ -1101,12 +1527,108 @@ def test_text_content_writes_exact_source(
         snapshot.wait_for_exact(
             replace_once(
                 baseline,
-                b'        text: "Inspector text";',
+                original,
                 f"        text: {expected_line};".encode(),
             ),
             relative_path=INSPECTOR_SOURCE,
         )
         element(window, rendered, role=slint_testing.AccessibleRole.Text)
+
+
+@pytest.mark.parametrize(
+    ("kind", "original", "rendered", "role"),
+    [
+        (
+            "Button",
+            "Inspector button",
+            "Button content",
+            slint_testing.AccessibleRole.Button,
+        ),
+        (
+            "CheckBox",
+            "Inspector checkbox",
+            "CheckBox content",
+            slint_testing.AccessibleRole.Checkbox,
+        ),
+    ],
+    ids=("button", "checkbox"),
+)
+def test_widget_text_content_writes_exact_source(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+    kind: str,
+    original: str,
+    rendered: str,
+    role: slint_testing.AccessibleRole,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, kind)
+        wait_for_field(
+            window,
+            "Text content",
+            original,
+            slint_testing.AccessibleRole.TextInput,
+        )
+        edit_field(
+            window,
+            "Text content",
+            rendered,
+            slint_testing.AccessibleRole.TextInput,
+        )
+        snapshot.wait_for_exact(
+            replace_once(
+                baseline,
+                f'        text: "{original}";'.encode(),
+                f'        text: "{rendered}";'.encode(),
+            ),
+            relative_path=INSPECTOR_SOURCE,
+        )
+        element(window, rendered, role=role)
+
+
+def test_tooltip_text_content_writes_exact_source(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_outline_row(window, "inspect-tooltip")
+        wait_for_field(
+            window,
+            "Text content",
+            '@markdown("Inspector tooltip")',
+            slint_testing.AccessibleRole.TextInput,
+        )
+        assert not elements(
+            window,
+            "Horizontal Alignment",
+            role=slint_testing.AccessibleRole.Combobox,
+        )
+        edit_field(
+            window,
+            "Text content",
+            '@markdown("**Tooltip** content")',
+            slint_testing.AccessibleRole.TextInput,
+        )
+        snapshot.wait_for_exact(
+            replace_once(
+                baseline,
+                b'            text: @markdown("Inspector tooltip");',
+                b'            text: @markdown("**Tooltip** content");',
+            ),
+            relative_path=INSPECTOR_SOURCE,
+        )
 
 
 def test_invalid_text_content_does_not_change_source(
@@ -1115,6 +1637,13 @@ def test_invalid_text_content_does_not_change_source(
     fixture_project: Path,
 ) -> None:
     source_file = fixture_project / INSPECTOR_SOURCE
+    source_file.write_bytes(
+        replace_once(
+            source_file.read_bytes(),
+            b'        text: "Inspector text";',
+            b'        text: "Inspector " + "text";',
+        )
+    )
     snapshot = SourceSnapshot.capture(fixture_project)
 
     with launch_editor(editor_binary, editor_environment, source_file) as editor:
@@ -1130,10 +1659,394 @@ def test_invalid_text_content_does_not_change_source(
         wait_for_field(
             window,
             "Text content",
-            '"Inspector text"',
+            '"Inspector " + "text"',
             slint_testing.AccessibleRole.TextInput,
         )
         element(window, "Inspector text", role=slint_testing.AccessibleRole.Text)
+
+
+@pytest.mark.parametrize(
+    "tail", ["many words " * 35, "abcdefgh" * 45], ids=["words", "long-word"]
+)
+@pytest.mark.parametrize("outcome", ["commit", "escape"])
+def test_inline_text_wraps_without_growing_and_previews_live(
+    editor_binary, editor_environment, fixture_project, tail, outcome
+):
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "Text")
+        field = inspector_field(
+            window, "Text content", slint_testing.AccessibleRole.TextInput
+        )
+        expand = element(window, "Edit text", role=slint_testing.AccessibleRole.Button)
+        clear = element(field, "Clear text", role=slint_testing.AccessibleRole.Button)
+        before = field.absolute_rect
+        expand_before = expand.absolute_rect
+        assert before.height >= 2 * expand_before.height
+        field.single_click(slint_testing.PointerEventButton.Left)
+        press_keys(window, "First line")
+        press_keys(window, keys.Return)
+        press_keys(window, tail)
+        text = "First line\n" + tail
+        expect(field).to_have_value(text)
+        element(window, text, role=slint_testing.AccessibleRole.Text)
+        snapshot.assert_unchanged()
+        assert field.absolute_rect == before
+        assert expand.absolute_rect == expand_before
+        pane = element(
+            window,
+            "Inspector and outline",
+            role=slint_testing.AccessibleRole.Complementary,
+        ).absolute_rect
+        assert clear.absolute_rect.x + clear.size.width <= before.x + before.width
+        assert expand.absolute_rect.x + expand.size.width <= pane.x + pane.width
+        input = element(field, id="EditorInput::input")
+        viewport = element(field, id="EditorInput::viewport")
+        assert input.absolute_position.y < viewport.absolute_position.y
+        if outcome == "commit":
+            press_keys(window, keys.Tab)
+            expected = replace_once(
+                baseline,
+                b'text: "Inspector text";',
+                ('text: "First line\\n' + tail + '";').encode(),
+            )
+            snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+            select_element(window, "Text")
+            press_shortcut(window, keys.Control, "z")
+            snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
+        else:
+            press_keys(window, keys.Escape)
+            expect(field).to_have_value("Inspector text")
+            element(window, "Inspector text", role=slint_testing.AccessibleRole.Text)
+            snapshot.assert_unchanged()
+
+
+@pytest.mark.parametrize(
+    "outcome", ["apply", "cancel", "escape", "selection", "source"]
+)
+def test_expanded_text_edit(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+    outcome: str,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "Text")
+        text = inspector_field(
+            window, "Text content", slint_testing.AccessibleRole.TextInput
+        )
+        color = inspector_field(
+            window, "Text color", slint_testing.AccessibleRole.TextInput
+        )
+        assert text.absolute_position.y < color.absolute_position.y
+        section = element(window, "Text", role=slint_testing.AccessibleRole.Groupbox)
+        element(section, "Text content", role=slint_testing.AccessibleRole.TextInput)
+        element(section, "Text color", role=slint_testing.AccessibleRole.TextInput)
+        assert not elements(
+            window, "APPEARANCE", role=slint_testing.AccessibleRole.Text
+        )
+        inspector_field(
+            window, "Edit text", slint_testing.AccessibleRole.Button
+        ).single_click(slint_testing.PointerEventButton.Left)
+        expanded = element(
+            window, "Expanded text", role=slint_testing.AccessibleRole.TextInput
+        )
+        expect(expanded).to_have_value("Inspector text")
+        expanded.single_click(slint_testing.PointerEventButton.Left)
+        expect(expanded).to_have_value("Inspector text")
+        press_shortcut(window, keys.Control, "a")
+        press_keys(window, 'Line one "quoted"')
+        press_keys(window, keys.Return)
+        press_keys(window, "C:\\notes")
+        expect(expanded).to_have_value('Line one "quoted"\nC:\\notes')
+        element(
+            window,
+            'Line one "quoted"\nC:\\notes',
+            role=slint_testing.AccessibleRole.Text,
+        )
+        snapshot.assert_unchanged()
+
+        if outcome == "apply":
+            element(
+                window, "Apply", role=slint_testing.AccessibleRole.Button
+            ).single_click(slint_testing.PointerEventButton.Left)
+            expected = replace_once(
+                baseline,
+                b'        text: "Inspector text";',
+                rb'        text: "Line one \"quoted\"\nC:\\notes";',
+            )
+            snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+            press_shortcut(window, keys.Control, "z")
+            snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
+            press_shortcut(window, keys.Control, keys.Shift, "z")
+            snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+        elif outcome == "cancel":
+            element(
+                window, "Cancel", role=slint_testing.AccessibleRole.Button
+            ).single_click(slint_testing.PointerEventButton.Left)
+        elif outcome == "escape":
+            press_keys(window, keys.Escape)
+        elif outcome == "selection":
+            select_element(window, "Rectangle")
+        else:
+            source_file.write_bytes(baseline + b"\n// External edit\n")
+            snapshot.wait_for_applied(
+                baseline + b"\n// External edit\n", INSPECTOR_SOURCE
+            )
+
+        expect(query(window, "Expanded text")).to_be_hidden()
+        if outcome not in ("apply", "source"):
+            snapshot.assert_unchanged()
+            element(window, "Inspector text", role=slint_testing.AccessibleRole.Text)
+
+
+@pytest.mark.parametrize("apply", [True, False], ids=["apply", "cancel"])
+def test_expanding_text_transfers_inline_draft(
+    editor_binary, editor_environment, fixture_project, apply
+):
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "Text")
+        inspector_field(
+            window, "Text content", slint_testing.AccessibleRole.TextInput
+        ).single_click(slint_testing.PointerEventButton.Left)
+        press_keys(window, "Pending text")
+        inspector_field(
+            window, "Edit text", slint_testing.AccessibleRole.Button
+        ).single_click(slint_testing.PointerEventButton.Left)
+        expect(
+            element(
+                window, "Expanded text", role=slint_testing.AccessibleRole.TextInput
+            )
+        ).to_have_value("Pending text")
+        element(window, "Pending text", role=slint_testing.AccessibleRole.Text)
+        snapshot.assert_unchanged()
+        element(
+            window,
+            "Apply" if apply else "Cancel",
+            role=slint_testing.AccessibleRole.Button,
+        ).single_click(slint_testing.PointerEventButton.Left)
+        expect(query(window, "Expanded text")).to_be_hidden()
+        if apply:
+            snapshot.wait_for_applied(
+                replace_once(
+                    baseline, b'text: "Inspector text";', b'text: "Pending text";'
+                ),
+                INSPECTOR_SOURCE,
+            )
+        else:
+            snapshot.assert_unchanged()
+
+
+def test_window_title_uses_plain_text_without_expand_button(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = replace_once(
+        source_file.read_bytes(),
+        b"    background: #f8fafc;",
+        b'    background: #f8fafc;\n    title: "Inspector title";',
+    )
+    source_file.write_bytes(baseline)
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        outline_rows(window)[0].invoke_accessible_default_action()
+        wait_for_field(
+            window, "Title", "Inspector title", slint_testing.AccessibleRole.TextInput
+        )
+        assert not elements(
+            window, "Edit text", role=slint_testing.AccessibleRole.Button
+        )
+        title = inspector_field(window, "Title", slint_testing.AccessibleRole.TextInput)
+        fill = inspector_field(
+            window, "Root background", slint_testing.AccessibleRole.TextInput
+        )
+        assert title.absolute_position.y < fill.absolute_position.y
+        section = element(window, "Title", role=slint_testing.AccessibleRole.Groupbox)
+        element(section, "Root background", role=slint_testing.AccessibleRole.TextInput)
+        assert not elements(
+            window, "APPEARANCE", role=slint_testing.AccessibleRole.Text
+        )
+        edit_field(
+            window, "Title", 'My "window"', slint_testing.AccessibleRole.TextInput
+        )
+        snapshot.wait_for_applied(
+            replace_once(
+                baseline,
+                b'    title: "Inspector title";',
+                rb'    title: "My \"window\"";',
+            ),
+            INSPECTOR_SOURCE,
+        )
+
+
+@pytest.mark.parametrize("kind", ["Text", "Window"])
+def test_string_field_clear_supports_undo(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+    kind: str,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    if kind == "Window":
+        baseline = replace_once(
+            baseline,
+            b"    background: #f8fafc;",
+            b'    background: #f8fafc;\n    title: "Inspector title";',
+        )
+        source_file.write_bytes(baseline)
+    snapshot = SourceSnapshot.capture(fixture_project)
+    label = "Text content" if kind == "Text" else "Title"
+    clear_label = "Clear text" if kind == "Text" else "Clear title"
+    old = (
+        b'        text: "Inspector text";'
+        if kind == "Text"
+        else b'    title: "Inspector title";'
+    )
+    new = b'        text: "";' if kind == "Text" else b'    title: "";'
+    expected = replace_once(baseline, old, new)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        if kind == "Text":
+            select_element(window, "Text")
+        else:
+            outline_rows(window)[0].invoke_accessible_default_action()
+        field = inspector_field(window, label, slint_testing.AccessibleRole.TextInput)
+        original_text = "Inspector text" if kind == "Text" else "Inspector title"
+        field.single_click(slint_testing.PointerEventButton.Left)
+        press_keys(window, keys.RightArrow)
+        press_keys(window, " draft")
+        expect(field).to_have_value(original_text + " draft")
+        snapshot.assert_unchanged()
+        press_shortcut(window, keys.Control, "z")
+        expect(field).to_have_value(original_text)
+        snapshot.assert_unchanged()
+        press_shortcut(window, keys.Control, keys.Shift, "z")
+        expect(field).to_have_value(original_text + " draft")
+        inspector_field(
+            window, clear_label, slint_testing.AccessibleRole.Button
+        ).single_click(slint_testing.PointerEventButton.Left)
+        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+        wait_for_field(window, label, "", slint_testing.AccessibleRole.TextInput)
+        expect(
+            query(window, clear_label, role=slint_testing.AccessibleRole.Button)
+        ).to_be_hidden()
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
+        press_shortcut(window, keys.Control, keys.Shift, "z")
+        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+
+
+@pytest.mark.parametrize(
+    ("label", "property_name", "initial", "value", "button"),
+    [
+        (
+            "Horizontal Alignment",
+            "horizontal-alignment",
+            "start",
+            "right",
+            "Align right",
+        ),
+        ("Vertical Alignment", "vertical-alignment", "top", "bottom", "Align bottom"),
+    ],
+    ids=("horizontal", "vertical"),
+)
+def test_styled_text_alignment_writes_exact_source(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+    label: str,
+    property_name: str,
+    initial: str,
+    value: str,
+    button: str,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "StyledText")
+        wait_for_field(
+            window, FIELDS["width"], "152", slint_testing.AccessibleRole.TextInput
+        )
+        inspector_field(window, "Text content", slint_testing.AccessibleRole.TextInput)
+        group = inspector_field(window, label, slint_testing.AccessibleRole.RadioGroup)
+        element(
+            group, button, role=slint_testing.AccessibleRole.RadioButton
+        ).single_click(slint_testing.PointerEventButton.Left)
+        snapshot.wait_for_exact(
+            replace_once(
+                baseline,
+                f"        {property_name}: {initial};".encode(),
+                f"        {property_name}: {value};".encode(),
+            ),
+            relative_path=INSPECTOR_SOURCE,
+        )
+
+
+def test_styled_text_content_writes_exact_source(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+) -> None:
+    source_file = fixture_project / "Palette.slint"
+    source = replace_once(
+        source_file.read_bytes(),
+        b"    background: #f8fafc;\n",
+        b"    background: #f8fafc;\n"
+        b"    styled := StyledText {\n"
+        b"        x: 32px;\n"
+        b"        y: 32px;\n"
+        b"        width: 200px;\n"
+        b"        height: 48px;\n"
+        b"    }\n",
+    )
+    source_file.write_bytes(source)
+    snapshot = SourceSnapshot.capture(fixture_project)
+
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        wait_for_source(source_file, source)
+        window = first_window(editor)
+        select_outline_row(window, "styled")
+        element(window, "Selected StyledText", role=slint_testing.AccessibleRole.Region)
+        wait_for_field(
+            window,
+            "Text content",
+            '@markdown("")',
+            slint_testing.AccessibleRole.TextInput,
+        )
+        edit_field(
+            window,
+            "Text content",
+            '@markdown("**Bold**")',
+            slint_testing.AccessibleRole.TextInput,
+        )
+        snapshot.wait_for_exact(
+            replace_once(
+                source,
+                b"        y: 32px;\n",
+                b'        y: 32px;\n        text: @markdown("**Bold**");\n',
+            ),
+            relative_path="Palette.slint",
+        )
 
 
 def test_inspector_length_fields_show_numbers_without_pixel_labels(
@@ -1146,9 +2059,7 @@ def test_inspector_length_fields_show_numbers_without_pixel_labels(
         select_element(window, "Rectangle")
         for label in [
             "All corner radii",
-            "Shadow distance value",
             "Shadow blur value",
-            "Shadow spread value",
         ]:
             field = inspector_field(
                 window, label, slint_testing.AccessibleRole.TextInput
@@ -1163,21 +2074,20 @@ def test_inspector_length_fields_show_numbers_without_pixel_labels(
 
 SHADOW_EDITS = (
     pytest.param("color", "Shadow color", "#12345678", id="color"),
-    pytest.param("angle", "Shadow angle", "0", id="angle"),
-    pytest.param("distance", "Shadow distance", "12", id="distance"),
     pytest.param("blur", "Shadow blur", "24", id="blur"),
-    pytest.param("spread", "Shadow spread", "6", id="spread"),
-    pytest.param("distance", "Shadow distance", "0", id="distance-0"),
-    pytest.param("distance", "Shadow distance", "96", id="distance-96"),
     pytest.param("blur", "Shadow blur", "0", id="blur-0"),
     pytest.param("blur", "Shadow blur", "128", id="blur-128"),
-    pytest.param("spread", "Shadow spread", "-64", id="spread--64"),
-    pytest.param("spread", "Shadow spread", "64", id="spread-64"),
-    pytest.param("angle", "Shadow angle", "359", id="angle-359"),
 )
 
 
-def shadow_source(baseline: bytes, family: str) -> bytes:
+def effect_source(baseline: bytes, family: str) -> bytes:
+    if family == "backdrop":
+        return replace_once(
+            replace_once(baseline, b"background: #2563eb;", b"background: #2563eb40;"),
+            b"    inspect-rectangle := Rectangle {",
+            b'    Image { source: @image-url("assets/checker.svg"); width: 220px; height: 160px; image-fit: fill; }\n'
+            b"    inspect-rectangle := Rectangle {\n        backdrop-blur: 16px;",
+        )
     return (
         baseline
         if family == "drop"
@@ -1185,32 +2095,25 @@ def shadow_source(baseline: bytes, family: str) -> bytes:
     )
 
 
-def shadow_expected(source: bytes, family: str, control: str, value: str) -> bytes:
-    prefix = f"        {family}-shadow-".encode()
+def effect_expected(source: bytes, family: str, control: str, value: str) -> bytes:
+    prefix = (
+        b"        backdrop-"
+        if family == "backdrop"
+        else f"        {family}-shadow-".encode()
+    )
     if control == "color":
         return replace_once(
             source,
             prefix + b"color: #00000040;",
             prefix + f"color: {value};".encode(),
         )
-    if control == "angle":
+    if control == "blur":
         return replace_once(
             source,
-            prefix + b"offset-x: 0px;\n" + prefix + b"offset-y: 8px;",
-            prefix + b"offset-x: 8px;\n" + prefix + b"offset-y: 0px;",
+            prefix + b"blur: 16px;",
+            prefix + f"blur: {value}px;".encode(),
         )
-    if control == "distance":
-        return replace_once(
-            source,
-            prefix + b"offset-y: 8px;",
-            prefix + f"offset-y: {value}px;".encode(),
-        )
-    old_value = "16" if control == "blur" else "0"
-    return replace_once(
-        source,
-        prefix + f"{control}: {old_value}px;".encode(),
-        prefix + f"{control}: {value}px;".encode(),
-    )
+    raise ValueError(f"Unknown effect control: {control}")
 
 
 def artboard_pixels(window: slint_testing.Window) -> bytes:
@@ -1228,12 +2131,66 @@ def artboard_pixels(window: slint_testing.Window) -> bytes:
     ).tobytes()
 
 
-@pytest.mark.parametrize("family", ("drop", "inner"))
+@pytest.mark.parametrize("blur", ["0", "16"])
+def test_backdrop_blur_toggle_preserves_shadows(
+    editor_binary, editor_environment, fixture_project, blur
+):
+    source = fixture_project / INSPECTOR_SOURCE
+    baseline = replace_once(
+        effect_source(source.read_bytes(), "backdrop"),
+        b"        drop-shadow-spread: 0px;",
+        b"        drop-shadow-spread: 0px;\n        inner-shadow-color: #00000030;",
+    )
+    baseline = effect_expected(baseline, "backdrop", "blur", blur)
+    source.write_bytes(baseline)
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source) as editor:
+        wait_for_source(source, baseline)
+        window = first_window(editor)
+        select_element(window, "Rectangle")
+        inspector_field(
+            window, "Drop shadow", slint_testing.AccessibleRole.Button
+        ).invoke_accessible_default_action()
+        expect(query(window, "Close Drop shadow")).to_be_visible()
+        inspector_field(
+            window, "Enable backdrop blur", slint_testing.AccessibleRole.Switch
+        ).invoke_accessible_default_action()
+        expect(query(window, "Close Drop shadow")).to_be_hidden()
+        disabled = wait_for_source_change(source, baseline)
+        assert disabled == replace_once(
+            baseline, f"        backdrop-blur: {blur}px;\n".encode(), b""
+        )
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
+        press_shortcut(window, keys.Control, keys.Shift, "z")
+        snapshot.wait_for_applied(disabled, INSPECTOR_SOURCE)
+        inspector_field(
+            window, "Enable backdrop blur", slint_testing.AccessibleRole.Switch
+        ).invoke_accessible_default_action()
+        enabled = wait_for_source_change(source, disabled)
+        assert b"backdrop-blur: 16px;" in enabled
+        assert replace_once(enabled, b"        backdrop-blur: 16px;\n", b"") == disabled
+
+
 @pytest.mark.parametrize(
-    ("control", "label", "value"),
-    SHADOW_EDITS,
+    ("family", "control", "label", "value"),
+    [
+        pytest.param(family, *case.values, id=f"{family}-{case.id}")
+        for family in ("drop", "inner")
+        for case in SHADOW_EDITS
+    ]
+    + [
+        pytest.param(
+            "backdrop",
+            "blur",
+            "Backdrop blur amount value",
+            value,
+            id=f"backdrop-blur-{value}",
+        )
+        for value in ("0", "24", "128", "200")
+    ],
 )
-def test_shadow_control_writes_exact_source(
+def test_effect_control_writes_exact_source(
     editor_binary: Path,
     editor_environment: dict[str, str],
     fixture_project: Path,
@@ -1243,9 +2200,8 @@ def test_shadow_control_writes_exact_source(
     value: str,
 ) -> None:
     source_file = fixture_project / INSPECTOR_SOURCE
-    starting_source = shadow_source(source_file.read_bytes(), family)
-    if family == "inner":
-        source_file.write_bytes(starting_source)
+    starting_source = effect_source(source_file.read_bytes(), family)
+    source_file.write_bytes(starting_source)
     snapshot = SourceSnapshot.capture(fixture_project)
 
     with launch_editor(editor_binary, editor_environment, source_file) as editor:
@@ -1254,70 +2210,108 @@ def test_shadow_control_writes_exact_source(
         select_element(window, "Rectangle")
         edit_field(window, label, value)
         snapshot.wait_for_applied(
-            shadow_expected(starting_source, family, control, value),
+            effect_expected(starting_source, family, control, value),
+            relative_path=INSPECTOR_SOURCE,
+        )
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(starting_source, relative_path=INSPECTOR_SOURCE)
+        press_shortcut(window, keys.Control, keys.Shift, "z")
+        snapshot.wait_for_applied(
+            effect_expected(starting_source, family, control, value),
             relative_path=INSPECTOR_SOURCE,
         )
 
 
 @pytest.mark.parametrize(
-    "family,control,label,initial,progress,value,outcome",
+    ("binding", "displayed", "key", "value"),
     [
-        pytest.param(
-            family,
-            control,
-            label,
-            initial,
-            progress,
-            value,
-            outcome,
-            id=f"{family}-{control}-{outcome}",
-        )
-        for family in ("drop", "inner")
-        for control, label, initial, progress, value in (
-            ("distance", "Shadow distance", 8 / 96, 0.5, "48"),
-            ("blur", "Shadow blur", 16 / 128, 0.5, "64"),
-            ("spread", "Shadow spread", 0.5, 0.25, "-32"),
-        )
-        for outcome in ("commit", "cancel", "selection", "source")
-        if outcome == "commit"
-        or (family, control) in (("drop", "blur"), ("inner", "distance"))
+        ("128px", "128", keys.RightArrow, "129"),
+        ("200px", "200", keys.RightArrow, "201"),
+        ("200px", "200", keys.LeftArrow, "199"),
+        ("root.glass-blur", "36", keys.RightArrow, "37"),
     ],
 )
-def test_shadow_slider_previews_without_source_writes(
-    editor_binary,
-    editor_environment,
-    fixture_project,
-    family,
-    control,
-    label,
-    initial,
-    progress,
-    value,
-    outcome,
+def test_backdrop_blur_keyboard_uses_resolved_value(
+    editor_binary, editor_environment, fixture_project, binding, displayed, key, value
 ):
     source = fixture_project / INSPECTOR_SOURCE
-    baseline = shadow_source(source.read_bytes(), family)
+    baseline = replace_once(
+        effect_source(source.read_bytes(), "backdrop"),
+        b"    width: 640px;",
+        b"    property <length> glass-blur: 36px;\n    width: 640px;",
+    )
+    baseline = replace_once(
+        baseline, b"backdrop-blur: 16px;", f"backdrop-blur: {binding};".encode()
+    )
     source.write_bytes(baseline)
     snapshot = SourceSnapshot.capture(fixture_project)
     with launch_editor(editor_binary, editor_environment, source) as editor:
         wait_for_source(source, baseline)
         window = first_window(editor)
         select_element(window, "Rectangle")
-        start = slider_position(window, label, initial)
-        end = slider_position(window, label, progress)
-        window.dispatch_event(slint_testing.PointerMoveEvent(start))
+        label = "Backdrop blur amount"
+        slider = inspector_field(window, label, slint_testing.AccessibleRole.Slider)
+        expect(slider).to_have_value(displayed)
+        position = slider_position(window, label, min(float(displayed) / 128, 1))
+        window.dispatch_event(slint_testing.PointerMoveEvent(position))
+        window.dispatch_event(
+            slint_testing.PointerPressEvent(
+                position, slint_testing.PointerEventButton.Left
+            )
+        )
+        window.dispatch_event(
+            slint_testing.PointerReleaseEvent(
+                position, slint_testing.PointerEventButton.Left
+            )
+        )
+        snapshot.assert_unchanged()
+        press_keys(window, key)
+        expected = replace_once(
+            baseline,
+            f"backdrop-blur: {binding};".encode(),
+            f"backdrop-blur: {value}px;".encode(),
+        )
+        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
+        press_shortcut(window, keys.Control, keys.Shift, "z")
+        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+
+
+@pytest.mark.parametrize("family", ["drop", "inner", "backdrop"])
+@pytest.mark.parametrize("outcome", ["commit", "cancel", "selection", "source"])
+def test_effect_slider_previews_without_source_writes(
+    editor_binary, editor_environment, fixture_project, family, outcome
+):
+    source = fixture_project / INSPECTOR_SOURCE
+    baseline = effect_source(source.read_bytes(), family)
+    label = "Backdrop blur amount" if family == "backdrop" else "Shadow blur"
+    source.write_bytes(baseline)
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source) as editor:
+        wait_for_source(source, baseline)
+        window = first_window(editor)
+        select_element(window, "Rectangle")
+        window.dispatch_event(
+            slint_testing.PointerMoveEvent(slint_testing.LogicalPosition(0, 0))
+        )
         before = artboard_pixels(window)
+        start = slider_position(window, label, 16 / 128)
+        end = slider_position(window, label, 0.5)
+        window.dispatch_event(slint_testing.PointerMoveEvent(start))
+        preview_baseline = artboard_pixels(window)
         window.dispatch_event(
             slint_testing.PointerPressEvent(
                 start, slint_testing.PointerEventButton.Left
             )
         )
         window.dispatch_event(slint_testing.PointerMoveEvent(end))
-        wait_for_field(window, label + " value", value)
-        assert artboard_pixels(window) != before
+        wait_for_field(window, f"{label} value", "64")
+        assert artboard_pixels(window) != preview_baseline
         snapshot.assert_unchanged()
         if outcome == "cancel":
             press_keys(window, keys.Escape)
+            wait_for_field(window, f"{label} value", "16")
         elif outcome == "selection":
             select_element(window, "Text")
         elif outcome == "source":
@@ -1339,165 +2333,25 @@ def test_shadow_slider_previews_without_source_writes(
                 snapshot.assert_unchanged()
             if outcome == "selection":
                 select_element(window, "Rectangle")
+            if family != "backdrop":
+                close_buttons = elements(
+                    window,
+                    f"Close {family.capitalize()} shadow",
+                    role=slint_testing.AccessibleRole.Button,
+                )
+                if close_buttons:
+                    close_buttons[0].invoke_accessible_default_action()
+            window.dispatch_event(
+                slint_testing.PointerMoveEvent(slint_testing.LogicalPosition(0, 0))
+            )
             assert artboard_pixels(window) == before
         else:
-            expected = shadow_expected(baseline, family, control, value)
+            expected = effect_expected(baseline, family, "blur", "64")
             snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
             press_shortcut(window, keys.Control, "z")
             snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
             press_shortcut(window, keys.Control, keys.Shift, "z")
             snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
-
-
-@pytest.mark.parametrize("family", ("drop", "inner"))
-@pytest.mark.parametrize("outcome", ("commit", "cancel"))
-def test_shadow_angle_previews_without_source_writes(
-    editor_binary, editor_environment, fixture_project, family, outcome
-):
-    source = fixture_project / INSPECTOR_SOURCE
-    baseline = shadow_source(source.read_bytes(), family)
-    source.write_bytes(baseline)
-    snapshot = SourceSnapshot.capture(fixture_project)
-    with launch_editor(editor_binary, editor_environment, source) as editor:
-        wait_for_source(source, baseline)
-        window = first_window(editor)
-        select_element(window, "Rectangle")
-        dial = inspector_field(
-            window, "Shadow angle", slint_testing.AccessibleRole.Slider
-        )
-        position, size = dial.absolute_position, dial.size
-        center_x = position.x + size.width / 2
-        center_y = position.y + size.height / 2
-        start = slint_testing.LogicalPosition(center_x, center_y + size.height / 3)
-        end = slint_testing.LogicalPosition(center_x + size.width / 3, center_y)
-        window.dispatch_event(slint_testing.PointerMoveEvent(start))
-        before = artboard_pixels(window)
-        window.dispatch_event(
-            slint_testing.PointerPressEvent(
-                start, slint_testing.PointerEventButton.Left
-            )
-        )
-        window.dispatch_event(slint_testing.PointerMoveEvent(end))
-        wait_for_field(window, "Shadow angle", "0", slint_testing.AccessibleRole.Slider)
-        assert artboard_pixels(window) != before
-        snapshot.assert_unchanged()
-        if outcome == "cancel":
-            press_keys(window, keys.Escape)
-        window.dispatch_event(
-            slint_testing.PointerReleaseEvent(
-                end, slint_testing.PointerEventButton.Left
-            )
-        )
-        if outcome == "cancel":
-            snapshot.assert_unchanged()
-            assert artboard_pixels(window) == before
-        else:
-            snapshot.wait_for_applied(
-                shadow_expected(baseline, family, "angle", "0"), INSPECTOR_SOURCE
-            )
-
-
-@pytest.mark.parametrize("family", ("drop", "inner"))
-def test_shadow_distance_keeps_direction_through_zero(
-    editor_binary, editor_environment, fixture_project, family
-):
-    source = fixture_project / INSPECTOR_SOURCE
-    baseline = (
-        shadow_source(source.read_bytes(), family)
-        .replace(
-            f"{family}-shadow-offset-x: 0px;".encode(),
-            f"{family}-shadow-offset-x: -8px;".encode(),
-        )
-        .replace(
-            f"{family}-shadow-offset-y: 8px;".encode(),
-            f"{family}-shadow-offset-y: 0px;".encode(),
-        )
-    )
-    source.write_bytes(baseline)
-    snapshot = SourceSnapshot.capture(fixture_project)
-    with launch_editor(editor_binary, editor_environment, source) as editor:
-        wait_for_source(source, baseline)
-        window = first_window(editor)
-        select_element(window, "Rectangle")
-        start = slider_position(window, "Shadow distance", 8 / 96)
-        zero = slider_position(window, "Shadow distance", 0)
-        end = slider_position(window, "Shadow distance", 0.5)
-        window.dispatch_event(slint_testing.PointerMoveEvent(start))
-        window.dispatch_event(
-            slint_testing.PointerPressEvent(
-                start, slint_testing.PointerEventButton.Left
-            )
-        )
-        window.dispatch_event(slint_testing.PointerMoveEvent(zero))
-        wait_for_field(window, "Shadow distance value", "0")
-        window.dispatch_event(slint_testing.PointerMoveEvent(end))
-        wait_for_field(window, "Shadow distance value", "48")
-        snapshot.assert_unchanged()
-        window.dispatch_event(
-            slint_testing.PointerReleaseEvent(
-                end, slint_testing.PointerEventButton.Left
-            )
-        )
-        expected = baseline.replace(
-            f"{family}-shadow-offset-x: -8px;".encode(),
-            f"{family}-shadow-offset-x: -48px;".encode(),
-        )
-        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
-        press_shortcut(window, keys.Control, "z")
-        snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
-
-
-@pytest.mark.parametrize("effect", ("none", "drop", "inner"))
-def test_rectangle_effect_value_writes_exact_source(
-    editor_binary: Path,
-    editor_environment: dict[str, str],
-    fixture_project: Path,
-    effect: str,
-) -> None:
-    source_file = fixture_project / INSPECTOR_SOURCE
-    baseline = source_file.read_bytes()
-    starting_source = shadow_source(baseline, "inner" if effect == "drop" else "drop")
-    if effect == "drop":
-        source_file.write_bytes(starting_source)
-    snapshot = SourceSnapshot.capture(fixture_project)
-    expected = b"".join(
-        line
-        for line in baseline.splitlines(keepends=True)
-        if not line.lstrip().startswith(b"drop-shadow-")
-    )
-    if effect != "none":
-        color = "#00000040" if effect == "drop" else "#00000030"
-        properties = (
-            f"        {effect}-shadow-color: {color};\n"
-            f"        {effect}-shadow-blur: 16px;\n"
-            f"        {effect}-shadow-spread: 0px;\n"
-            f"        {effect}-shadow-offset-x: 0px;\n"
-            f"        {effect}-shadow-offset-y: 8px;\n"
-        ).encode()
-        anchor = (
-            b"        height: 96px;\n        background: #2563eb;"
-            if effect == "drop"
-            else b"        background: #2563eb;"
-        )
-        expected = replace_once(expected, anchor, properties + anchor)
-    with launch_editor(editor_binary, editor_environment, source_file) as editor:
-        window = first_window(editor)
-        select_element(window, "Rectangle")
-        edit_field(
-            window, "Rectangle effect", effect, slint_testing.AccessibleRole.Combobox
-        )
-        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
-        wait_for_field(
-            window,
-            "Rectangle effect",
-            {"none": "None", "drop": "Drop Shadow", "inner": "Inner Shadow"}[effect],
-            slint_testing.AccessibleRole.Combobox,
-        )
-        select_element(window, "Rectangle")
-        press_shortcut(window, keys.Control, "z")
-        snapshot.wait_for_applied(starting_source, INSPECTOR_SOURCE)
-        press_shortcut(window, keys.Control, keys.Shift, "z")
-        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
 
 
 INVALID_EDITS = (
@@ -1534,7 +2388,11 @@ def test_invalid_or_empty_inspector_edit_does_not_change_source(
     with launch_editor(editor_binary, editor_environment, source_file) as editor:
         window = first_window(editor)
         select_element(window, kind)
-        role = slint_testing.AccessibleRole.Combobox if label == "Image fit" else None
+        role = (
+            slint_testing.AccessibleRole.Combobox
+            if label == "Image fit"
+            else slint_testing.AccessibleRole.TextInput
+        )
         field = inspector_field(window, label, role)
         value_before = field.accessible_value
         edit_field(window, label, value, role)
@@ -1580,3 +2438,238 @@ def test_invalid_rectangle_color_does_not_change_source(
             slint_testing.AccessibleRole.TextInput,
         )
         element(window, "Selected Rectangle", role=slint_testing.AccessibleRole.Region)
+
+
+@pytest.mark.parametrize("kind", ("Text", "StyledText"))
+def test_text_alignment_defaults_select_one_button_per_axis(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+    kind: str,
+) -> None:
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(
+        editor_binary, editor_environment, fixture_project / INSPECTOR_SOURCE
+    ) as editor:
+        window = first_window(editor)
+        select_element(window, kind)
+        for axis, selected in (("Horizontal", "Align left"), ("Vertical", "Align top")):
+            group = inspector_field(
+                window, f"{axis} Alignment", slint_testing.AccessibleRole.RadioGroup
+            )
+            expect(
+                element(group, selected, role=slint_testing.AccessibleRole.RadioButton)
+            ).to_be_checked()
+            assert (
+                sum(
+                    button.accessible_checked
+                    for button in elements(
+                        group, role=slint_testing.AccessibleRole.RadioButton
+                    )
+                )
+                == 1
+            )
+        snapshot.assert_unchanged()
+
+
+def test_image_fit_hover_preview_is_transient_and_survives_commit(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "Image")
+        expect(query(window, "Image fit example")).to_be_hidden()
+        combo = inspector_field(
+            window, "Image fit", slint_testing.AccessibleRole.Combobox
+        )
+        combo.single_click(slint_testing.PointerEventButton.Left)
+        preview = element(window, "Image fit example")
+        value_text = element(combo, id="InspectorComboBox::value-text")
+        options = element(window, id="InspectorComboBox::options-content")
+        cover = element(options, "cover", role=slint_testing.AccessibleRole.ListItem)
+        option_text = element(cover, id="InspectorComboBox::option-text")
+        assert (
+            value_text.absolute_position.x
+            == combo.absolute_position.x + option_text.absolute_position.x
+        )
+        for value in ("contain", "cover"):
+            option = element(options, value, role=slint_testing.AccessibleRole.ListItem)
+            window.dispatch_event(
+                slint_testing.PointerMoveEvent(
+                    upward_combo_popup_position(window, combo, option)
+                )
+            )
+            expect(preview).to_have_value(value)
+        expect(
+            element(options, "contain", role=slint_testing.AccessibleRole.ListItem)
+        ).to_be_checked()
+        snapshot.assert_unchanged()
+        press_key(window, keys.Escape)
+        expect(query(window, id="InspectorComboBox::options-content")).to_be_hidden()
+        expect(preview).to_have_value("contain")
+        snapshot.assert_unchanged()
+
+        combo.single_click(slint_testing.PointerEventButton.Left)
+        cover.single_click(slint_testing.PointerEventButton.Left)
+        expected = replace_once(
+            baseline, b"        image-fit: contain;", b"        image-fit: cover;"
+        )
+        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+        expect(preview).to_have_value("cover")
+        expect(
+            element(
+                window, "Image fit preview", role=slint_testing.AccessibleRole.Button
+            )
+        ).to_be_checked()
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
+        expect(preview).to_have_value("contain")
+        combo.single_click(slint_testing.PointerEventButton.Left)
+        select_element(window, "Text")
+        expect(query(window, id="InspectorComboBox::options-content")).to_be_hidden()
+        select_element(window, "Image")
+        expect(query(window, "Image fit example")).to_be_hidden()
+        snapshot.assert_unchanged()
+
+
+def test_combo_keyboard_navigation_scrolls_and_commits_one_edit(
+    editor_binary: Path,
+    editor_environment: dict[str, str],
+    fixture_project: Path,
+) -> None:
+    source_file = fixture_project / INSPECTOR_SOURCE
+    baseline = source_file.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source_file) as editor:
+        window = first_window(editor)
+        select_element(window, "Text")
+        combo = inspector_field(
+            window, "Font weight", slint_testing.AccessibleRole.Combobox
+        )
+        combo.single_click(slint_testing.PointerEventButton.Left)
+        press_key(window, keys.End)
+        row = element(
+            element(window, id="InspectorComboBox::options-content"),
+            "Black",
+            role=slint_testing.AccessibleRole.ListItem,
+        )
+        viewport = element(window, id="InspectorComboBox::options-scroll")
+        expect.poll(
+            lambda: (
+                row.absolute_position.y + row.size.height
+                <= viewport.absolute_position.y + viewport.size.height
+            )
+        ).to_equal(True)
+        snapshot.assert_unchanged()
+        press_key(window, keys.Return)
+        expected = replace_once(
+            baseline, b"        font-weight: 400;", b"        font-weight: 900;"
+        )
+        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+        expect(combo).to_have_value("Black")
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
+        expect(combo).to_have_value("Normal")
+
+
+@pytest.mark.parametrize(("key", "size"), ((keys.UpArrow, 15), (keys.DownArrow, 13)))
+def test_font_size_step_replaces_focused_draft_before_blur(
+    editor_binary, editor_environment, fixture_project, key, size
+):
+    source = fixture_project / INSPECTOR_SOURCE
+    baseline = source.read_bytes()
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source) as editor:
+        window = first_window(editor)
+        select_element(window, "Text")
+        field = inspector_field(
+            window, "Font size", slint_testing.AccessibleRole.TextInput
+        )
+        field.single_click(slint_testing.PointerEventButton.Left)
+        press_keys(window, "14")
+        press_key(window, key)
+        expected = replace_once(
+            baseline, b"font-size: 20px;", f"font-size: {size}px;".encode()
+        )
+        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+        expect(field).to_have_value(str(size))
+        press_key(window, keys.Tab)
+        SourceSnapshot.capture(fixture_project).assert_unchanged()
+        select_element(window, "Text")
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)
+        press_shortcut(window, keys.Control, keys.Shift, "z")
+        snapshot.wait_for_applied(expected, INSPECTOR_SOURCE)
+
+
+@pytest.mark.parametrize(
+    ("initial", "button", "value"),
+    (("start", "Align left", "left"), ("end", "Align right", "right")),
+)
+def test_alignment_button_replaces_logical_alignment(
+    editor_binary, editor_environment, fixture_project, initial, button, value
+):
+    source = fixture_project / INSPECTOR_SOURCE
+    baseline = replace_once(
+        source.read_bytes(),
+        b"horizontal-alignment: start;",
+        f"horizontal-alignment: {initial};".encode(),
+    )
+    source.write_bytes(baseline)
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source) as editor:
+        window = first_window(editor)
+        select_element(window, "StyledText")
+        group = inspector_field(
+            window, "Horizontal Alignment", slint_testing.AccessibleRole.RadioGroup
+        )
+        choice = element(group, button, role=slint_testing.AccessibleRole.RadioButton)
+        expect(choice).to_be_checked()
+        choice.single_click(slint_testing.PointerEventButton.Left)
+        snapshot.wait_for_applied(
+            replace_once(
+                baseline,
+                f"horizontal-alignment: {initial};".encode(),
+                f"horizontal-alignment: {value};".encode(),
+            ),
+            INSPECTOR_SOURCE,
+        )
+
+
+@pytest.mark.parametrize("value", ("start", "end"))
+def test_alignment_context_menu_preserves_logical_options(
+    editor_binary, editor_environment, fixture_project, value
+):
+    source = fixture_project / INSPECTOR_SOURCE
+    baseline = replace_once(
+        source.read_bytes(),
+        b"horizontal-alignment: start;",
+        b"horizontal-alignment: center;",
+    )
+    source.write_bytes(baseline)
+    snapshot = SourceSnapshot.capture(fixture_project)
+    with launch_editor(editor_binary, editor_environment, source) as editor:
+        window = first_window(editor)
+        select_element(window, "StyledText")
+        group = inspector_field(
+            window, "Horizontal Alignment", slint_testing.AccessibleRole.RadioGroup
+        )
+        group.single_click(slint_testing.PointerEventButton.Right)
+        element(window, value.capitalize()).single_click(
+            slint_testing.PointerEventButton.Left
+        )
+        snapshot.wait_for_applied(
+            replace_once(
+                baseline,
+                b'text: @markdown("**Styled** text");\n        horizontal-alignment: center;',
+                f'text: @markdown("**Styled** text");\n        horizontal-alignment: {value};'.encode(),
+            ),
+            INSPECTOR_SOURCE,
+        )
+        press_shortcut(window, keys.Control, "z")
+        snapshot.wait_for_applied(baseline, INSPECTOR_SOURCE)

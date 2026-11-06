@@ -6,7 +6,9 @@ mod binding_analysis;
 mod border_radius;
 mod check_drag_area;
 mod check_expressions;
+mod check_nested_text_inputs;
 mod check_public_api;
+mod check_slot_defaults;
 mod clip;
 mod collect_custom_fonts;
 mod collect_globals;
@@ -30,6 +32,7 @@ mod inject_debug_hooks;
 pub use inject_debug_hooks::property_id;
 mod inlining;
 mod key_bindings;
+mod listview;
 mod lower_absolute_coordinates;
 mod lower_accessibility;
 mod lower_component_container;
@@ -53,6 +56,7 @@ mod optimize_useless_rectangles;
 #[cfg(test)]
 pub(crate) use optimize_useless_rectangles::optimize_useless_rectangles;
 mod purity_check;
+mod redundant_property_bindings;
 mod remove_aliases;
 mod remove_constant_conditions;
 mod remove_return;
@@ -142,11 +146,13 @@ pub async fn run_passes(
             &palette,
             diag,
         );
+        let edition = component.root_element.borrow().edition();
         lower_states::lower_states(
             component,
             &doc.local_registry,
             &symbol_counters,
             &mut forwarded_references,
+            edition,
             diag,
         );
         lower_text_input_interface::lower_text_input_interface(component);
@@ -173,7 +179,18 @@ pub async fn run_passes(
         return raw_type_loader;
     }
 
+    let mut checked_components = std::collections::HashSet::new();
+    doc.visit_all_used_components(|component| {
+        if checked_components.insert(std::rc::Rc::as_ptr(component)) {
+            listview::check_children_in_flickable(component, diag);
+        }
+    });
+
     inlining::inline(doc, inlining::InlineSelection::InlineOnlyRequiredComponents, diag);
+    doc.visit_all_used_components(|component| {
+        listview::lower_ensure_row_visible(component, diag);
+    });
+
     collect_subcomponents::collect_subcomponents(doc);
     let diagnostics_before_typed_slots = diag.iter().count();
     doc.visit_all_used_components(|component| {
@@ -209,8 +226,8 @@ pub async fn run_passes(
         lower_layout::lower_layouts(component, type_loader, &style_metrics, diag);
         default_geometry::default_geometry(component, diag, &symbol_counters);
         crate::layout::mark_repeated_cells_child_of_layout(component);
-        lower_layout::optimize_single_cell_layouts(component);
         lower_layout::synthesize_layoutinfo_v_with_constraint(component);
+        lower_layout::optimize_single_cell_layouts(component);
         lower_absolute_coordinates::lower_absolute_coordinates(component);
         z_order::reorder_by_z_order(component);
         lower_property_to_element::lower_property_to_element(
@@ -249,6 +266,11 @@ pub async fn run_passes(
     for root_component in doc.exported_roots() {
         lower_layout::check_window_layout(&root_component);
     }
+    // After the loop above: needs the roles `lower_accessibility_properties` gives the
+    // built-in elements, in every component the walk reaches.
+    if type_loader.compiler_config.accessibility {
+        check_nested_text_inputs::check_nested_text_inputs(doc, diag);
+    }
     collect_globals::collect_globals(doc, diag);
     // Must be done before passes that rely on `NamedReference::is_constant`.
     collect_globals::mark_library_globals(doc);
@@ -257,6 +279,7 @@ pub async fn run_passes(
         inlining::inline(doc, inlining::InlineSelection::InlineAllComponents, diag);
         doc.used_types.borrow_mut().sub_components.clear();
     }
+    default_geometry::adjust_image_clip_rects(doc);
 
     let global_analysis =
         binding_analysis::binding_analysis(doc, &type_loader.compiler_config, diag);
@@ -292,7 +315,7 @@ pub async fn run_passes(
         deduplicate_property_read::deduplicate_property_read(component);
     });
 
-    remove_unused_properties::remove_unused_properties(doc);
+    remove_unused_properties::remove_unused_properties(doc, type_loader.compiler_config.debug_info);
 
     // With debug hooks enabled, every synthetic hook must by now either have been upgraded
     // (by a pass computing the property's value or by inlining merging the definition's
@@ -416,9 +439,11 @@ pub fn run_import_passes(
     infer_aliases_types::resolve_aliases(doc, diag, &type_loader.symbol_counters);
     validate_interfaces::validate_interfaces(doc, diag);
     resolving::resolve_expressions(doc, type_loader, diag);
+    check_slot_defaults::check_slot_defaults(doc, diag);
     purity_check::purity_check(doc, diag);
     focus_handling::replace_forward_focus_bindings_with_focus_functions(doc, diag);
     check_expressions::check_expressions(doc, diag);
     windows::warn_about_child_windows(doc, diag);
     unique_id::check_unique_id(doc, diag);
+    redundant_property_bindings::check_redundant_property_bindings(doc, diag);
 }

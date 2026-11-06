@@ -6,14 +6,16 @@
 use crate::diagnostics::BuildDiagnostics;
 use crate::diagnostics::SourceLocation;
 use crate::diagnostics::Spanned;
+use crate::element_type::{ElementType, PropertyLookupMode};
 use crate::expression_tree::*;
-use crate::langtype::ElementType;
-use crate::langtype::{PropertyLookupMode, Type};
+use crate::expression_types::Unit;
+use crate::langtype::Type;
 use crate::object_tree::forward_inherited_expression::{
     ForwardedReferenceCache, InheritedExpression, follow_two_way_bindings,
     forward_inherited_expression, rebase_expression_to_instance,
 };
 use crate::object_tree::*;
+use crate::project_file::SlintEdition;
 use crate::symbol_counters::SymbolCounters;
 use crate::typeregister::TypeRegister;
 use smol_str::SmolStr;
@@ -25,8 +27,13 @@ pub fn lower_states(
     tr: &TypeRegister,
     symbol_counters: &SymbolCounters,
     forwarded_references: &mut ForwardedReferenceCache,
+    edition: Option<SlintEdition>,
     diag: &mut BuildDiagnostics,
 ) {
+    // Before edition 1.19, a property that only some states set takes its type's default, such
+    // as 0px, while none of them applies (#8852). Marking the binding `from_state` makes the
+    // passes that supply a default fill that fallback instead.
+    let keep_default_value = edition.is_some_and(|edition| edition >= SlintEdition::V1_19);
     let state_info_type =
         crate::typeregister::builtin_structs::get(&crate::langtype::BuiltinStruct::StateInfo)
             .into();
@@ -37,6 +44,7 @@ pub fn lower_states(
             tr,
             symbol_counters,
             forwarded_references,
+            keep_default_value,
             diag,
         )
     });
@@ -48,6 +56,7 @@ fn lower_state_in_element(
     tr: &TypeRegister,
     symbol_counters: &SymbolCounters,
     forwarded_references: &mut ForwardedReferenceCache,
+    keep_default_value: bool,
     diag: &mut BuildDiagnostics,
 ) {
     if root_element.borrow().states.is_empty() {
@@ -122,7 +131,7 @@ fn lower_state_in_element(
                 // `property_expr` (the false-branch of `new_expr`), so replacing it is correct.
                 let mut cell = cell.borrow_mut();
                 if !cell.has_binding() {
-                    cell.from_state = true;
+                    cell.from_state = keep_default_value;
                     cell.priority = 1;
                     cell.from_source = true;
                 }
@@ -130,7 +139,7 @@ fn lower_state_in_element(
             } else {
                 let mut r = BindingExpression::from(new_expr);
                 r.priority = 1;
-                r.from_state = true;
+                r.from_state = keep_default_value;
                 r.from_source = true;
                 element.borrow_mut().set_binding(name.clone(), r);
             }

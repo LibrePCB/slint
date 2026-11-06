@@ -661,8 +661,10 @@ impl Window {
         // Only clone the event when a hook is installed to avoid allocation on the hot path.
         // Events a backend delivers in the internal representation are reported as the public
         // event they correspond to, if there is one.
-        let hook_installed =
-            self.0.try_context().is_some_and(|ctx| ctx.0.window_event_hook.borrow().is_some());
+        let hook_installed = self
+            .0
+            .try_context()
+            .is_some_and(|ctx| ctx.platform_context().window_event_hook.borrow().is_some());
         let event_for_hook = hook_installed
             .then(|| match &event {
                 crate::platform::WindowEvent::Internal(event) => event.public_representation(),
@@ -690,15 +692,17 @@ impl Window {
                     event_time: None,
                 })
                 .into(),
-            crate::platform::WindowEvent::PointerMoved { position } => self
-                .0
-                .process_mouse_input(MouseEvent::Moved {
-                    position: position.to_euclid().cast(),
-                    touch_finger_id: 0,
-                    event_time: None,
-                    history: Default::default(),
-                })
-                .into(),
+            crate::platform::WindowEvent::PointerMoved { position } => {
+                self.0.software_cursor_position.set(Some(position.to_euclid().cast()));
+                self.0
+                    .process_mouse_input(MouseEvent::Moved {
+                        position: position.to_euclid().cast(),
+                        touch_finger_id: 0,
+                        event_time: None,
+                        history: Default::default(),
+                    })
+                    .into()
+            }
             crate::platform::WindowEvent::PointerScrolled { position, delta_x, delta_y } => self
                 .0
                 .process_mouse_input(MouseEvent::Wheel {
@@ -712,6 +716,7 @@ impl Window {
                 // Teardown event — the runtime always acts on it (clears hover/grab state
                 // and dispatches Exit to the item stack), so report Accepted unconditionally
                 // rather than asking the hit-test whether anything consumed it.
+                self.0.software_cursor_position.set(None);
                 self.0.process_mouse_input(MouseEvent::Exit);
                 WindowEventDispatchResult::Accepted
             }
@@ -748,12 +753,14 @@ impl Window {
                 self.0.set_window_item_geometry(size.to_euclid());
                 self.0.window_adapter().renderer().resize(size.to_physical(self.scale_factor()))?;
                 if let Some(item_rc) = self.0.focus_item.borrow().upgrade() {
-                    item_rc.try_scroll_into_visible();
+                    item_rc.try_scroll_into_visible(crate::items::ScrollBehavior::Instant);
                 }
                 WindowEventDispatchResult::Accepted
             }
             crate::platform::WindowEvent::CloseRequested => {
-                if self.0.request_close() {
+                if self.0.close_as_popup() {
+                    WindowEventDispatchResult::Accepted
+                } else if self.0.request_close() {
                     self.hide()?;
                     WindowEventDispatchResult::Accepted
                 } else {
@@ -787,7 +794,7 @@ impl Window {
         };
         if let Some(event_for_hook) = event_for_hook
             && let Some(ctx) = self.0.try_context()
-            && let Some(hook) = ctx.0.window_event_hook.borrow().as_ref()
+            && let Some(hook) = ctx.platform_context().window_event_hook.borrow().as_ref()
         {
             hook(&self.0.window_adapter(), &event_for_hook, dispatch_result.clone());
         }
@@ -857,6 +864,7 @@ impl Window {
 /// ```rust
 /// # i_slint_backend_testing::init_no_event_loop();
 /// slint::slint!{
+/// #[edition = "1.19"]
 /// export global Palette {
 ///     in property<color> foreground-color;
 ///     in property<color> background-color;
@@ -906,6 +914,7 @@ impl Window {
 /// ```rust
 /// # i_slint_backend_testing::init_no_event_loop();
 /// slint::slint!{
+/// #[edition = "1.19"]
 /// export global Palette {
 ///     in property<color> foreground-color;
 ///     in property<color> background-color;
@@ -960,6 +969,7 @@ pub trait Global<'a, Component> {
 /// ```
 /// # i_slint_backend_testing::init_no_event_loop();
 /// slint::slint!{
+///     #[edition = "1.19"]
 ///     export component App inherits Window {
 ///         in-out property <int> counter: 0;
 ///         callback do_something;
@@ -997,6 +1007,7 @@ pub trait Global<'a, Component> {
 /// ```
 /// # i_slint_backend_testing::init_no_event_loop();
 /// slint::slint!{
+///    #[edition = "1.19"]
 ///    export global MyGlobal {}
 ///
 ///    export component App inherits Window {}
@@ -1214,7 +1225,7 @@ mod weak_handle {
         /// # Example
         /// ```rust
         /// # i_slint_backend_testing::init_no_event_loop();
-        /// slint::slint! { export component MyApp inherits Window { in property <int> foo; /* ... */ } }
+        /// slint::slint! { #[edition = "1.19"] export component MyApp inherits Window { in property <int> foo; /* ... */ } }
         /// let handle = MyApp::new().unwrap();
         /// let handle_weak = handle.as_weak();
         /// let thread = std::thread::spawn(move || {
@@ -1274,7 +1285,7 @@ pub use weak_handle::*;
 ///
 /// # Example
 /// ```rust
-/// slint::slint! { export component MyApp inherits Window { in property <int> foo; /* ... */ } }
+/// slint::slint! { #[edition = "1.19"] export component MyApp inherits Window { in property <int> foo; /* ... */ } }
 /// # i_slint_backend_testing::init_no_event_loop();
 /// let handle = MyApp::new().unwrap();
 /// let handle_weak = handle.as_weak();

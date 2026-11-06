@@ -15,6 +15,7 @@
 #    include "private/slint_interpreter_internal.h"
 
 #    include <optional>
+#    include <filesystem>
 
 #    ifdef SLINT_FEATURE_BACKEND_QT
 class QWidget;
@@ -599,11 +600,11 @@ public:
     /// Returns the Window associated with this component. The window API can be used
     /// to control different aspects of the integration into the windowing system,
     /// such as the position on the screen.
-    const slint::Window &window() const
+    slint::Window &window() const
     {
         const cbindgen_private::WindowAdapterRcOpaque *win_ptr = nullptr;
         cbindgen_private::slint_interpreter_component_instance_window(inner(), &win_ptr);
-        return *reinterpret_cast<const slint::Window *>(win_ptr);
+        return *const_cast<slint::Window *>(reinterpret_cast<const slint::Window *>(win_ptr));
     }
     /// This is a convenience function that first calls show(), followed by
     /// slint::run_event_loop() and hide().
@@ -832,6 +833,8 @@ public:
 ///
 /// The ComponentDefinition acts as a factory to create new instances. When you've finished
 /// creating the instances it is safe to destroy the ComponentDefinition.
+///
+/// Copies of a ComponentDefinition share the same underlying data, so copying is cheap.
 class ComponentDefinition
 {
     friend class ComponentCompiler;
@@ -985,8 +988,6 @@ class ComponentCompiler
 public:
     /// Constructs a new ComponentCompiler instance.
     ///
-    /// A `slint-project.json` next to the compiled `.slint` file, or in a directory above
-    /// it, provides the settings. What you set below wins over it.
     ComponentCompiler() { cbindgen_private::slint_interpreter_component_compiler_new(&inner); }
 
     /// Destroys this ComponentCompiler.
@@ -996,14 +997,13 @@ public:
     }
 
     /// Sets the include paths used for looking up `.slint` imports to the specified vector of
-    /// paths. This wins over the include paths of the project file.
+    /// paths. These paths come before the include paths of the project file.
     void set_include_paths(const slint::SharedVector<slint::SharedString> &paths)
     {
         cbindgen_private::slint_interpreter_component_compiler_set_include_paths(&inner, &paths);
     }
 
     /// Sets the style to be used for widgets.
-    /// This wins over the style of the project file.
     void set_style(std::string_view style)
     {
         cbindgen_private::slint_interpreter_component_compiler_set_style(
@@ -1023,6 +1023,38 @@ public:
     {
         cbindgen_private::slint_interpreter_component_compiler_set_translation_domain(
                 &inner, slint::private_api::string_to_slice(domain));
+    }
+
+    /// Sets a custom file loader for the compiler.
+    /// The callback is invoked with a `const std::filesystem::path&` and should return the file
+    /// contents as a `std::optional<std::string>`, throw an `std::exception`, or return
+    /// `std::nullopt` to use default resolution behaviour.
+    /// `[](const std::filesystem::path& path) -> std::optional<std::string>`
+    template<std::invocable<const std::filesystem::path &> F>
+        requires(std::is_convertible_v<std::invoke_result_t<F, const std::filesystem::path &>,
+                                       std::optional<std::string>>)
+    void set_file_loader(F callback)
+    {
+        using namespace cbindgen_private;
+        cbindgen_private::slint_interpreter_component_compiler_set_file_loader(
+                &inner,
+                [](void *data, Slice<PathValueType> path_units,
+                   SharedString *out) -> FileLoaderResult {
+                    std::filesystem::path path;
+                    path.assign(std::basic_string_view(path_units.ptr, path_units.len));
+                    try {
+                        auto result = (*static_cast<F *>(data))(path);
+                        if (result.has_value()) {
+                            *out = result.value();
+                            return FileLoaderResult::Found;
+                        }
+                        return FileLoaderResult::NotFound;
+                    } catch (const std::exception &e) {
+                        *out = e.what();
+                        return FileLoaderResult::Error;
+                    }
+                },
+                new F(std::move(callback)), [](void *data) { delete static_cast<F *>(data); });
     }
 
     /// Returns the include paths the component compiler is currently configured with.
@@ -1073,7 +1105,10 @@ public:
     ///
     /// \a path must be UTF-8 encoded; otherwise this function fails.
     ///
-    /// If `path` is a `slint-project.json`, its `entry` is compiled with its settings.
+    /// If `path` is a project file (`slint-project.json`) or a directory that contains one,
+    /// Slint loads that project file. The project file provides the settings not set on this
+    /// compiler. It must contain a `main` entry, which specifies the `.slint` file the compiler
+    /// loads. A `.slint` file path compiles without loading a project file.
     ///
     /// Returns the compiled `ComponentDefinition` if there were no errors.
     ///

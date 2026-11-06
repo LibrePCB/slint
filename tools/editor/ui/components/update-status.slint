@@ -35,22 +35,22 @@ export global UpdateStatus {
 
     public pure function label() -> string {
         if Api.update-state == UpdateState.Available {
-            return "Install update";
+            return @tr("Install update");
         }
         if Api.update-state == UpdateState.Downloading {
-            return "Downloading";
+            return @tr("Downloading");
         }
         if Api.update-state == UpdateState.ReadyToInstall {
-            return "Update ready";
+            return @tr("Update ready");
         }
         if Api.update-state == UpdateState.Installing {
-            return "Installing";
+            return @tr("Installing");
         }
         if Api.update-state == UpdateState.RestartRequired {
-            return "Restart to update";
+            return @tr("Restart to update");
         }
         if Api.update-state == UpdateState.Error {
-            return Api.update-error != "" ? Api.update-error : "Update failed";
+            return Api.update-error != "" ? Api.update-error : @tr("Update failed");
         }
         return "";
     }
@@ -106,7 +106,6 @@ export component UpdateStatusPill inherits Rectangle {
 
     TouchArea {
         enabled: UpdateStatus.clickable();
-        mouse-cursor: UpdateStatus.clickable() ? pointer : default;
         clicked => {
             Api.check-for-update();
         }
@@ -154,7 +153,6 @@ export component UpdateStatusBar inherits Rectangle {
 
             TouchArea {
                 enabled: UpdateStatus.clickable();
-                mouse-cursor: UpdateStatus.clickable() ? pointer : default;
                 clicked => {
                     Api.check-for-update();
                 }

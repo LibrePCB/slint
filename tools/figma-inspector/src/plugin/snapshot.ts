@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: MIT
 
+import type { CaptureTimings } from "../performance/capture-timing";
+
 import { pngDimensions as readPngDimensions } from "../images";
 
 import {
@@ -299,7 +301,12 @@ export type Diagnostic = {
     readonly nodePath?: string;
     readonly originalValue?: string;
     readonly fallbackAction?: string;
-    readonly category?: "approximation" | "image" | "omission" | "geometry";
+    readonly category?:
+        | "approximation"
+        | "image"
+        | "omission"
+        | "geometry"
+        | "export";
     readonly message: string;
 };
 
@@ -310,6 +317,8 @@ export type CaptureWork = {
     readonly pngExports: number;
     readonly svgExports: number;
     readonly textCacheHits: number;
+    readonly pngByType?: Readonly<Record<string, number>>;
+    readonly svgByType?: Readonly<Record<string, number>>;
 };
 
 export type CaptureMetrics = {
@@ -318,6 +327,8 @@ export type CaptureMetrics = {
     readonly exports: number;
     readonly cacheHits: number;
     readonly work?: CaptureWork;
+    readonly sourceCacheHit?: boolean;
+    readonly timings?: CaptureTimings;
 };
 
 export type CaptureResult =

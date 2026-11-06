@@ -12,16 +12,20 @@ use std::rc::Rc;
 
 use by_address::ByAddress;
 
+use crate::builtin_functions::BuiltinFunction;
 use crate::diagnostics::{BuildDiagnostics, ByteFormat, SourceLocation, Spanned};
-use crate::expression_tree::{BindingExpression, BuiltinFunction, Expression};
-use crate::langtype::{ElementType, Type};
-use crate::layout::{LayoutItem, Orientation};
+use crate::element_type::{BuiltinElement, ElementType};
+use crate::expression_tree::{BindingExpression, Expression};
+use crate::expression_types::{Orientation, Unit};
+use crate::langtype::Type;
+use crate::layout::LayoutItem;
 use crate::namedreference::NamedReference;
 use crate::object_tree::{Document, Element, ElementRc, PropertyAnimation, find_parent_element};
 use derive_more as dm;
 
 use crate::CompilerConfiguration;
 use crate::expression_tree::Callable;
+use crate::project_file::SlintEdition;
 use smol_str::{SmolStr, ToSmolStr};
 
 /// Represent the kind of property for the DefaultFontSize based on the `default-font-size`` property of every `Window``
@@ -460,7 +464,7 @@ fn analyze_binding(
     // so the expression of a property aliased to this one is a dependency of this binding too.
     // The other direction is covered by the `two_way_bindings` loop above.
     let mut aliased_deps = Vec::new();
-    for alias in reverse_aliases.get(&current.prop).into_iter().flatten() {
+    for alias in transitive_reverse_aliases(&current.prop, reverse_aliases) {
         let element = alias.element();
         let element_borrow = element.borrow();
         if let Some(alias_binding) = element_borrow.binding(alias.name()) {
@@ -589,8 +593,6 @@ fn report_binding_loop(
     // The bindings of the cycle that have a place in the source. A synthetic element (eg. the
     // Flickable's content element) has none; the rest of the cycle is still reported.
     let mut reportable = Vec::new();
-    // Skip a cycle whose bindings were all reported already: most often it's one reported cycle
-    // entered from another of its properties. One that shares only some is another loop.
     let mut all_reported = true;
     for it in &cycle {
         let elem = it.prop.element();
@@ -612,7 +614,18 @@ fn report_binding_loop(
         };
         reportable.push((*it, span, rank));
     }
-    if all_reported {
+    // Skip a cycle whose bindings were all reported already: most often it's one reported cycle
+    // entered from another of its properties. One that shares only some is another loop.
+    // From edition 1.19, an error one is still reported: it may be a shorter loop inside an
+    // earlier one, such as a warning through the window layout.
+    let is_error = context.error_on_binding_loop_with_window_layout || !has_window_layout;
+    let has_binding_of_edition_1_19 = || {
+        reportable
+            .iter()
+            .filter_map(|(_, span, _)| span.source_file.as_ref())
+            .any(|file| file.edition() >= Some(SlintEdition::V1_19))
+    };
+    if all_reported && !(is_error && has_binding_of_edition_1_19()) {
         return;
     }
     // Of equal blame, one in the user's own file over one in a widget, then the one written
@@ -631,7 +644,6 @@ fn report_binding_loop(
     };
     // Skip, too, a cycle that would only point where earlier loops already did, such as one
     // through another instance of the same component. A warning there doesn't hide an error.
-    let is_error = context.error_on_binding_loop_with_window_layout || !has_window_layout;
     let covered = |span: &SourceLocation| {
         context.loop_reported_at.get(&place(span)).is_some_and(|was_error| *was_error || !is_error)
     };
@@ -804,6 +816,23 @@ fn describe_loop(current: &PropertyPath, cycle: &[&PropertyPath]) -> String {
     out
 }
 
+fn transitive_reverse_aliases(
+    prop: &NamedReference,
+    reverse_aliases: &ReverseAliases,
+) -> Vec<NamedReference> {
+    let mut result = Vec::new();
+    let mut pending = vec![prop];
+    while let Some(p) = pending.pop() {
+        for alias in reverse_aliases.get(p).into_iter().flatten() {
+            if alias != prop && !result.contains(alias) {
+                result.push(alias.clone());
+                pending.push(alias);
+            }
+        }
+    }
+    result
+}
+
 /// Find properties two-way-bound (via `<=>`) to `prop`, ascending through base components
 /// when the alias was declared there rather than on `prop`'s own element.
 fn find_alias_targets(prop: &PropertyPath, reverse_aliases: &ReverseAliases) -> Vec<PropertyPath> {
@@ -933,8 +962,16 @@ fn recurse_expression(
     expr: &Expression,
     vis: &mut impl FnMut(&PropertyPath, ReadType),
 ) {
-    const P: ReadType = ReadType::PropertyRead;
     expr.visit(|sub| recurse_expression(elem, sub, vis));
+    visit_expression_reads(elem, expr, vis);
+}
+
+fn visit_expression_reads(
+    elem: &ElementRc,
+    expr: &Expression,
+    vis: &mut impl FnMut(&PropertyPath, ReadType),
+) {
+    const P: ReadType = ReadType::PropertyRead;
     match expr {
         Expression::PropertyReference(r) => vis(&r.clone().into(), P),
         Expression::LayoutCacheAccess { layout_cache_prop, .. } => {
@@ -1204,6 +1241,14 @@ fn recurse_expression(
                     }
                 }
             }
+            BuiltinFunction::EnsureVisible => {
+                if let Some(Expression::ElementReference(item)) = arguments.first() {
+                    vis(
+                        &NamedReference::new(&item.upgrade().unwrap(), SmolStr::default()).into(),
+                        P,
+                    );
+                }
+            }
             BuiltinFunction::ItemFontMetrics => {
                 if let Some(Expression::ElementReference(item)) = arguments.first() {
                     let item = item.upgrade().unwrap();
@@ -1470,7 +1515,7 @@ fn visit_cell_cross_axis_implicit_dependency(
 /// With `GivenByLayout`, the caller passes the item its width, so a
 /// height-for-width item's vertical info doesn't read it.
 fn visit_implicit_layout_info_dependencies(
-    orientation: crate::layout::Orientation,
+    orientation: crate::expression_types::Orientation,
     cross_size: CrossAxisSize,
     item: &ElementRc,
     vis: &mut impl FnMut(&PropertyPath, ReadType),
@@ -1531,7 +1576,7 @@ fn visit_implicit_layout_info_dependencies(
 }
 
 fn visit_builtin_property(
-    builtin: &crate::langtype::BuiltinElement,
+    builtin: &BuiltinElement,
     prop: &PropertyPath,
     context: &mut AnalysisContext,
     reverse_aliases: &ReverseAliases,
@@ -1594,9 +1639,7 @@ fn check_window_properties(doc: &Document, global_analysis: &mut GlobalAnalysis)
                         let value = elem.borrow().binding(DEFAULT_FONT_SIZE).and_then(|e| match e
                             .expression
                         {
-                            Expression::NumberLiteral(v, crate::expression_tree::Unit::Px) => {
-                                Some(v as f32)
-                            }
+                            Expression::NumberLiteral(v, Unit::Px) => Some(v as f32),
                             _ => None,
                         });
                         let is_const = value.is_some()

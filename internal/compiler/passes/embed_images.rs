@@ -4,9 +4,12 @@
 use crate::EmbedResourcesKind;
 use crate::diagnostics::BuildDiagnostics;
 use crate::embedded_resources::*;
-use crate::expression_tree::{Expression, ImageReference};
+use crate::expression_tree::Expression;
+use crate::expression_types::ImageReference;
 use crate::object_tree::*;
 use crate::source_path::SourcePath;
+#[cfg(feature = "renderer-software")]
+use i_slint_common::pre_rendered::{IntRect, IntSize, StaticTexture, TexturePixelFormat};
 #[cfg(feature = "renderer-software")]
 use image::GenericImageView;
 use smol_str::SmolStr;
@@ -88,6 +91,26 @@ pub async fn embed_images(
 struct ResourceIds {
     by_path: HashMap<SourcePath, EmbeddedResourcesIdx>,
     by_data_uri: HashMap<SmolStr, EmbeddedResourcesIdx>,
+    #[cfg(feature = "renderer-software")]
+    animated: std::collections::HashSet<EmbeddedResourcesIdx>,
+}
+
+#[cfg(feature = "renderer-software")]
+impl ResourceIds {
+    fn warn_if_animated(
+        &self,
+        resource_id: EmbeddedResourcesIdx,
+        diag: &mut BuildDiagnostics,
+        source_location: &Option<crate::diagnostics::SourceLocation>,
+    ) {
+        if self.animated.contains(&resource_id) {
+            diag.push_warning(
+                "Only the first frame of this animated image is embedded for the software renderer"
+                    .into(),
+                source_location,
+            );
+        }
+    }
 }
 
 /// The URL handed to the resource mapper, and the key of the mapped-resource
@@ -211,6 +234,8 @@ fn embed_image(
     let extension = || path.extension().unwrap_or_default().to_string();
 
     if let Some(&resource_id) = resource_ids.by_path.get(path) {
+        #[cfg(feature = "renderer-software")]
+        resource_ids.warn_if_animated(resource_id, diag, source_location);
         return match global_embedded_resources.borrow()[resource_id].kind {
             #[cfg(feature = "renderer-software")]
             EmbeddedResourcesKind::TextureData { .. } => {
@@ -264,13 +289,21 @@ fn embed_image(
 
     #[cfg(feature = "renderer-software")]
     if embed_files == EmbedResourcesKind::EmbedTextures {
-        return match load_image(_file, _scale_factor, _font_collection) {
-            Ok((img, source_format, original_size)) => {
+        let loaded = _file.read().map_err(image::ImageError::IoError).and_then(|data| {
+            load_image_from_bytes(&data, _file.extension(), _scale_factor, _font_collection)
+                .map(|loaded| (loaded, is_animated(&data)))
+        });
+        return match loaded {
+            Ok(((img, source_format, original_size), animated)) => {
                 let resource_id = push(EmbeddedResourcesKind::TextureData(generate_texture(
                     img,
                     source_format,
                     original_size,
                 )));
+                if animated {
+                    resource_ids.animated.insert(resource_id);
+                }
+                resource_ids.warn_if_animated(resource_id, diag, source_location);
                 ImageReference::EmbeddedTexture { resource_id }
             }
             Err(err) => {
@@ -303,7 +336,7 @@ impl Pixel for image::Rgba<u8> {
 fn generate_texture(
     image: image::RgbaImage,
     source_format: SourceFormat,
-    original_size: Size,
+    original_size: IntSize,
 ) -> Texture {
     // Analyze each pixels
     let mut top = 0;
@@ -319,7 +352,17 @@ fn generate_texture(
         top += 1;
     }
     if top == image.height() {
-        return Texture::new_empty();
+        return Texture {
+            size: IntSize::new(image.width(), image.height()),
+            original_size,
+            data: vec![0, 0, 0, 0],
+            textures: vec![StaticTexture {
+                rect: IntRect::new((0, 0).into(), (1, 1).into()),
+                format: TexturePixelFormat::Rgba,
+                color: 0,
+                index: 0,
+            }],
+        };
     }
     let mut bottom = image.height() - 1;
     while is_line_transparent(bottom) {
@@ -386,21 +429,23 @@ fn generate_texture(
         }
     }
 
-    let format = if let ColorState::Rgb(c) = color {
-        PixelFormat::AlphaMap(c)
-    } else if is_opaque {
-        PixelFormat::Rgb
-    } else {
-        PixelFormat::RgbaPremultiplied
+    let (format, color) = match color {
+        ColorState::Rgb([r, g, b]) => {
+            (TexturePixelFormat::AlphaMap, u32::from_be_bytes([0xff, r, g, b]))
+        }
+        _ if is_opaque => (TexturePixelFormat::Rgb, 0),
+        _ => (TexturePixelFormat::RgbaPremultiplied, 0),
     };
 
-    let rect = Rect::from_ltrb(left as _, top as _, (right + 1) as _, (bottom + 1) as _).unwrap();
+    let rect = IntRect::new(
+        (left as _, top as _).into(),
+        ((right + 1 - left) as _, (bottom + 1 - top) as _).into(),
+    );
     Texture {
-        total_size: Size { width: image.width(), height: image.height() },
+        size: IntSize::new(image.width(), image.height()),
         original_size,
-        rect,
         data: convert_image(image, source_format, format, rect),
-        format,
+        textures: vec![StaticTexture { rect, format, color, index: 0 }],
     }
 }
 
@@ -408,19 +453,20 @@ fn generate_texture(
 fn convert_image(
     image: image::RgbaImage,
     source_format: SourceFormat,
-    format: PixelFormat,
-    rect: Rect,
+    format: TexturePixelFormat,
+    rect: IntRect,
 ) -> Vec<u8> {
-    let i = image::SubImage::new(&image, rect.x() as _, rect.y() as _, rect.width(), rect.height());
+    let rect = rect.to_u32();
+    let i = image::SubImage::new(&image, rect.origin.x, rect.origin.y, rect.width(), rect.height());
     match (source_format, format) {
-        (_, PixelFormat::Rgb) => {
+        (_, TexturePixelFormat::Rgb) => {
             i.pixels().flat_map(|(_, _, p)| IntoIterator::into_iter(p.0).take(3)).collect()
         }
-        (SourceFormat::RgbaPremultiplied, PixelFormat::RgbaPremultiplied)
-        | (SourceFormat::Rgba, PixelFormat::Rgba) => {
+        (SourceFormat::RgbaPremultiplied, TexturePixelFormat::RgbaPremultiplied)
+        | (SourceFormat::Rgba, TexturePixelFormat::Rgba) => {
             i.pixels().flat_map(|(_, _, p)| IntoIterator::into_iter(p.0)).collect()
         }
-        (SourceFormat::Rgba, PixelFormat::RgbaPremultiplied) => i
+        (SourceFormat::Rgba, TexturePixelFormat::RgbaPremultiplied) => i
             .pixels()
             .flat_map(|(_, _, p)| {
                 let a = p.0[3] as u32;
@@ -430,7 +476,7 @@ fn convert_image(
                     .chain(std::iter::once(a as u8))
             })
             .collect(),
-        (SourceFormat::RgbaPremultiplied, PixelFormat::Rgba) => i
+        (SourceFormat::RgbaPremultiplied, TexturePixelFormat::Rgba) => i
             .pixels()
             .flat_map(|(_, _, p)| {
                 let a = p.0[3] as u32;
@@ -440,7 +486,8 @@ fn convert_image(
                     .chain(std::iter::once(a as u8))
             })
             .collect(),
-        (_, PixelFormat::AlphaMap(_)) => i.pixels().map(|(_, _, p)| p[3]).collect(),
+        (_, TexturePixelFormat::AlphaMap) => i.pixels().map(|(_, _, p)| p[3]).collect(),
+        (_, format) => unreachable!("the compiler doesn't produce {format:?} textures"),
     }
 }
 
@@ -481,7 +528,7 @@ fn load_image_from_bytes(
     extension: Option<&str>,
     scale_factor: f32,
     font_collection: Option<&SharedFontCollection>,
-) -> image::ImageResult<(image::RgbaImage, SourceFormat, Size)> {
+) -> image::ImageResult<(image::RgbaImage, SourceFormat, IntSize)> {
     use resvg::{tiny_skia, usvg};
 
     let is_svg = matches!(extension, Some("svg") | Some("svgz"));
@@ -523,7 +570,7 @@ fn load_image_from_bytes(
                 (
                     img,
                     SourceFormat::RgbaPremultiplied,
-                    Size { width: original_size.width() as _, height: original_size.height() as _ },
+                    IntSize::new(original_size.width() as _, original_size.height() as _),
                 )
             },
         );
@@ -540,21 +587,47 @@ fn load_image_from_bytes(
             );
         }
 
-        (
-            image.to_rgba8(),
-            SourceFormat::Rgba,
-            Size { width: original_width, height: original_height },
-        )
+        (image.to_rgba8(), SourceFormat::Rgba, IntSize::new(original_width, original_height))
     })
 }
 
+/// Detects animations like `load` in `internal/core/graphics/image/animated.rs`.
 #[cfg(feature = "renderer-software")]
-fn load_image(
-    file: SourcePath,
-    scale_factor: f32,
-    font_collection: Option<&SharedFontCollection>,
-) -> image::ImageResult<(image::RgbaImage, SourceFormat, Size)> {
-    load_image_from_bytes(&file.read()?, file.extension(), scale_factor, font_collection)
+fn is_animated(data: &[u8]) -> bool {
+    use image::AnimationDecoder;
+    let cursor = || std::io::Cursor::new(data);
+    let frames = || -> image::ImageResult<Option<image::Frames<'_>>> {
+        Ok(match image::guess_format(data)? {
+            image::ImageFormat::Png => {
+                let decoder = within_limits(image::codecs::png::PngDecoder::new(cursor())?)?;
+                if !decoder.is_apng()? {
+                    return Ok(None);
+                }
+                Some(decoder.apng()?.into_frames())
+            }
+            #[cfg(feature = "image-default-formats")]
+            image::ImageFormat::Gif => {
+                Some(within_limits(image::codecs::gif::GifDecoder::new(cursor())?)?.into_frames())
+            }
+            #[cfg(feature = "image-default-formats")]
+            image::ImageFormat::WebP => {
+                let decoder = within_limits(image::codecs::webp::WebPDecoder::new(cursor())?)?;
+                decoder.has_animation().then(|| decoder.into_frames())
+            }
+            _ => None,
+        })
+    };
+    frames().ok().flatten().is_some_and(|frames| frames.take(2).filter(Result::is_ok).count() == 2)
+}
+
+/// Applies the runtime's decoding limits,
+/// see `with_default_limits` in `internal/core/graphics/image/animated.rs`.
+#[cfg(feature = "renderer-software")]
+fn within_limits<D: image::ImageDecoder>(mut decoder: D) -> image::ImageResult<D> {
+    let (width, height) = decoder.dimensions();
+    image::Limits::default().reserve_buffer(width, height, image::ColorType::Rgba8)?;
+    decoder.set_limits(image::Limits::default())?;
+    Ok(decoder)
 }
 
 fn embed_data_uri(
@@ -568,6 +641,8 @@ fn embed_data_uri(
     _font_collection: Option<&SharedFontCollection>,
 ) -> ImageReference {
     if let Some(&resource_id) = resource_ids.by_data_uri.get(data_uri) {
+        #[cfg(feature = "renderer-software")]
+        resource_ids.warn_if_animated(resource_id, diag, source_location);
         let resources = global_embedded_resources.borrow();
         return match &resources[resource_id].kind {
             #[cfg(feature = "renderer-software")]
@@ -604,14 +679,19 @@ fn embed_data_uri(
             _scale_factor,
             _font_collection,
         )
+        .map(|loaded| (loaded, is_animated(&decoded_data)))
         .map_err(|e| e.to_string())
         {
-            Ok((img, source_format, original_size)) => {
+            Ok(((img, source_format, original_size), animated)) => {
                 let resource_id = push(EmbeddedResourcesKind::TextureData(generate_texture(
                     img,
                     source_format,
                     original_size,
                 )));
+                if animated {
+                    resource_ids.animated.insert(resource_id);
+                }
+                resource_ids.warn_if_animated(resource_id, diag, source_location);
                 return ImageReference::EmbeddedTexture { resource_id };
             }
             Err(err) => {
